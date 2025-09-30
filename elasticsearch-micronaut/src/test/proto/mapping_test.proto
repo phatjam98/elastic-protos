@@ -1,0 +1,36 @@
+syntax = "proto3";
+package com.thepublichealthco.protos;
+
+option java_multiple_files = true;
+option java_package = "com.thepublichealthco.protos";
+option java_outer_classname = "MappingTestProto";
+
+message MappingTest {
+  double double_value = 1;
+  float float_value = 2;
+  int64 int64_value = 3;
+  uint64 uint64_value = 4;
+  fixed64 fixed64_value = 5;
+  sfixed64 sfixed64_value = 6;
+  sint64 sint64_value = 7;
+  int32 int32_value = 8;
+  uint32 uint32_value = 9;
+  fixed32 fixed32_value = 10;
+  sfixed32 sfixed32_value = 11;
+  sint32 sint32_value = 12;
+  bool bool_value = 13;
+  string string_value = 14;
+  enum Enum {
+    UNKNOWN = 0;
+    ONE = 1;
+    TWO = 2;
+  }
+  Enum enum_value = 15;
+  bytes bytes_value = 16;
+  message Nested {
+    string nested_string_value = 1;
+  }
+  Nested nested_value = 17;
+  string id = 18;
+  string wkt_centroid = 19;
+}

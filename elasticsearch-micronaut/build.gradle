@@ -1,0 +1,49 @@
+import org.gradle.api.tasks.testing.logging.TestExceptionFormat
+import org.gradle.api.tasks.testing.logging.TestLogEvent
+
+plugins {
+    // Apply the groovy plugin to also add support for Groovy (needed for Spock)
+    id 'groovy'
+
+    // Apply the java-library plugin for API and implementation separation.
+    id 'elastic-protos.library-conventions'
+    id 'io.micronaut.library' version "4.0.3"
+}
+
+// Set the base name for all archives (JARs)
+archivesBaseName = 'elasticsearch-micronaut'
+
+// Java toolchain managed by conventions
+
+micronaut {
+    version "$micronautVersion"
+    importMicronautPlatform = true
+}
+
+jar {
+    manifest {
+        attributes(
+                "Implementation-Title": project.name,
+                "Implementation-Version": project.version
+        )
+    }
+}
+
+dependencies {
+    api(project(":elasticsearch-utils"))
+    implementation("com.google.guava:guava:32.1.2-jre")
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.15.2")
+
+    testAnnotationProcessor("io.micronaut:micronaut-inject-java")
+    testImplementation("io.micronaut.test:micronaut-test-spock")
+}
+
+jacocoTestCoverageVerification {
+    violationRules {
+        rule {
+            limit {
+                minimum = 0.3
+            }
+        }
+    }
+}

@@ -1,0 +1,82 @@
+plugins {
+    id "java-library"
+    id "maven-publish"
+    id 'org.jreleaser'
+    id "elastic-protos.java-conventions"
+}
+
+group = 'com.phatjam98'
+
+java {
+    withJavadocJar()
+    withSourcesJar()
+}
+
+jreleaser {
+    configFile = rootProject.file('jreleaser.yml')
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+            versionMapping {
+                usage('java-api') {
+                    fromResolutionOf('runtimeClasspath')
+                }
+                usage('java-runtime') {
+                    fromResolutionResult()
+                }
+            }
+            pom {
+                name = "${project.group}:${project.name}"
+                description = 'Elasticsearch Java library with Micronaut integration'
+                url = 'https://github.com/phatjam98/elastic-protos'
+                licenses {
+                    license {
+                        name = 'The Apache License, Version 2.0'
+                        url = 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+                    }
+                }
+                developers {
+                    developer {
+                        id = 'phatjam'
+                        name = 'Travis Carter'
+                        email = 'phatjam98@gmail.com'
+                    }
+                }
+                scm {
+                    connection = 'scm:git:git://github.com/phatjam98/elastic-protos.git'
+                    developerConnection = 'scm:git:ssh://github.com/phatjam98/elastic-protos.git'
+                    url = 'https://github.com/phatjam98/elastic-protos'
+                }
+            }
+        }
+    }
+    repositories {
+        maven {
+            name = 'staging'
+            url = layout.buildDirectory.dir("staging-deploy")
+        }
+    }
+}
+
+tasks.named('jreleaserFullRelease') {
+    dependsOn 'publishMavenJavaPublicationToStagingRepository'
+}
+
+javadoc {
+    if(JavaVersion.current().isJava9Compatible()) {
+        options.addBooleanOption('html5', true)
+    }
+}
+
+protobuf {
+    protoc { artifact = "com.google.protobuf:protoc:3.23.4" }
+    plugins {
+        grpc { artifact = "io.grpc:protoc-gen-grpc-java:1.57.0" }
+    }
+    generateProtoTasks {
+        all()*.plugins { grpc {} }
+    }
+}

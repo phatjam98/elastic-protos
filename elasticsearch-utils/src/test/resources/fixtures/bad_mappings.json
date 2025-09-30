@@ -1,0 +1,237 @@
+{
+  "properties": {
+    "baseData": {
+      "type": "nested",
+      "properties": {
+        "date": {
+          "type": "integer"
+        },
+        "location": {
+          "type": "nested",
+          "properties": {
+            "administrativeAreaLevel1": {
+              "type": "keyword"
+            },
+            "administrativeAreaLevel1Short": {
+              "type": "keyword"
+            },
+            "administrativeAreaLevel2": {
+              "type": "keyword"
+            },
+            "administrativeAreaLevel2Short": {
+              "type": "keyword"
+            },
+            "country": {
+              "type": "keyword"
+            },
+            "countryShort": {
+              "type": "keyword"
+            },
+            "locality": {
+              "type": "keyword"
+            },
+            "localityShort": {
+              "type": "keyword"
+            },
+            "postalCode": {
+              "type": "keyword"
+            },
+            "streetName": {
+              "type": "keyword"
+            },
+            "streetNameShort": {
+              "type": "keyword"
+            },
+            "streetNumber": {
+              "type": "keyword"
+            },
+            "sublocality": {
+              "type": "keyword"
+            },
+            "sublocalityShort": {
+              "type": "keyword"
+            }
+          }
+        },
+        "locationId": {
+          "type": "keyword"
+        },
+        "wktCentroids": {
+          "type": "geo_shape"
+        }
+      }
+    },
+    "indicators": {
+      "type": "nested",
+      "properties": {
+        "name": {
+          "type": "keyword"
+        },
+        "values": {
+          "type": "nested",
+          "properties": {
+            "fields": {
+              "type": "nested",
+              "properties": {
+                "key": {
+                  "type": "keyword"
+                },
+                "name": {
+                  "properties": {
+                    "stringValue": {
+                      "type": "text",
+                      "fields": {
+                        "keyword": {
+                          "type": "keyword",
+                          "ignore_above": 256
+                        }
+                      }
+                    }
+                  }
+                },
+                "value": {
+                  "type": "nested",
+                  "properties": {
+                    "boolValue": {
+                      "type": "boolean"
+                    },
+                    "geoBoundingBoxValue": {
+                      "type": "nested",
+                      "properties": {
+                        "bottomRight": {
+                          "type": "nested",
+                          "properties": {
+                            "lat": {
+                              "type": "double"
+                            },
+                            "lon": {
+                              "type": "double"
+                            }
+                          }
+                        },
+                        "topLeft": {
+                          "type": "nested",
+                          "properties": {
+                            "lat": {
+                              "type": "double"
+                            },
+                            "lon": {
+                              "type": "double"
+                            }
+                          }
+                        },
+                        "wkt": {
+                          "type": "keyword"
+                        }
+                      }
+                    },
+                    "geoDistanceValue": {
+                      "type": "nested",
+                      "properties": {
+                        "distance": {
+                          "type": "keyword"
+                        },
+                        "distanceType": {
+                          "type": "keyword"
+                        },
+                        "point": {
+                          "type": "nested",
+                          "properties": {
+                            "lat": {
+                              "type": "double"
+                            },
+                            "lon": {
+                              "type": "double"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "geoValue": {
+                      "type": "geo_shape"
+                    },
+                    "listValue": {
+                      "type": "nested",
+                      "properties": {
+                        "values": {
+                          "type": "nested",
+                          "properties": {
+                            "boolValue": {
+                              "type": "boolean"
+                            },
+                            "numberValue": {
+                              "type": "double"
+                            },
+                            "stringValue": {
+                              "type": "keyword"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "nullValue": {
+                      "type": "keyword"
+                    },
+                    "numberValue": {
+                      "type": "double"
+                    },
+                    "rangeValue": {
+                      "type": "nested",
+                      "properties": {
+                        "max": {
+                          "type": "double"
+                        },
+                        "maxInclusive": {
+                          "type": "boolean"
+                        },
+                        "min": {
+                          "type": "double"
+                        },
+                        "minInclusive": {
+                          "type": "boolean"
+                        }
+                      }
+                    },
+                    "stringValue": {
+                      "type": "keyword"
+                    },
+                    "timestampValue": {
+                      "type": "date"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "scores": {
+      "properties": {
+        "type": {
+          "type": "text",
+          "fields": {
+            "keyword": {
+              "type": "keyword",
+              "ignore_above": 256
+            }
+          }
+        },
+        "value": {
+          "type": "float"
+        }
+      }
+    },
+    "trends": {
+      "type": "nested",
+      "properties": {
+        "type": {
+          "type": "keyword"
+        },
+        "value": {
+          "type": "integer"
+        }
+      }
+    }
+  }
+}

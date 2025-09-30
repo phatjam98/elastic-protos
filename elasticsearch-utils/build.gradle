@@ -1,0 +1,42 @@
+import org.gradle.api.tasks.testing.logging.TestExceptionFormat
+import org.gradle.api.tasks.testing.logging.TestLogEvent
+
+plugins {
+    // Apply the groovy plugin to also add support for Groovy (needed for Spock)
+    id 'groovy'
+
+    // Apply the java-library plugin for API and implementation separation.
+    id 'elastic-protos.library-conventions'
+}
+
+// Set the base name for all archives (JARs)
+archivesBaseName = 'elasticsearch-utils'
+
+// Java toolchain managed by conventions
+
+jar {
+    manifest {
+        attributes(
+                "Implementation-Title": project.name,
+                "Implementation-Version": project.version
+        )
+    }
+}
+
+dependencies {
+    implementation("com.fasterxml.jackson.core:jackson-annotations:2.15.2")
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.15.2")
+    implementation 'jakarta.inject:jakarta.inject-api:2.0.1'
+    // TODO: Replace with open source proto library
+    // implementation("com.phatjam98:protos:$protosVersion")
+}
+
+jacocoTestCoverageVerification {
+    violationRules {
+        rule {
+            limit {
+                minimum = 0.6
+            }
+        }
+    }
+}

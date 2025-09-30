@@ -1,0 +1,102 @@
+syntax = "proto3";
+package com.phatjam98.protos;
+
+import "google/struct.proto";
+import "google/timestamp.proto";
+import "geobuf.proto";
+
+option go_package = "github.com/phatjam98/go-protos/core/common/proto/flat_struct";
+option java_package = "com.phatjam98.core.common.proto";
+option java_outer_classname = "FlatStructProtos";
+
+/* `Struct` represents a structured data value, consisting of fields
+ which map to dynamically typed values. In some languages, `Struct`
+ might be supported by a native representation. For example, in
+ scripting languages like JS a struct is represented as an
+ object. The details of that representation are described together
+ with the proto support for the language.
+ */
+
+// The JSON representation for `Struct` is JSON object.
+message FlatStruct {
+  map<string, FlatValue> fields = 1;  // Unordered map of dynamically typed values.
+}
+
+
+/* `Value` represents a dynamically typed value which can be either
+ null, a number, a string, a boolean, a recursive struct value, or a
+ list of values. A producer of value is expected to set one of that
+ variants, absence of any variant indicates an error.
+ */
+
+// The JSON representation for `Value` is JSON value.
+message FlatValue {
+  oneof kind {
+    google.protobuf.NullValue null_value = 1;
+    double number_value = 2;
+    string string_value = 3;
+    bool bool_value = 4;
+    google.protobuf.Timestamp timestamp_value = 7;
+    RangeValue range_value = 8;
+    Data geo_value = 9;
+    PrimitiveList list_value = 10;
+    GeoDistanceValue geo_distance_value = 11;
+    GeoBoundingBoxValue geo_bounding_box_value = 12;
+  }
+}
+
+// `NullValue` is a singleton enumeration to represent the null value for the
+// `Value` type union.
+//
+//  The JSON representation for `NullValue` is JSON `null`.
+// enum NullValue {
+//   NULL_VALUE = 0; // Null value.
+// }
+
+// `RangeValue` represents a numeric range definition
+message RangeValue {
+  double min = 1;
+  double max = 2;
+  bool min_inclusive = 3;
+  bool max_inclusive = 4;
+}
+
+// `PrimitiveValue` is a type that captures the possible primitives
+message PrimitiveValue {
+  oneof kind {
+    double number_value = 1;
+    string string_value = 2;
+    bool bool_value = 3;
+  }
+}
+
+// `PrimitiveList` is a type that captures a list of primitives, so FlatValue can support lists in a non-recursive way
+message PrimitiveList {
+  repeated PrimitiveValue values = 1;
+}
+
+message GeoDistanceValue {
+  LatLon point = 1;
+  string distance = 2;
+  DistanceType distance_type = 3;
+}
+
+/**
+How to compute the distance. Can either be arc (default), or plane (faster,
+but inaccurate on long distances and close to the poles).
+ */
+enum DistanceType {
+  ARC = 0;
+  PLANE = 1;
+}
+
+message GeoBoundingBoxValue {
+  string wkt = 1;
+  LatLon top_left = 2;
+  LatLon bottom_right = 3;
+}
+
+message LatLon {
+  double lat = 1;
+  double lon = 2;
+}

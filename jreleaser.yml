@@ -1,0 +1,102 @@
+project:
+  name: elastic-protos
+  description: Elasticsearch Java library with Micronaut integration
+  longDescription: |
+    A modern Java library providing high-level interfaces for Elasticsearch interactions, including client factory,
+    service layer, request builders, geo utilities, and comprehensive models for search operations.
+
+    Features:
+    - Multi-module architecture (Java 11 + Java 17)
+    - Protocol Buffer integration for type-safe queries
+    - Micronaut-based service layer with dependency injection
+    - Comprehensive query builders for Elasticsearch
+    - Geo utilities and bulk operations support
+    - High test coverage requirements (60% utils, 30% micronaut)
+  links:
+    homepage: https://github.com/phatjam98/elastic-protos
+    documentation: https://github.com/phatjam98/elastic-protos#readme
+  authors:
+    - Travis Carter
+  license: Apache-2.0
+  inceptionYear: 2024
+  stereotype: NONE
+  java:
+    groupId: com.phatjam98
+    version: 11
+
+release:
+  github:
+    enabled: true
+    skipRelease: false
+    host: github.com
+    owner: phatjam98
+    name: elastic-protos
+    tagName: 'v{{projectVersion}}'
+    releaseName: 'Elastic Protos {{projectVersion}}'
+    branch: main
+    branchPush: main
+    overwrite: false
+    draft: false
+    prerelease:
+      pattern: '.*(-SNAPSHOT|-alpha|-beta|-rc)'
+      enabled: true
+    issues:
+      enabled: true
+    milestone:
+      close: false
+    changelog:
+      enabled: true
+      formatted: ALWAYS
+      preset: conventional-commits
+
+signing:
+  active: ALWAYS
+  armored: true
+  verify: true
+  mode: MEMORY
+
+deploy:
+  maven:
+    pomchecker:
+      version: 1.11.0
+      failOnError: false
+      failOnWarning: false
+    mavenCentral:
+      release-deploy:
+        active: RELEASE
+        url: https://central.sonatype.com/api/v1/publisher
+        stagingRepositories:
+          - build/staging-deploy
+        applyMavenCentralRules: true
+        retryDelay: 60
+        maxRetries: 120
+        connectTimeout: 20
+        readTimeout: 60
+        checksums: true
+        sourceJar: true
+        javadocJar: true
+    nexus2:
+      snapshot-deploy:
+        active: SNAPSHOT
+        url: https://central.sonatype.com/repository/maven-snapshots/
+        snapshotUrl: https://central.sonatype.com/repository/maven-snapshots/
+        stagingRepositories:
+          - build/staging-deploy
+        applyMavenCentralRules: true
+        snapshotSupported: true
+        closeRepository: true
+        releaseRepository: true
+        stagingRepositories:
+          - build/staging-deploy
+
+files:
+  artifacts:
+    - path: elasticsearch-utils/build/libs/elasticsearch-utils-{{projectVersion}}.jar
+    - path: elasticsearch-utils/build/libs/elasticsearch-utils-{{projectVersion}}-sources.jar
+    - path: elasticsearch-utils/build/libs/elasticsearch-utils-{{projectVersion}}-javadoc.jar
+    - path: elasticsearch-micronaut/build/libs/elasticsearch-micronaut-{{projectVersion}}.jar
+    - path: elasticsearch-micronaut/build/libs/elasticsearch-micronaut-{{projectVersion}}-sources.jar
+    - path: elasticsearch-micronaut/build/libs/elasticsearch-micronaut-{{projectVersion}}-javadoc.jar
+
+announce:
+  enabled: false

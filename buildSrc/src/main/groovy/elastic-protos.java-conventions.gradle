@@ -1,0 +1,114 @@
+import org.gradle.api.tasks.testing.logging.TestExceptionFormat
+import org.gradle.api.tasks.testing.logging.TestLogEvent
+
+plugins {
+    id("java")
+    id("com.google.protobuf")
+    id("com.github.johnrengelman.shadow")
+    id("jacoco")
+    id("checkstyle")
+    id("maven-publish")
+}
+
+repositories {
+    maven { url "https://repo.osgeo.org/repository/release/" }
+    mavenCentral()
+    // TODO: Add your own artifact registry if needed
+}
+
+dependencies {
+    implementation("org.slf4j:slf4j-api:2.0.7")
+    implementation("com.google.protobuf:protobuf-java:3.23.4")
+    implementation('com.google.protobuf:protobuf-java-util:3.23.4')
+    // TODO: Replace with open source geobuf library
+    // implementation("com.phatjam98:geobuf:$geobufVersion")
+
+    // elasticsearch
+    implementation("co.elastic.clients:elasticsearch-java:7.17.12")
+    implementation("org.elasticsearch:elasticsearch:7.17.12")
+    implementation("org.elasticsearch.client:elasticsearch-rest-client:7.17.12")
+
+    testImplementation("ch.qos.logback:logback-classic:1.4.8")
+    testImplementation platform("org.spockframework:spock-bom:2.3-groovy-4.0")
+    testImplementation "org.spockframework:spock-core"
+    testImplementation 'org.apache.groovy:groovy-json:4.0.13'
+    testImplementation "org.testcontainers:spock:$testcontainersVersion"
+    testImplementation "org.testcontainers:elasticsearch:$testcontainersVersion"
+    testRuntimeOnly 'net.bytebuddy:byte-buddy:1.14.5'
+    testRuntimeOnly "org.objenesis:objenesis:3.3"
+}
+
+configurations.all {
+    resolutionStrategy {
+        cacheDynamicVersionsFor 5, "minutes"
+        force 'co.elastic.clients:elasticsearch-java:7.17.12'
+        force 'org.elasticsearch.client:elasticsearch-rest-client:7.17.12'
+        force 'org.elasticsearch:elasticsearch:7.17.12'
+    }
+}
+
+jacoco {
+    toolVersion = jacocoVersion
+}
+
+jacocoTestReport {
+    dependsOn test
+    afterEvaluate {
+        classDirectories.setFrom(files(classDirectories.files.collect {
+            fileTree(dir: it, exclude: [
+                    'com/phatjam98/core/common/proto/*',
+                    'com/phatjam98/core/protos/*',
+                    'com/phatjam98/protos/*',
+                    'com/google/protobuf/*'
+            ])
+        }))
+    }
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events TestLogEvent.FAILED,
+                TestLogEvent.PASSED,
+                TestLogEvent.SKIPPED,
+                TestLogEvent.STANDARD_OUT
+        exceptionFormat = TestExceptionFormat.FULL
+        showExceptions = true
+        showCauses = true
+        showStackTraces = true
+        outputs.upToDateWhen { false }
+        showStandardStreams = true
+
+        debug {
+            events TestLogEvent.STARTED,
+                    TestLogEvent.FAILED,
+                    TestLogEvent.PASSED,
+                    TestLogEvent.SKIPPED,
+                    TestLogEvent.STANDARD_ERROR,
+                    TestLogEvent.STANDARD_OUT
+            exceptionFormat TestExceptionFormat.FULL
+        }
+
+        info.events = debug.events
+        info.exceptionFormat = debug.exceptionFormat
+
+        afterSuite { desc, result ->
+            if (!desc.parent) { // will match the outermost suite
+                def output = "Results: ${result.resultType} (${result.testCount} tests, ${result.successfulTestCount} passed, ${result.failedTestCount} failed, ${result.skippedTestCount} skipped)"
+                def startItem = '|  ', endItem = '  |'
+                def repeatLength = startItem.length() + output.length() + endItem.length()
+                println('\n' + ('-' * repeatLength) + '\n' + startItem + output + endItem + '\n' + ('-' * repeatLength))
+            }
+        }
+    }
+    finalizedBy jacocoTestReport
+}
+
+System.setProperty("org.checkstyle.google.suppressionfilter.config", project.projectDir.toString() + "/config/checkstyle/checkstyle-suppressions.xml")
+checkstyle {
+    toolVersion = "9.0"
+    config = rootProject.resources.text.fromFile("config/checkstyle/google-java-format.xml")
+    ignoreFailures = true
+    maxErrors = 0
+    maxWarnings = 0
+}

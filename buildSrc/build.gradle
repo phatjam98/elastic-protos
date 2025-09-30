@@ -1,0 +1,27 @@
+import org.gradle.api.tasks.testing.logging.TestExceptionFormat
+import org.gradle.api.tasks.testing.logging.TestLogEvent
+
+plugins {
+    id 'groovy-gradle-plugin'
+}
+
+repositories {
+    gradlePluginPortal()
+}
+
+dependencies {
+    // plugin dependencies
+    implementation("com.google.protobuf:protobuf-gradle-plugin:0.9.4")
+    implementation("com.github.johnrengelman:shadow:8.1.0")
+    implementation("org.jreleaser:jreleaser-gradle-plugin:1.15.0")
+
+    // shared dependencies
+    implementation("org.slf4j:slf4j-api:2.0.9")
+
+    // shared test dependencies
+}
+
+tasks.named('test', Test) {
+    // Use JUnit Platform for unit tests.
+    useJUnitPlatform()
+}

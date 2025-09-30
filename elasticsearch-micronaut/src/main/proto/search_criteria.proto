@@ -1,0 +1,59 @@
+syntax = "proto3";
+package com.phatjam98.protos;
+
+import "sorting_criteria.proto";
+import "flat_struct.proto";
+import "pagination.proto";
+
+option java_multiple_files = true;
+option java_package = "com.phatjam98.protos.service.protos";
+option java_outer_classname = "SearchCriteriaProtos";
+
+/* Operates as: (SearchCondition1 OR SearchCondition2 OR SearchConditionN)
+ */
+message SearchCriteria {
+  repeated SearchCondition search_condition = 1;  // See SearchCondition
+  repeated SortingCriteria sorting_criteria = 2;  // See SortingCriteria
+  Pagination pagination = 3;                      // See Pagination
+}
+
+/* Operates as: (FieldCondition1 AND FieldCondition2 AND FieldConditionN)
+ */
+message SearchCondition {
+  repeated FieldCondition field_condition = 1; // See FieldCondition
+}
+
+/* Defines the the Operation with the Value to be performed on the Field.
+ */
+message FieldCondition {
+  string field = 1;                    // Field that this condition applies to
+  SearchOperationType operation = 2;  // See SearchOperationType
+  FlatValue value = 3;                // value to be used in the Condition.  See FlatValue
+}
+
+/* Enum to define the type of Operation desired for a FieldCondition
+ */
+enum SearchOperationType {
+  SEARCH_UNSUPPORTED = 0;
+  EQUALS = 1;
+  NOT = 2;
+  EXISTS = 3;
+
+  TEXT_MATCHES = 11;
+  TEXT_CONTAINS = 12;
+  TEXT_PREFIX = 13;
+  TEXT_SUFFIX = 14;
+  TEXT_REGEX = 15;
+
+  NUM_RANGE = 21;
+
+  GEO_INTERSECTS = 31;
+  GEO_CONTAINS = 32;
+  GEO_CONTAINED = 33;
+  GEO_DISTANCE = 34;
+  GEO_BOUNDING_BOX = 35;
+
+  SET_INCLUDES = 41;
+
+  ANY_IN = 51;
+}

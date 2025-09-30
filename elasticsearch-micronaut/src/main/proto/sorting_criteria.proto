@@ -1,0 +1,79 @@
+syntax = "proto3";
+package com.phatjam98.protos;
+
+import "flat_struct.proto";
+
+option java_multiple_files = true;
+option java_package = "com.phatjam98.protos.service.protos";
+option java_outer_classname = "SortingCriteriaProtos";
+
+/* Enum to define direction of Sort
+ */
+enum SortingOrder {
+    ORDER_UNDEFINED = 0;
+    ASC = 1;
+    DESC = 2;
+}
+
+/* Provides one of 4 Sorting types for Elasticsearch.
+ */
+message SortingCriteria {
+    oneof sort_type {
+        FieldSort field_sort = 1;                // Sort by Field. Traditional sort
+        ScoreSort score_sort = 2;               // Sort by Score
+        GeoDistanceSort geo_distance_sort = 3;  // Sort by GeoDistance
+        ScriptSort script_sort = 4;             // Sort by Script.  Painless is not so painless
+    }
+}
+
+/* Traditional Sort option
+ */
+message FieldSort {
+    SortingOrder order = 1; // See SortingOrder
+    string field_name = 2;   // Name of the field to use
+}
+
+/* Sort based on the score provided by Elasticsearch.  There are no options other than SortingOrder.
+ */
+message ScoreSort {
+    SortingOrder order = 1; // See SortingOrder
+}
+
+/*  Sort based on distance from the given point.
+ */
+message GeoDistanceSort {
+    string field_name = 1;           // Name of the field to use
+    SortingOrder order = 2;         // See SortingOrder
+    DistanceType distance_type = 3; // arc or plane defines the type of geo search that will be used. Default ARC
+    DistanceUnit distance_unit = 4; // miles kilometers feet etc.  See DistanceUnit
+    LatLon point = 5;               // Point to sort distance from.  See LatLon
+}
+
+/* Script sort takes a Painless script(which is never fun)
+ */
+message ScriptSort {
+    string script_or_id = 1;        // provide a script or the id of a stored script
+    ScriptSortType sort_type = 2;   // See ScriptSortType
+}
+
+enum ScriptSortType {
+    UNKNOWN_TYPE = 0;
+    STRING = 1;
+    NUMBER = 2;
+}
+
+/**
+Found in org.elasticsearch.common.unit.DistanceUnit.
+ */
+enum DistanceUnit {
+    UNKNOWN_UNIT = 0;
+    INCH = 1;
+    YARD = 2;
+    FEET = 3;
+    KILOMETERS = 4;
+    NAUTICALMILES = 5;
+    MILLIMETERS = 6;
+    CENTIMETERS = 7;
+    MILES = 8;
+    METERS = 9;
+}

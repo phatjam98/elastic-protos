@@ -1,0 +1,3 @@
+elasticsearch:
+  httpHosts: "http://elasticsearch:9200"
+

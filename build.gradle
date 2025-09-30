@@ -1,0 +1,19 @@
+// Root project configuration
+// Subprojects handle their own configurations via buildSrc conventions
+
+allprojects {
+    repositories {
+        mavenCentral()
+        maven { url "https://repo.osgeo.org/repository/release/" }
+    }
+}
+
+// Print version for root project
+task showVersion {
+    doLast {
+        println "Root project version: $version"
+        subprojects {
+            println "${it.name} version: ${it.version}"
+        }
+    }
+}

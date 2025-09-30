@@ -1,0 +1,1 @@
+{"threat_groups":[{"threat_group_type":"THREAT_GROUP_TYPE_DISEASE","trend":"TREND_INCREASING"}],"base_event":{"geo":{"type":"Point","coordinates":[-115.284276,36.076495]},"confidence":{"score":0.7}}}
