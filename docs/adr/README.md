@@ -10,6 +10,7 @@ Short records of the decisions that shape elastic-protos, in the
 | [0003](0003-drop-geobuf.md) | Drop geobuf; support simple geo only | Accepted | 2026-11-01 |
 | [0004](0004-java-17-baseline.md) | Java 17 baseline and the protobuf 3.25 line | Accepted | 2026-11-01 |
 | [0005](0005-lockstep-versioning.md) | Lockstep versioning of all modules | Accepted | 2026-11-01 |
+| [0006](0006-settings-outside-the-content-hash.md) | Index settings stay out of the content hash | Accepted | 2026-11-08 |
 
 ## Adding a record
 

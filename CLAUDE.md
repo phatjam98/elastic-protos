@@ -93,4 +93,6 @@ Checkstyle, JaCoCo and Javadoc.
 - Mapping behaviour is configured by proto options in `elastic_options.proto` first, programmatic
   overrides second. Do not reintroduce field-name heuristics.
 - Default mapping rules: `string` => `keyword` (opt in to `TEXT`), singular message => `object`,
-  repeated message => `nested`, `Timestamp` => `date`.
+  repeated message => `nested`, `Timestamp` => `date`, `map<K,V>` => `flattened` (`type: OBJECT` opts in
+  to a dynamic object). Documents carry proto3 default values (`CodecConfig.includeDefaults` is true).
+  Index settings, including analysis, are outside the content hash (ADR 0006).

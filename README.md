@@ -268,7 +268,7 @@ Index settings follow the same idea: `shards`/`replicas` options, then `settings
 | repeated scalar | same type as the scalar (engines index arrays natively) |
 | singular message | `object` |
 | repeated message | `nested` |
-| `map<K, V>` | `object` with `dynamic: true` |
+| `map<K, V>` | `flattened` (OpenSearch: `flat_object`); keys are queried by dotted path (`labels.env`). `type: OBJECT` opts in to `object` with `dynamic: true` |
 | `google.protobuf.Timestamp` | `date`, format `strict_date_optional_time` |
 | `google.protobuf.Duration` | `keyword` |
 | wrapper types (`StringValue`, `Int64Value`, ...) | the wrapped scalar's type |
@@ -277,6 +277,13 @@ Index settings follow the same idea: `shards`/`replicas` options, then `settings
 | `phatjam98.elasticprotos.v1.LatLon` | `geo_point` |
 | `phatjam98.elasticprotos.v1.GeoShape` | `geo_shape` |
 | recursive message, or nesting deeper than 5 | `object` with `enabled: false`, with a warning |
+
+Maps default to `flattened` because their keys are data, not schema: an `object` with
+`dynamic: true` adds a mapping entry (and a type guessed from the first value) for every new key,
+which grows the mapping without bound and can reject a later document whose value has another type.
+A flattened field indexes every leaf as a keyword under one mapping entry; its keys take `EQUALS`,
+`ANY_IN`, `EXISTS` and `TEXT_PREFIX` (see [Query DSL](#query-dsl)). Use `type: OBJECT` when each key
+needs its own type, for example numeric ranges or full text on map values.
 
 The root mapping is `dynamic: strict`. `MappingDefaults` can change the string rule
 (`withStringsAsText`), the keyword sub-field, `ignore_above`, the date format, the depth limit, the
@@ -310,7 +317,7 @@ options throw `MappingException`.
 
 | Option | Meaning | Default |
 |---|---|---|
-| `type` | Requested type: `KEYWORD`, `TEXT`, `SEARCH_AS_YOU_TYPE`, `INTEGER`, `LONG`, `DOUBLE`, `FLOAT`, `BOOLEAN`, `DATE`, `DATE_NANOS`, `GEO_POINT`, `GEO_SHAPE`, `OBJECT`, `NESTED`, `FLATTENED`, `BINARY`, `IP`, or `IGNORE` (left out of the mapping and of documents) | `AUTO`: the default rules |
+| `type` | Requested type: `KEYWORD`, `TEXT`, `SEARCH_AS_YOU_TYPE`, `INTEGER`, `LONG`, `DOUBLE`, `FLOAT`, `BOOLEAN`, `DATE`, `DATE_NANOS`, `GEO_POINT`, `GEO_SHAPE`, `OBJECT`, `NESTED`, `FLATTENED`, `BINARY`, `IP`, or `IGNORE` (left out of the mapping and of documents). On a `map` field, `OBJECT` (or `NESTED`) gives `dynamic: true`, so the engine maps each key on first sight, instead of the default `flattened` | `AUTO`: the default rules |
 | `analyzer` | Analyzer of a `TEXT` / `SEARCH_AS_YOU_TYPE` field | the message's `default_analyzer` |
 | `search_analyzer` | Search-time analyzer | none |
 | `keyword_subfield` | Give a `TEXT` field a `.keyword` sub-field (`TRUE` / `FALSE`) | `TRUE` |
@@ -369,7 +376,8 @@ Inside `forField` / `forMessage` callbacks, `skip`, `id` and `full_text` are `Bo
 - Applications always use the **alias** (`documents`).
 - The concrete index is `<index or alias>-v<hash>` (`documents-vcccb33c0`), where the hash is the
   first 8 hex digits of a SHA-256 over the canonical `dynamic` + `properties` mapping. Any mapping
-  change gives a new hash; settings and the naming prefix do not affect it.
+  change gives a new hash; settings and the naming prefix do not affect it (see
+  [Settings changes](#settings-changes)).
 - `IndexNamingStrategy.prefixed("dev")` prefixes both alias and index (`dev-documents`,
   `dev-documents-vcccb33c0`), for example per environment. Implement `IndexNamingStrategy` for
   anything else.
@@ -424,8 +432,34 @@ MigrationResult result = migrator.apply(plan);
 | `BLOCKED` | A concrete index is named like the alias; the alias points at several indices; a breaking change with `allowReindex` off; or the target name exists with different mappings | Nothing; the plan's `reason` says why and `MigrationResult.ok()` is false |
 
 Removed fields are kept in the mapping with a warning by default (`RemovedFieldPolicy.KEEP`).
-Shard and replica differences are reported as warnings and never applied; other settings
-differences are reported as "settings differ; not applied".
+
+### Settings changes
+
+Settings (`shards`, `replicas`, `settings_json` such as analysis definitions, and
+`MappingOverrides.setting(...)`) are not part of the content hash
+([ADR 0006](docs/adr/0006-settings-outside-the-content-hash.md)). A change to settings alone never
+produces a new index:
+
+- The plan is `NO_OP` with the warning `settings differ; not applied` (shard and replica
+  differences get one warning per key). The library never updates the settings of an existing index.
+- Settings are applied whenever an index is created: on `CREATE`, and on the new index of a
+  mapping-driven `REINDEX`, so pending settings changes ride along with the next reindex.
+- To roll out an analyzer change on its own, make it visible in the mappings: define the analyzer
+  under a **new name** in `settings_json` and point the field's `analyzer` (or the message's
+  `default_analyzer`) at it. The `analyzer` parameter is in the mappings, so the hash changes and the
+  plan is a `REINDEX` into a new index that carries the new analysis settings. Editing an analyzer
+  definition in place under the same name is not picked up; neither is any other settings-only edit.
+  The alternative is a manual reindex outside the library.
+
+```proto
+message Document {
+  option (phatjam98.elasticprotos.v1.elastic) = {
+    // was "folding"; the new name changes the mapping, so the migrator reindexes
+    settings_json: "{\"analysis\":{\"analyzer\":{\"folding_v2\":{\"tokenizer\":\"standard\",\"filter\":[\"lowercase\",\"asciifolding\",\"stop\"]}}}}"
+  };
+  string body = 4 [(phatjam98.elasticprotos.v1.elastic_field) = { type: TEXT analyzer: "folding_v2" }];
+}
+```
 
 ### Options
 
@@ -551,7 +585,7 @@ decisions recorded in the `IndexDefinition`.
 
 ```java
 ProtoDocumentCodec codec = ProtoDocumentCodec.of(mapper, CodecConfig.standard()
-    .withIncludeDefaults(false)                      // default: proto3 defaults are omitted
+    .withIncludeDefaults(true)                       // default: proto3 defaults are written
     .withInt64AsNumber(true)                         // default: int64 as JSON numbers
     .withUnknownFields(UnknownFieldPolicy.FAIL));    // default is IGNORE
 
@@ -563,7 +597,7 @@ Document back = codec.fromDocument(source, Document.class);
 |---|---|
 | Field names | Proto field names; `elastic_field.name` renames on write and back on read |
 | Ignored fields | `IGNORE` fields (and `Any`/`FieldMask`/`Empty`) are dropped from documents |
-| Defaults | Proto3 default values are omitted unless `includeDefaults`, so `EXISTS` means "was set" |
+| Defaults | Proto3 default values are written (`includeDefaults`, default true): `false`, `0`, `""`, the first enum value, `[]` and `{}`. Fields with presence stay absent when unset: sub-messages (never written as `{}`), `Timestamp` (never the epoch), wrappers, `Struct`, proto3 `optional` fields and unset oneof members. `""` is written only to keyword and text fields; date, ip, geo, numeric and binary fields leave it out. See below |
 | 64-bit integers | Fields mapped as `long` are written as JSON numbers (`int64AsNumber`, default true) instead of protobuf's strings; values beyond 2^53 lose precision in JavaScript consumers. `uint64`/`fixed64` map to `keyword` and stay strings. A value that does not fit the mapped `long` (an unsigned field forced to `LONG`) throws `CodecException` naming the field |
 | `Timestamp` | RFC 3339 strings; epoch-millisecond numbers are accepted when reading back |
 | Enums, bytes | Value names; base64 |
@@ -575,6 +609,17 @@ Document back = codec.fromDocument(source, Document.class);
 
 `fromHit(hit, Type.class)` reads a search hit; `fromDocument(source, descriptor)` returns a
 `DynamicMessage`.
+
+Why defaults are written: proto3 cannot tell an unset `bool`, number, string or enum from one set
+to its default, and protobuf's JSON mapping leaves such values out. An index that never sees them
+cannot answer `EQUALS false`, `EQUALS 0`, a `NUM_RANGE` that starts at 0, or `EQUALS
+FIRM_STATUS_UNSPECIFIED`, and sorts put those documents with the missing ones. Writing them makes
+default values match and sort like any other. The cost is that `EXISTS` on such a field matches
+every document; declare the field `optional` (or use a wrapper type) where "was it set" matters,
+since fields with presence are still left out when unset. `withIncludeDefaults(false)` (Micronaut:
+`elastic-protos.codec.include-defaults: false`) restores the sparse documents. Reading back is the
+same either way, so the setting can change without reindexing, but documents written before and
+after differ until they are rewritten.
 
 ## Query DSL
 
@@ -611,7 +656,7 @@ throw `QueryCompileException` (or are skipped with a warning when lenient). `Val
 
 | `SearchOperationType` | `Criteria` step | Field types | Compiles to |
 |---|---|---|---|
-| `EQUALS` | `equalTo(v)`, `isNull()` | exact fields: keyword, numeric, boolean, date, text with `.keyword` | `term` (on `.keyword` for text); null means "missing" |
+| `EQUALS` | `equalTo(v)`, `isNull()` | exact fields: keyword, numeric, boolean, date, text with `.keyword`, flattened and its keys | `term` (on `.keyword` for text); null means "missing" |
 | `EXISTS` | `exists()` | any | `exists`; on a nested field, "has an element" |
 | `TEXT_MATCHES` | `matches(text)` | text (scoring), keyword | `match` |
 | `TEXT_CONTAINS` | `contains(text)` | text; keyword needs `allowLeadingWildcards` | `match_phrase` on text, `*text*` wildcard on keyword |
@@ -638,6 +683,10 @@ Notes:
   path.
 - **Ranges**: proto3 cannot express an unset `double`, so `NUM_RANGE` always emits both bounds; use
   very small or large values for open ranges. Date ranges are epoch milliseconds.
+- **Flattened keys**: a path below a `flattened` field (a `map` or `Struct` by default), such as
+  `labels.env`, needs no mapping entry. It takes `EQUALS`, `ANY_IN`, `EXISTS` and `TEXT_PREFIX`,
+  compared as keywords (`labels.count` equal to `3` is the string `"3"`); other operations on a key
+  throw `QueryCompileException`. Map the field with `type: OBJECT` for typed ranges or full text.
 - **Leading wildcards** scan every term and are off by default.
 
 ### Sorting
@@ -926,7 +975,7 @@ It also offers `bulkIndex`, `definition`, `pager` (a `SearchPager`), `plan`, `bo
 | `elastic-protos.mapping.keyword-subfield` | `true` | Give text fields a `.keyword` sub-field |
 | `elastic-protos.mapping.ignore-above` | `256` | `ignore_above` of keyword fields |
 | `elastic-protos.mapping.max-depth` | `5` | How deep nested messages are expanded |
-| `elastic-protos.codec.include-defaults` | `false` | Also write proto3 default values |
+| `elastic-protos.codec.include-defaults` | `true` | Write proto3 default values (`false`, `0`, `""`, first enum value, empty lists and maps) so `EQUALS`, ranges and sorts see them; `false` omits them and makes `EXISTS` mean "was set" (see [Document codec](#document-codec)) |
 | `elastic-protos.codec.int64-as-number` | `true` | Write 64-bit integers as JSON numbers |
 | `elastic-protos.codec.unknown-fields` | `IGNORE` | Or `FAIL` when reading back |
 | `elastic-protos.query.allow-leading-wildcards` | `false` | Allow wildcard queries starting with `*` |
@@ -947,7 +996,10 @@ before 3.3); `pager(...)` always adapts.
 ## Limitations
 
 - A reindex blocks writes for its duration; there is no dual-write, zero-downtime mode.
-- Shard and replica counts of existing indices are never changed by a migration.
+- Settings of existing indices (shards, replicas, analysis) are never changed by a migration;
+  settings-only changes need a mapping-visible step (see [Settings changes](#settings-changes)).
+- Keys of a `flattened` map are keywords: no numeric ranges, full text or per-key types unless the
+  field is mapped with `type: OBJECT`.
 - Plans are not coordinated across processes; concurrent bootstrap is unsupported and can be
   destructive. Run the bootstrap from one place.
 - `NUM_RANGE` has no open-ended bounds (proto3 `double` has no presence).
