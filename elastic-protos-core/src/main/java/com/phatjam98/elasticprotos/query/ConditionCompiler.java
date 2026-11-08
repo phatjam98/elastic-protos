@@ -76,6 +76,9 @@ final class ConditionCompiler {
     }
     FieldInfo field = index.fields().get(name);
     if (field == null) {
+      field = flattenedKey(name, operation);
+    }
+    if (field == null) {
       unknown(name, operation.name());
       return null;
     }
@@ -112,6 +115,42 @@ final class ConditionCompiler {
         throw new QueryCompileException(
             "Unsupported operation " + operation + " on field '" + name + "'", name);
     }
+  }
+
+  /**
+   * Resolves a path below a {@code flattened} field, such as {@code labels.env} under a {@code
+   * map<string, string> labels}. The engine indexes every key of a flattened field as a keyword
+   * reachable by its dotted path, so such a path takes the exact-value operations: {@code EQUALS},
+   * {@code ANY_IN}, {@code EXISTS} and {@code TEXT_PREFIX}.
+   *
+   * @return a field description for the key, or null when no flattened field encloses the path
+   * @throws QueryCompileException for an operation keys do not support
+   */
+  private FieldInfo flattenedKey(String name, SearchOperationType operation) {
+    for (int dot = name.lastIndexOf('.'); dot > 0; dot = name.lastIndexOf('.', dot - 1)) {
+      FieldInfo root = index.fields().get(name.substring(0, dot));
+      if (root == null || root.kind() != FieldKind.FLATTENED) {
+        continue;
+      }
+      if (dot == name.length() - 1) {
+        return null;
+      }
+      switch (operation) {
+        case EQUALS:
+        case ANY_IN:
+        case EXISTS:
+        case TEXT_PREFIX:
+          String key = name.substring(dot + 1);
+          return new FieldInfo(name, root.protoPath() + "." + key, FieldKind.FLATTENED,
+              root.repeated(), false, root.boost(), root.field());
+        default:
+          throw new QueryCompileException(
+              operation + " cannot be used on '" + name + "', a key of flattened field '"
+                  + root.path() + "'; keys take EQUALS, ANY_IN, EXISTS and TEXT_PREFIX",
+              name);
+      }
+    }
+    return null;
   }
 
   private void unknown(String name, String what) {

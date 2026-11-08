@@ -32,6 +32,11 @@ class IndexMigratorSpec extends Specification {
       .overrides(MappingOverrides.builder().ignorePath('relevance').build())
       .build()
 
+  /** Firm.labels opted in to an object with dynamic: true instead of the default flattened. */
+  static final ProtoMapper OBJECT_LABELS = ProtoMapper.builder()
+      .overrides(MappingOverrides.builder().forField(Firm.descriptor, 'labels') { it.setType(EsType.OBJECT) }.build())
+      .build()
+
   static final String DOC_V1 = DEFAULT.map(Document).name()
   static final String DOC_V2 = TITLE_KEYWORD.map(Document).name()
 
@@ -108,8 +113,8 @@ class IndexMigratorSpec extends Specification {
 
   def "keys picked up by a dynamic map field are not reported as removed fields"() {
     given: 'a firm with labels.tier was indexed, so the live mapping gained labels.properties.tier'
-    migrator().bootstrap(Firm)
-    String index = DEFAULT.map(Firm).name()
+    migrator(OBJECT_LABELS).bootstrap(Firm)
+    String index = OBJECT_LABELS.map(Firm).name()
     engine.putMappings(index, [properties: [labels: [type: 'object', dynamic: true, properties: [
         tier: [type: 'text', fields: [keyword: [type: 'keyword', ignore_above: 256]]]]]]])
     engine.index('firms', 'f1', [id: 'f1', labels: [tier: 'gold']], IndexOptions.defaults())
@@ -118,18 +123,45 @@ class IndexMigratorSpec extends Specification {
     engine.getMappings('firms').properties.labels.properties.tier.type == 'text'
 
     when:
-    def item = migrator(DEFAULT, MigrationOptions.standard().withRemovedFields(policy))
+    def item = migrator(OBJECT_LABELS, MigrationOptions.standard().withRemovedFields(policy))
         .plan(Firm).items()[0]
 
     then:
     item.action() == Action.NO_OP
     item.warnings().isEmpty()
     !item.diff().hasFieldChanges()
-    item.reason() == "up to date (hash ${DEFAULT.map(Firm).contentHash()})".toString()
+    item.reason() == "up to date (hash ${OBJECT_LABELS.map(Firm).contentHash()})".toString()
     item.currentIndex() == index
 
     where:
     policy << [RemovedFieldPolicy.KEEP, RemovedFieldPolicy.REINDEX]
+  }
+
+  def "a map field is flattened by default, so its keys never reach the mapping"() {
+    given:
+    migrator().bootstrap(Firm)
+    engine.index('firms', 'f1', [id: 'f1', labels: [tier: 'gold']], IndexOptions.defaults())
+
+    when:
+    def item = migrator(DEFAULT, MigrationOptions.standard().withRemovedFields(RemovedFieldPolicy.REINDEX))
+        .plan(Firm).items()[0]
+
+    then:
+    engine.getMappings('firms').properties.labels == [type: 'flattened']
+    item.action() == Action.NO_OP
+    !item.diff().hasFieldChanges()
+  }
+
+  def "moving a map field from a dynamic object to flattened is a type change that reindexes"() {
+    given:
+    migrator(OBJECT_LABELS).bootstrap(Firm)
+
+    when:
+    def item = migrator().plan(Firm).items()[0]
+
+    then:
+    item.action() == Action.REINDEX
+    item.diff().typeChanged()*.path() == ['labels']
   }
 
   def "messages marked skip are left out of the plan"() {

@@ -123,9 +123,10 @@ class ProtoMapperSpec extends Specification {
     props.single_child.properties.grandchild == [type: 'object', properties: [note: [type: 'keyword', ignore_above: 256]]]
     props.children.type == 'nested'
     props.children.properties.rank.type == 'integer'
-    props.string_map == [type: 'object', dynamic: true]
-    props.message_map == [type: 'object', dynamic: true]
-    props.int_map == [type: 'object', dynamic: true]
+    props.string_map == [type: 'flattened']
+    props.message_map == [type: 'flattened']
+    props.int_map == [type: 'flattened']
+    definition.fields()['string_map'].kind() == FieldKind.FLATTENED
     props.choice_string.type == 'keyword'
     props.choice_int.type == 'long'
     props.choice_child.type == 'object'
@@ -263,6 +264,24 @@ class ProtoMapperSpec extends Specification {
     thrown(MappingException)
   }
 
+  def "a map field opts in to a dynamic object or nested with an explicit type"() {
+    given:
+    def overrides = MappingOverrides.builder()
+        .forField(Composite.descriptor, 'string_map') { it.type = EsType.OBJECT }
+        .forField(Composite.descriptor, 'message_map') { it.type = EsType.NESTED }
+        .build()
+
+    when:
+    def definition = ProtoMapper.builder().overrides(overrides).build().map(Composite)
+    def props = definition.mappings().properties
+
+    then:
+    props.string_map == [type: 'object', dynamic: true]
+    props.message_map == [type: 'nested', dynamic: true]
+    props.int_map == [type: 'flattened']
+    definition.contentHash() != mapper.map(Composite).contentHash()
+  }
+
   def "the example Firm maps as documented"() {
     when:
     def definition = mapper.map(Firm)
@@ -279,7 +298,7 @@ class ProtoMapperSpec extends Specification {
     props.headquarters.properties.location == [type: 'geo_point']
     props.offices.type == 'nested'
     props.offices.properties.address.properties.location == [type: 'geo_point']
-    props.labels == [type: 'object', dynamic: true]
+    props.labels == [type: 'flattened']
     props.created_at.type == 'date'
     definition.nestedPaths() == ['offices'] as Set
     definition.fullTextFields() == [name: 2.0f, 'offices.name': 1.0f]

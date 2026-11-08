@@ -21,7 +21,7 @@ message Firm {
   string domain = 3;                    // keyword
   FirmStatus status = 4;                // enum => keyword
   Address headquarters = 5;             // singular message => object
-  map<string, string> labels = 6;       // map => dynamic object
+  map<string, string> labels = 6;       // map => flattened
   google.protobuf.Timestamp created_at = 7;
 }
 

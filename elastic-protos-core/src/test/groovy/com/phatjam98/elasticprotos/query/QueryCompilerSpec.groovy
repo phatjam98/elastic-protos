@@ -275,6 +275,63 @@ class QueryCompilerSpec extends Specification {
 
   // ---- unknown fields ----------------------------------------------------------------------
 
+  // ---- keys of flattened fields -------------------------------------------------------------
+
+  def "a key of a flattened map field compiles to keyword-style term-level queries"() {
+    expect:
+    firm.fields()['labels'].kind() == FieldKind.FLATTENED
+    filter(firm, fc('labels.env', EQUALS, str('prod'))) == [term: ['labels.env': 'prod']]
+    filter(firm, fc('labels.env', ANY_IN, list('prod', 'staging'))) == [terms: ['labels.env': ['prod', 'staging']]]
+    filter(firm, fc('labels.env', EXISTS)) == [exists: [field: 'labels.env']]
+    filter(firm, fc('labels.env', TEXT_PREFIX, str('pr'))) == [prefix: ['labels.env': [value: 'pr']]]
+    filter(firm, fc('labels.env', EQUALS, nul())) == [bool: [must_not: [exists: [field: 'labels.env']]]]
+    filter(firm, fc('labels.team.name', EQUALS, str('x'))) == [term: ['labels.team.name': 'x']]
+    filter(firm, fc('labels.count', EQUALS, integer(3))) == [term: ['labels.count': '3']]
+
+    and: 'negation and the flattened root itself work as before'
+    compiler.compileQuery(where(fc('labels.env', EQUALS, str('prod'), true)), firm).bool.must_not ==
+        [[term: ['labels.env': 'prod']]]
+    filter(firm, fc('labels', EQUALS, str('prod'))) == [term: [labels: 'prod']]
+
+    and: 'a Struct mapped as flattened takes keys the same way'
+    filter(document, fc('metadata.pages', EQUALS, str('12'))) == [term: ['metadata.pages': '12']]
+  }
+
+  @Unroll
+  def "#op on a key of a flattened field is refused"() {
+    when:
+    def e = failure { compiler.compile(where(fc('labels.env', op, value)), firm) }
+
+    then:
+    e.field == 'labels.env'
+    e.message == "${op} cannot be used on 'labels.env', a key of flattened field 'labels'; keys take EQUALS, ANY_IN, EXISTS and TEXT_PREFIX".toString()
+
+    where:
+    op            | value
+    NUM_RANGE     | range(1, 2)
+    TEXT_MATCHES  | str('prod')
+    TEXT_CONTAINS | str('prod')
+    TEXT_REGEX    | str('p.*')
+  }
+
+  def "paths that are not keys of a flattened field stay unknown"() {
+    given:
+    def objectLabels = ProtoMapper.builder().overrides(MappingOverrides.builder()
+        .forField(Firm.descriptor, 'labels') { it.type = EsType.OBJECT }.build()).build().map(Firm)
+
+    expect: 'a key of a map opted in to a dynamic object'
+    failure { compiler.compile(where(fc('labels.env', EQUALS, str('x'))), objectLabels) }.message ==
+        "Unknown field 'labels.env' in EQUALS; index firms does not map it"
+
+    and: 'a trailing dot and a key under a non-flattened field'
+    failure { compiler.compile(where(fc('labels.', EQUALS, str('x'))), firm) }.field == 'labels.'
+    failure { compiler.compile(where(fc('headquarters.nope', EQUALS, str('x'))), firm) }.field == 'headquarters.nope'
+
+    and: 'FULL_TEXT does not search keys'
+    failure { compiler.compile(where(fullText('x', FullTextOptions.newBuilder()
+        .addFields(FieldBoost.newBuilder().setField('labels.env')).build())), firm) }.field == 'labels.env'
+  }
+
   def "an unknown field throws in strict mode"() {
     when:
     def e = failure { compiler.compile(where(fc('nope', EQUALS, str('x'))), document) }

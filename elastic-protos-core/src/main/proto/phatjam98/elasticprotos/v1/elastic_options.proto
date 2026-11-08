@@ -65,7 +65,7 @@ enum EsType {
   DATE_NANOS = 10;
   GEO_POINT = 11;
   GEO_SHAPE = 12;
-  OBJECT = 13;
+  OBJECT = 13;  // on a map field: object with dynamic: true instead of the default flattened
   NESTED = 14;
   FLATTENED = 15;
   BINARY = 16;

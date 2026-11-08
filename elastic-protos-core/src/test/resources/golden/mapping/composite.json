@@ -6,7 +6,7 @@
   "mappings" : {
     "_meta" : {
       "elastic_protos" : {
-        "hash" : "b148ff75",
+        "hash" : "5e01d47d",
         "proto" : "phatjam98.elasticprotos.test.Composite",
         "schema_version" : 1
       }
@@ -63,12 +63,10 @@
         "type" : "keyword"
       },
       "int_map" : {
-        "dynamic" : true,
-        "type" : "object"
+        "type" : "flattened"
       },
       "message_map" : {
-        "dynamic" : true,
-        "type" : "object"
+        "type" : "flattened"
       },
       "single_child" : {
         "properties" : {
@@ -92,12 +90,11 @@
         "type" : "object"
       },
       "string_map" : {
-        "dynamic" : true,
-        "type" : "object"
+        "type" : "flattened"
       }
     }
   },
-  "name" : "composite-vb148ff75",
+  "name" : "composite-v5e01d47d",
   "nestedPaths" : [ "children" ],
   "settings" : { },
   "warnings" : [ ]

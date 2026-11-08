@@ -9,7 +9,7 @@
   "mappings" : {
     "_meta" : {
       "elastic_protos" : {
-        "hash" : "1803f0b8",
+        "hash" : "e891e500",
         "proto" : "phatjam98.elasticprotos.example.Firm",
         "schema_version" : 1
       }
@@ -53,8 +53,7 @@
         "type" : "keyword"
       },
       "labels" : {
-        "dynamic" : true,
-        "type" : "object"
+        "type" : "flattened"
       },
       "name" : {
         "fields" : {
@@ -116,7 +115,7 @@
       }
     }
   },
-  "name" : "firms-v1803f0b8",
+  "name" : "firms-ve891e500",
   "nestedPaths" : [ "offices" ],
   "settings" : {
     "number_of_shards" : 1

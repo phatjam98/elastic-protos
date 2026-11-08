@@ -46,6 +46,7 @@ import com.phatjam98.elasticprotos.proto.SortingOrder
 import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
 import com.phatjam98.elasticprotos.proto.example.InboxItem
+import com.phatjam98.elasticprotos.proto.example.Office
 import com.phatjam98.elasticprotos.query.Criteria
 import com.phatjam98.elasticprotos.query.QueryCompiler
 import com.phatjam98.elasticprotos.query.QueryCompilerConfig
@@ -207,8 +208,9 @@ abstract class EngineIntegrationSpec extends Specification {
     count(firms.alias()) == 3
     count(documents.alias()) == 6
 
-    and: 'map keys the engine picked up (Firm.labels.tier) are not removed fields'
-    engine.getMappings(firms.alias()).properties.labels.properties.tier != null
+    and: 'map fields are flattened: their keys never reach the mapping, so the plan stays a no-op'
+    engine.getMappings(firms.alias()).properties.labels.type == 'flattened'
+    engine.getMappings(firms.alias()).properties.labels.properties == null
     migrator.plan(Firm).items().every { it.action() == Action.NO_OP && it.warnings().isEmpty() }
   }
 
@@ -280,6 +282,51 @@ abstract class EngineIntegrationSpec extends Specification {
         ['doc-1', 'doc-3', 'doc-4', 'doc-5', 'doc-6'] as Set
     docIds(where(fc('type', EQUALS, str('FILING')), fc('tags', EQUALS, str('discovery'), true))) ==
         ['doc-1', 'doc-5'] as Set
+  }
+
+  def "proto3 default values are indexed, so EQUALS and ranges find them"() {
+    given: 'a firm whose status, domain and office headcount hold their defaults, with no timestamps or headquarters'
+    Firm firm = Firm.newBuilder().setId('firm-defaults').setName('Default & Co')
+        .addOffices(Office.newBuilder().setName('Annex')).build()
+    Map<String, Object> doc = codec.toDocument(firm)
+    engine.index(firms.alias(), 'firm-defaults', doc, IndexOptions.refreshed())
+
+    expect: 'the document carries the defaults and leaves unset messages out'
+    doc.status == 'FIRM_STATUS_UNSPECIFIED'
+    doc.domain == ''
+    doc.offices == [[headcount: 0, name: 'Annex']]
+    !doc.containsKey('created_at')
+    !doc.containsKey('headquarters')
+
+    and: 'default values match like any other value'
+    firmIds(where(fc('status', EQUALS, str('FIRM_STATUS_UNSPECIFIED')))) == ['firm-defaults'] as Set
+    firmIds(where(fc('domain', EQUALS, str('')))) == ['firm-defaults'] as Set
+    firmIds(where(fc('offices.headcount', EQUALS, integer(0)))) == ['firm-defaults'] as Set
+    firmIds(where(fc('offices.headcount', NUM_RANGE, range(0, 5)))) == ['firm-defaults'] as Set
+    firmIds(where(fc('status', EQUALS, str('ACTIVE')), fc('status', EXISTS))) == ['firm-1', 'firm-2'] as Set
+
+    and: 'an unset timestamp and sub-message stay absent'
+    firmIds(where(fc('created_at', EXISTS, FlatValue.defaultInstance, true))) == ['firm-defaults'] as Set
+    firmIds(where(fc('headquarters.city', EXISTS, FlatValue.defaultInstance, true))) == ['firm-defaults'] as Set
+
+    and: 'it reads back to the same message'
+    codec.fromHit(engine.get(firms.alias(), 'firm-defaults').get(), Firm) == firm
+
+    cleanup:
+    engine.delete(firms.alias(), 'firm-defaults', IndexOptions.refreshed())
+  }
+
+  def "a key of a flattened field is queried by its dotted path"() {
+    expect: 'map<string, string> labels'
+    firmIds(where(fc('labels.tier', EQUALS, str('gold')))) == ['firm-1'] as Set
+    firmIds(where(fc('labels.tier', EQUALS, str('silver')))).isEmpty()
+    firmIds(where(fc('labels.tier', ANY_IN, list('silver', 'gold')))) == ['firm-1'] as Set
+    firmIds(where(fc('labels.tier', EXISTS))) == ['firm-1'] as Set
+    firmIds(where(fc('labels.tier', TEXT_PREFIX, str('go')))) == ['firm-1'] as Set
+    firmIds(where(fc('labels.tier', EQUALS, str('gold'), true))) == ['firm-2', 'firm-3'] as Set
+
+    and: 'a Struct mapped as flattened'
+    docIds(where(fc('metadata.court_reporter', EQUALS, str('A. Smith')))) == ['doc-6'] as Set
   }
 
   def "predicates on one nested path must hold for the same element"() {
@@ -608,6 +655,8 @@ abstract class EngineIntegrationSpec extends Specification {
   }
 
   static FlatValue str(String s) { FlatValue.newBuilder().setStringValue(s).build() }
+
+  static FlatValue integer(long l) { FlatValue.newBuilder().setIntValue(l).build() }
 
   static FlatValue range(double min, double max, boolean minInc = true, boolean maxInc = true) {
     FlatValue.newBuilder().setRangeValue(RangeValue.newBuilder()

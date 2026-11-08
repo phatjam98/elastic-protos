@@ -23,7 +23,7 @@ message Firm {
   FirmStatus status = 4;
   Address headquarters = 5;             // singular message => object
   repeated Office offices = 6;          // repeated message => nested
-  map<string, string> labels = 7;       // map => dynamic object
+  map<string, string> labels = 7;       // map => flattened
   google.protobuf.Timestamp created_at = 8;
   google.protobuf.Timestamp updated_at = 9;
 }

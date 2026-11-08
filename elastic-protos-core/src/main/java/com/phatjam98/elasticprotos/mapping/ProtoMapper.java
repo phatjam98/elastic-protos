@@ -457,7 +457,9 @@ public final class ProtoMapper {
 
     private FieldKind defaultKind(FieldDescriptor field, String path) {
       if (field.isMapField()) {
-        return FieldKind.OBJECT;
+        // Keys are data, not schema: flattened indexes them without growing the mapping.
+        // EsType.OBJECT on the field opts in to an object with dynamic: true.
+        return FieldKind.FLATTENED;
       }
       switch (field.getType()) {
         case DOUBLE:
