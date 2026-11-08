@@ -1,152 +1,96 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code when working in this repository.
 
-## Project Overview
+## What this is
 
-Elastic Protos - A modern Java library providing high-level interfaces for Elasticsearch interactions.
+elastic-protos is an open-source Java 17 library that turns Protocol Buffer message definitions into
+Elasticsearch/OpenSearch index mappings, migrates indices as the protos evolve, round-trips documents
+between protobuf and JSON, and compiles a proto-defined query DSL into search requests. The core is
+engine-agnostic; thin adapters talk to each engine through its official low-level REST client.
 
-## Build Commands
+The roadmap to v1.0.0 lives in the owner's plan file (see memory). Milestones: M0 compile-green
+skeleton, M1 core demoable, M2 both adapters + CI, M3 docs + 1.0.0-rc, M4 release.
+
+## Modules
+
+| Module | Purpose |
+|---|---|
+| `elastic-protos-core` | mapping, options, codec, engine SPI, migration, query; owns all `.proto` files under `src/main/proto/phatjam98/elasticprotos/v1/` |
+| `elastic-protos-elasticsearch` | `SearchEngine` adapter on `elasticsearch-rest-client` (ES 8.x and 9.x) |
+| `elastic-protos-opensearch` | `SearchEngine` adapter on `opensearch-rest-client` (OpenSearch 2.x and 3.x) |
+| `elastic-protos-micronaut` | optional Micronaut 4 integration: config, bean factories, startup bootstrap |
+| `elastic-protos-testkit` | internal: example protos, golden fixtures, shared engine integration spec (not published) |
+| `elastic-protos-bom` | Maven BOM for the published modules |
+| `examples/micronaut-sample` | runnable Micronaut example app; a standalone build, **not in settings.gradle**, consuming the published artifacts from `mavenLocal()` (`./gradlew publishToMavenLocal` first; `-PelasticProtosVersion=` to override). CI job `sample` builds it |
+| `buildSrc` | convention plugins: `java-conventions`, `proto-conventions`, `publish-conventions`, `library-conventions` |
+
+Java packages live under `com.phatjam98.elasticprotos.{options,mapping,codec,engine,migration,query,util}`.
+Generated protobuf classes are in `com.phatjam98.elasticprotos.proto` and are excluded from
+Checkstyle, JaCoCo and Javadoc.
+
+## Build
 
 ```bash
-# Build the entire project
-./gradlew build
-
-# Run all tests
-./gradlew test
-
-# Run tests for a specific module
-./gradlew :elasticsearch-utils:test
-./gradlew :elasticsearch-micronaut:test
-
-# Run a single test class
-./gradlew test --tests "com.phatjam98.elasticsearch.utils.DocIdUtilsSpec"
-
-# Clean build artifacts
-./gradlew clean
-
-# Check code style
-./gradlew checkstyle
-
-# Generate code coverage report
-./gradlew jacocoTestReport
-
-# Verify code coverage meets thresholds
-./gradlew jacocoTestCoverageVerification
-
-# Show current version
+./gradlew build                      # compile, checkstyle, unit tests, coverage gates, javadoc
+./gradlew test                       # unit tests only (no Docker)
+./gradlew :elastic-protos-elasticsearch:integrationTest -PengineImage=<docker image>   # Testcontainers (Docker)
+./gradlew :elastic-protos-opensearch:integrationTest -PengineImage=<docker image>      # Testcontainers (Docker)
+./gradlew :elastic-protos-testkit:demo --args="elasticsearch http://localhost:9200"   # or: opensearch <url>
+./gradlew test -PtestJavaVersion=21  # run tests on JDK 21 (compilation always targets 17)
 ./gradlew showVersion
-
-# Publish to local Maven for testing
-./gradlew publishToMavenLocal
-
-# Publish to artifact registry (requires configuration)
-./gradlew publish
+./gradlew stageAll                   # publish every module into build/staging-deploy for JReleaser
+./gradlew jreleaserFullRelease --dryrun
 ```
 
-## Architecture
+- Versions are declared once in `gradle/libs.versions.toml`. buildSrc imports the same catalog.
+- Java toolchain is 17 (`.sdkmanrc`). Tests run on 17 unless `-PtestJavaVersion` says otherwise.
+- Protobuf stays on the 3.25 line on purpose: its generated code loads on 3.25+ and 4.x runtimes,
+  and Micronaut 4 consumers are pinned to 3.25 by the Micronaut platform BOM.
+- Checkstyle is enforced (`config/checkstyle/google_checks.xml`, Google Java Style, zero warnings).
+  Checkstyle 12.x is the newest line that runs on Java 17.
+- Coverage gates (JaCoCo lines, unit tests only): core 90%, adapters 70%, Micronaut 60%.
+- Tests are Spock (Groovy) under `src/test/groovy`; Docker-backed tests go in `src/integrationTest/groovy`
+  and never run from `./gradlew test`.
+- `build` and `check` are Docker-free: they compile and checkstyle the `integrationTest` sources but do not
+  run them. Run the `integrationTest` task of an adapter explicitly. Without `-PengineImage` the adapters
+  default to the newest verified image (ES `9.5.5`, OpenSearch `3.9.0`; verified tags are listed in each
+  adapter's build.gradle). The suites are skipped, not failed, when Docker is unavailable.
+- Both adapter suites extend the shared `EngineIntegrationSpec` (testkit `src/main/groovy`), which must pass
+  unchanged on ES 8.19/9.x and OpenSearch 2.19/3.x. Engine differences are handled in core, not in tests:
+  `flattened` is sent as `flat_object` to OpenSearch and read back as `flattened` (JsonRestEngine), and the
+  `_shard_doc` PIT tiebreaker is only used where `EngineInfo.supportsShardDoc()` (ES 7.12+, OpenSearch 3.3+).
+- `demo` (testkit) bootstraps Firm/Document on a running cluster, indexes `SampleData`, runs FULL_TEXT
+  "merger agreement" and prints the plan, the compiled query, ranked hits and the parsed best hit.
+- JReleaser is applied once at the root; every module stages into the shared `build/staging-deploy`.
+- Snapshots: `./gradlew stageAll jreleaserDeploy` (nexus2 deployer to the Central snapshots repo, no GitHub
+  release). Releases: `./gradlew jreleaserFullRelease -Pversion=X.Y.Z` (Central Portal + GitHub release + tag).
+  `-Pversion` overrides `gradle.properties` and must go on every Gradle call of a release run.
+- Consumers get the core `.proto` files onto their protoc include path by a plain `implementation` dependency on
+  `elastic-protos-core` (protobuf-gradle-plugin extracts them). Do not tell them to use the `protobuf`
+  configuration: that recompiles the core protos and the well-known types into the consumer.
 
-### Module Structure
+## CI (.github/workflows)
 
-This is a multi-module Gradle project with dependencies between modules:
+- `ci.yml` (push/PR to main, reusable via `workflow_call`): `static` (checkstyle main/test/integrationTest +
+  javadoc), `unit` (`build` on JDK 17 and with `-PtestJavaVersion=21`), `integration` (ES 8.19.23, ES 9.5.5,
+  OpenSearch 2.19.7, OpenSearch 3.9.0), `coverage` (jacoco report + gates), `stage` (`stageAll`, uploads the
+  staged repo). Keep the integration matrix in step with the verified tags in the adapter build files.
+- `snapshot.yml` (push to main): reuses ci.yml, then `stageAll` + `jreleaserDeploy` when the version is a SNAPSHOT.
+- `release.yml` (tag `v*`, or manual dispatch with `version` and `dryrun`, default dry run): tag must match
+  `vX.Y.Z` or `vX.Y.Z-rc.N` and be on `origin/main`; runs `build` and `jreleaserFullRelease` with `-Pversion`.
+- `codeql.yml` (Java, manual build) and `dependabot.yml` (`build(deps)` / `ci(deps)` prefixes, which the
+  changelog excludes along with `chore`, `docs`, `test` and merge commits).
+- Required secrets: `JRELEASER_GITHUB_TOKEN`, `JRELEASER_MAVENCENTRAL_USERNAME`, `JRELEASER_MAVENCENTRAL_PASSWORD`,
+  `JRELEASER_NEXUS2_USERNAME`, `JRELEASER_NEXUS2_PASSWORD` (Central Portal token for both), `JRELEASER_GPG_PUBLIC_KEY`,
+  `JRELEASER_GPG_SECRET_KEY`, `JRELEASER_GPG_PASSPHRASE`.
 
-1. **elasticsearch-utils** (Java 11)
-   - Core utilities for building Elasticsearch queries
-   - Proto-to-JSON conversion utilities
-   - Query models (equality, range, geo queries)
-   - Mappings comparison utilities
-   - Response handling utilities
-   - 60% minimum code coverage requirement
-   - No dependencies on other modules
+## Conventions
 
-2. **elasticsearch-micronaut** (Java 17)
-   - Micronaut-based service layer
-   - ElasticsearchService with index/document operations
-   - BulkElasticsearchService for bulk operations
-   - Client factory for creating ES connections
-   - Migration and reindexing support
-   - Contains Protocol Buffer definitions in `src/main/proto/`
-   - 30% minimum code coverage requirement
-   - Depends on: `elasticsearch-utils` module
-
-3. **buildSrc** (Build Configuration)
-   - Custom Gradle conventions for consistent configuration
-   - `elastic-protos.java-conventions.gradle` - Base Java/Proto/Testing setup
-   - `elastic-protos.library-conventions.gradle` - Library publishing and versioning
-   - Shared by all modules to reduce duplication
-
-### Key Design Patterns
-
-1. **Protocol Buffer Integration**: All query criteria, pagination, and sorting use Protocol Buffers from local proto definitions
-2. **Type Safety**: Generic types used throughout for compile-time safety
-3. **Dependency Injection**: Micronaut framework for DI in the service layer
-4. **Builder Pattern**: RequestBuilder for constructing Elasticsearch queries
-
-### Testing Framework
-
-- **Spock Framework**: All tests written in Groovy using Spock
-- **Testcontainers**: Integration tests use Elasticsearch containers
-- **Test Fixtures**: JSON test data in `src/test/resources/fixtures/`
-
-## Key Classes and Locations
-
-### elasticsearch-utils module
-- Query Building: `elasticsearch-utils/src/main/java/com/phatjam98/elasticsearch/utils/RequestBuilder.java`
-- Proto-JSON Conversion: `elasticsearch-utils/src/main/java/com/phatjam98/elasticsearch/utils/ProtoJsonUtils.java`
-- Geo Utilities: `elasticsearch-utils/src/main/java/com/phatjam98/elasticsearch/utils/GeobufUtils.java`
-- Query Models: `elasticsearch-utils/src/main/java/com/phatjam98/elasticsearch/utils/models/`
-
-### elasticsearch-micronaut module
-- Service Layer: `elasticsearch-micronaut/src/main/java/com/phatjam98/elasticsearch/micronaut/service/ElasticsearchService.java`
-- Bulk Operations: `elasticsearch-micronaut/src/main/java/com/phatjam98/elasticsearch/micronaut/service/BulkElasticsearchService.java`
-- Client Factory: `elasticsearch-micronaut/src/main/java/com/phatjam98/elasticsearch/micronaut/factory/ClientFactory.java`
-- Proto Definitions: `elasticsearch-micronaut/src/main/proto/` (pagination, search_criteria, sorting_criteria, etc.)
-
-## Configuration
-
-Elasticsearch connection configured via `application.yaml`:
-```yaml
-elasticsearch:
-  httpHosts: "http://elasticsearch:9200"  # Required
-  username: some_name                      # Optional
-  password: the_password                   # Optional
-  replicas: 1                             # Optional
-  shards: 1                               # Optional
-  insecure-trust-all-certificates: false  # Optional - NEVER use in production
-```
-
-## Code Quality
-
-- **Google Java Format**: Code style enforced via Checkstyle
-- **Checkstyle Config**: Root-level `config/google-java-format.xml`
-- **Coverage Tool**: JaCoCo with different thresholds per module
-- **Test Framework**: Spock (Groovy) for BDD-style tests in `src/test/groovy/`
-
-## Publishing and Versioning
-
-- Uses semantic versioning (currently set in `gradle.properties`)
-- Version format: `0.1.0` (release) or `0.1.1-548774e` (snapshot)
-- Publishes to Google Cloud Artifact Registry (requires configuration)
-- For local development: `./gradlew publishToMavenLocal`
-- No overwriting of existing artifacts allowed
-- Note: Git-based semver plugin is disabled (see `buildSrc/...library-conventions.gradle`)
-
-## Dependencies
-
-Key external dependencies:
-- Elasticsearch Java Client 7.17.12
-- Micronaut 4.0.2
-- Google Protobuf 3.23.4
-- Jackson 2.15.2
-- Spock 2.3 (testing)
-
-Maven repositories required:
-- Maven Central
-- OSGeo (for geotools): `https://repo.osgeo.org/repository/release/`
-
-## Protocol Buffers
-
-- Proto definitions are in `elasticsearch-micronaut/src/main/proto/`
-- Key proto files: `pagination.proto`, `search_criteria.proto`, `sorting_criteria.proto`
-- Compiled automatically by Gradle protobuf plugin during build
-- Generated Java classes used throughout both modules for type-safe queries
+- Commits follow Conventional Commits (the changelog is generated from them).
+- The core module must not depend on any engine client or framework. Mappings, queries and documents
+  cross the engine SPI as plain `Map<String, Object>` / JSON.
+- Mapping behaviour is configured by proto options in `elastic_options.proto` first, programmatic
+  overrides second. Do not reintroduce field-name heuristics.
+- Default mapping rules: `string` => `keyword` (opt in to `TEXT`), singular message => `object`,
+  repeated message => `nested`, `Timestamp` => `date`.
