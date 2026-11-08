@@ -118,14 +118,14 @@ message Annotated {
     settings_json: "{\"analysis\":{\"analyzer\":{\"folding\":{\"tokenizer\":\"standard\",\"filter\":[\"lowercase\",\"asciifolding\"]}}}}"
   };
 
-  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = true];
+  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = TRUE];
   string title = 2 [(phatjam98.elasticprotos.v1.elastic_field) = { type: TEXT boost: 2.5 }];
   string body = 3 [(phatjam98.elasticprotos.v1.elastic_field) = { type: TEXT analyzer: "folding" search_analyzer: "standard" keyword_subfield: FALSE }];
   string code = 4 [(phatjam98.elasticprotos.v1.elastic_field) = { ignore_above: 64 normalizer: "lowercase" }];
   string secret = 5 [(phatjam98.elasticprotos.v1.elastic_field).type = IGNORE];
   string unsearchable = 6 [(phatjam98.elasticprotos.v1.elastic_field) = { index: FALSE doc_values: FALSE }];
   string renamed = 7 [(phatjam98.elasticprotos.v1.elastic_field).name = "renamed_field"];
-  string copied = 8 [(phatjam98.elasticprotos.v1.elastic_field) = { copy_to: ["all_text"] full_text: true }];
+  string copied = 8 [(phatjam98.elasticprotos.v1.elastic_field) = { copy_to: ["all_text"] full_text: TRUE }];
   string birthday = 9 [(phatjam98.elasticprotos.v1.elastic_field) = { type: DATE format: "yyyy-MM-dd" }];
   int32 as_long = 10 [(phatjam98.elasticprotos.v1.elastic_field).type = LONG];
   Child forced_nested = 11 [(phatjam98.elasticprotos.v1.elastic_field).type = NESTED];
@@ -144,7 +144,7 @@ message IdByOption {
 }
 
 message Skipped {
-  option (phatjam98.elasticprotos.v1.elastic) = { skip: true };
+  option (phatjam98.elasticprotos.v1.elastic) = { skip: TRUE };
   string value = 1;
 }
 

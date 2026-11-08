@@ -16,7 +16,7 @@ message Document {
     default_analyzer: "english"
   };
 
-  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = true];
+  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = TRUE];
   string firm_id = 2;                     // keyword
   string title = 3 [(phatjam98.elasticprotos.v1.elastic_field) = { type: TEXT boost: 3.0 }];
   string body = 4 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];

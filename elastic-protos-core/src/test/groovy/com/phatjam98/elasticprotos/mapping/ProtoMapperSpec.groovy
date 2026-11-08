@@ -72,7 +72,8 @@ class ProtoMapperSpec extends Specification {
     props.uint32_value.type == 'long'
     props.fixed32_value.type == 'long'
     props.int64_value.type == 'long'
-    props.fixed64_value.type == 'long'
+    props.fixed64_value == [type: 'keyword', ignore_above: 256]
+    props.sfixed64_value.type == 'long'
     props.uint64_value.type == 'keyword'
     props.float_value.type == 'float'
     props.double_value.type == 'double'
@@ -81,7 +82,8 @@ class ProtoMapperSpec extends Specification {
     definition.mappings().dynamic == 'strict'
     definition.fields()['repeated_strings'].repeated()
     !definition.fields()['string_value'].repeated()
-    definition.warnings().any { it.startsWith('uint64_value:') }
+    definition.warnings().any { it.startsWith('uint64_value: uint64 does not fit a long') }
+    definition.warnings().any { it.startsWith('fixed64_value: fixed64 does not fit a long') }
     definition.fullTextFields().isEmpty()
     definition.idField() == null
     definition.alias() == 'scalars'
@@ -367,6 +369,50 @@ class ProtoMapperSpec extends Specification {
     definition.ignoredPaths() == ['body', 'checksum', 'internal_notes'] as Set
     definition.settings() == [index: [refresh_interval: '30s']]
     definition.fullTextFields().keySet() == ['parties.email', 'parties.name'] as Set
+  }
+
+  def "an override turns off the id, full_text and skip options a proto turned on"() {
+    given:
+    def off = MappingOverrides.builder()
+        .id(Annotated.descriptor, 'id', false)
+        .fullText(Annotated.descriptor, 'copied', false)
+        .fullText(Annotated.descriptor, 'body', false)
+        .fullText(Annotated.descriptor, 'code', true)
+        .skip(Skipped.descriptor, false)
+        .build()
+    def offMapper = ProtoMapper.builder().overrides(off).build()
+    def skipScalars = ProtoMapper.builder().overrides(MappingOverrides.builder().skip(Scalars.descriptor, true).build()).build()
+
+    when:
+    def declared = mapper.map(Annotated)
+    def overridden = offMapper.map(Annotated)
+
+    then: 'the proto declares id and full_text TRUE'
+    declared.idField() == 'id'
+    declared.fullTextFields().keySet() == ['title', 'body', 'copied'] as Set
+
+    and: 'FALSE in an override wins over TRUE in the proto'
+    overridden.idField() == null
+    overridden.fullTextFields() == [title: 2.5f, code: 1.0f]
+    overridden.contentHash() == declared.contentHash()   // neither option changes the index mapping
+
+    and: 'skip follows the override, and the static check reads only the proto'
+    ProtoMapper.isSkipped(Skipped.descriptor)
+    !offMapper.skips(Skipped.descriptor)
+    offMapper.map(Skipped).alias() == 'skipped'
+    mapper.skips(Skipped.descriptor)
+    skipScalars.skips(Scalars.descriptor)
+    !skipScalars.skips(Document.descriptor)
+
+    and: 'the Bool3 helper never yields UNSET'
+    MappingOverrides.bool3(true) == com.phatjam98.elasticprotos.proto.Bool3.TRUE
+    MappingOverrides.bool3(false) == com.phatjam98.elasticprotos.proto.Bool3.FALSE
+
+    when:
+    skipScalars.map(Scalars)
+
+    then:
+    thrown(MappingException)
   }
 
   def "by-message and by-path overrides merge with the path winning"() {

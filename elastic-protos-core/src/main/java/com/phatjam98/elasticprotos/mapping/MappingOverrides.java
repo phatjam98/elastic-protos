@@ -2,6 +2,7 @@ package com.phatjam98.elasticprotos.mapping;
 
 import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor;
+import com.phatjam98.elasticprotos.proto.Bool3;
 import com.phatjam98.elasticprotos.proto.EsType;
 import com.phatjam98.elasticprotos.proto.FieldOpts;
 import com.phatjam98.elasticprotos.proto.MessageOpts;
@@ -20,6 +21,11 @@ import java.util.function.Consumer;
  *
  * <p>Field overrides can be addressed by message and field name, which applies wherever that
  * message appears, or by the dotted path from the root message being mapped.
+ *
+ * <p>The on/off options ({@code skip}, {@code id}, {@code full_text}) are {@link Bool3} in the
+ * proto so that an override can turn off what a proto turned on. {@link Builder#skip}, {@link
+ * Builder#id} and {@link Builder#fullText} take a plain boolean; inside a {@code forField} or
+ * {@code forMessage} callback use {@link #bool3(boolean)}.
  */
 public final class MappingOverrides {
 
@@ -86,6 +92,16 @@ public final class MappingOverrides {
     return settings;
   }
 
+  /**
+   * Converts a boolean to the explicit {@link Bool3} value, never {@link Bool3#UNSET}.
+   *
+   * @param value the value
+   * @return {@link Bool3#TRUE} or {@link Bool3#FALSE}
+   */
+  public static Bool3 bool3(boolean value) {
+    return value ? Bool3.TRUE : Bool3.FALSE;
+  }
+
   private static String key(String messageFullName, String fieldName) {
     return messageFullName + "#" + fieldName;
   }
@@ -148,6 +164,24 @@ public final class MappingOverrides {
     /** Excludes the field at a dotted path from the mapping and from documents. */
     public Builder ignorePath(String path) {
       return forPath(path, f -> f.setType(EsType.IGNORE));
+    }
+
+    /** Sets whether a message is skipped, over whatever its proto declares. */
+    public Builder skip(Descriptor descriptor, boolean value) {
+      return forMessage(descriptor, m -> m.setSkip(bool3(value)));
+    }
+
+    /** Sets whether a field holds the document id, wherever its message appears. */
+    public Builder id(Descriptor descriptor, String fieldName, boolean value) {
+      return forField(descriptor, fieldName, f -> f.setId(bool3(value)));
+    }
+
+    /**
+     * Sets whether a field is in the default {@code FULL_TEXT} field set, wherever its message
+     * appears. {@code false} also removes a {@code TEXT} field from the set.
+     */
+    public Builder fullText(Descriptor descriptor, String fieldName, boolean value) {
+      return forField(descriptor, fieldName, f -> f.setFullText(bool3(value)));
     }
 
     /**

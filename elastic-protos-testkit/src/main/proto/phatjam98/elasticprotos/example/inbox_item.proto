@@ -14,7 +14,7 @@ option java_outer_classname = "InboxItemProtos";
 message InboxItem {
   option (phatjam98.elasticprotos.v1.elastic) = { alias: "inbox_items" };
 
-  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = true];
+  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = TRUE];
   string firm_id = 2;
   string subject = 3 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
   InboxStatus status = 4;

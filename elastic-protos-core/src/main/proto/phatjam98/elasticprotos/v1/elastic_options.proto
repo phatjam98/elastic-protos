@@ -14,7 +14,7 @@ option java_outer_classname = "ElasticOptionsProto";
 //
 //   message Document {
 //     option (phatjam98.elasticprotos.v1.elastic) = { alias: "documents" };
-//     string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = true];
+//     string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = TRUE];
 //     string title = 2 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
 //   }
 //
@@ -39,8 +39,8 @@ message MessageOpts {
   DynamicMode dynamic = 6;      // default STRICT
   string default_analyzer = 7;  // analyzer for TEXT fields that set none
   string settings_json = 8;     // raw index settings JSON merged in (for analysis definitions)
-  string id_field = 9;          // field whose value is the document _id; alternatively mark a field id = true
-  bool skip = 10;               // never create an index for this message
+  string id_field = 9;          // field whose value is the document _id; alternatively mark a field id = TRUE
+  Bool3 skip = 10;              // TRUE: never create an index for this message; FALSE in an override un-skips it
 }
 
 enum DynamicMode {
@@ -73,7 +73,8 @@ enum EsType {
   IGNORE = 18;  // omitted from the mapping and from documents
 }
 
-// Tri-state boolean so an option can be left unset.
+// Tri-state boolean so an option can be left unset, and so an override can set it to FALSE over
+// a proto that declared TRUE. Wire-compatible with bool: TRUE is 1.
 enum Bool3 {
   UNSET = 0;
   TRUE = 1;
@@ -92,9 +93,9 @@ message FieldOpts {
   repeated string copy_to = 8;
   string format = 9;            // date format; default strict_date_optional_time
   string normalizer = 10;       // keyword normalizer
-  bool id = 11;                 // this field's value is the document _id
+  Bool3 id = 11;                // TRUE: this field's value is the document _id
   float boost = 12;             // query-time boost when searched by FULL_TEXT with no field list
-  bool full_text = 13;          // include in the FULL_TEXT default field set even if not TEXT
+  Bool3 full_text = 13;         // FULL_TEXT default field set: TRUE adds a non-text field, FALSE removes a TEXT one
   string name = 14;             // override the field name in the index
   string raw_mapping_json = 15; // merged last into this field's mapping
   Bool3 coerce = 16;

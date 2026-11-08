@@ -17,7 +17,7 @@ message Firm {
     shards: 1
   };
 
-  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = true];
+  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = TRUE];
   string name = 2 [(phatjam98.elasticprotos.v1.elastic_field) = { type: TEXT boost: 2.0 }];
   string domain = 3;
   FirmStatus status = 4;
