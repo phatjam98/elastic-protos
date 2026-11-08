@@ -1,0 +1,23 @@
+{
+  "from" : 0,
+  "query" : {
+    "bool" : {
+      "filter" : [ {
+        "geo_bounding_box" : {
+          "point" : {
+            "bottom_right" : {
+              "lat" : 35.0,
+              "lon" : -114.0
+            },
+            "top_left" : {
+              "lat" : 37.0,
+              "lon" : -116.0
+            }
+          }
+        }
+      } ]
+    }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

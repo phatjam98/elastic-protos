@@ -1,0 +1,14 @@
+{
+  "from" : 40,
+  "query" : {
+    "bool" : {
+      "filter" : [ {
+        "term" : {
+          "type" : "FILING"
+        }
+      } ]
+    }
+  },
+  "size" : 20,
+  "track_total_hits" : true
+}

@@ -1,0 +1,14 @@
+{
+  "from" : 0,
+  "query" : {
+    "bool" : {
+      "must" : [ {
+        "match_phrase" : {
+          "body" : "breach of contract"
+        }
+      } ]
+    }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

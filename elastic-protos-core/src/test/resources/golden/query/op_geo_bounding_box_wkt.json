@@ -1,0 +1,16 @@
+{
+  "from" : 0,
+  "query" : {
+    "bool" : {
+      "filter" : [ {
+        "geo_bounding_box" : {
+          "point" : {
+            "wkt" : "BBOX (-116, -114, 37, 35)"
+          }
+        }
+      } ]
+    }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

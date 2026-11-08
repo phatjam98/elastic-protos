@@ -1,0 +1,80 @@
+{
+  "alias" : "scalars",
+  "fullTextFields" : { },
+  "idField" : null,
+  "ignoredPaths" : [ ],
+  "mappings" : {
+    "_meta" : {
+      "elastic_protos" : {
+        "hash" : "8b137a47",
+        "proto" : "phatjam98.elasticprotos.test.Scalars",
+        "schema_version" : 1
+      }
+    },
+    "dynamic" : "strict",
+    "properties" : {
+      "bool_value" : {
+        "type" : "boolean"
+      },
+      "bytes_value" : {
+        "type" : "binary"
+      },
+      "double_value" : {
+        "type" : "double"
+      },
+      "enum_value" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "fixed32_value" : {
+        "type" : "long"
+      },
+      "fixed64_value" : {
+        "type" : "long"
+      },
+      "float_value" : {
+        "type" : "float"
+      },
+      "int32_value" : {
+        "type" : "integer"
+      },
+      "int64_value" : {
+        "type" : "long"
+      },
+      "repeated_ints" : {
+        "type" : "integer"
+      },
+      "repeated_strings" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "sfixed32_value" : {
+        "type" : "integer"
+      },
+      "sfixed64_value" : {
+        "type" : "long"
+      },
+      "sint32_value" : {
+        "type" : "integer"
+      },
+      "sint64_value" : {
+        "type" : "long"
+      },
+      "string_value" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "uint32_value" : {
+        "type" : "long"
+      },
+      "uint64_value" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      }
+    }
+  },
+  "name" : "scalars-v8b137a47",
+  "nestedPaths" : [ ],
+  "settings" : { },
+  "warnings" : [ "uint64_value: uint64 does not fit a long and is mapped as keyword" ]
+}

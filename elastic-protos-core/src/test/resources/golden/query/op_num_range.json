@@ -1,0 +1,17 @@
+{
+  "from" : 0,
+  "query" : {
+    "bool" : {
+      "filter" : [ {
+        "range" : {
+          "size_bytes" : {
+            "gte" : 100,
+            "lt" : 1000
+          }
+        }
+      } ]
+    }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

@@ -1,0 +1,104 @@
+{
+  "alias" : "composite",
+  "fullTextFields" : { },
+  "idField" : null,
+  "ignoredPaths" : [ ],
+  "mappings" : {
+    "_meta" : {
+      "elastic_protos" : {
+        "hash" : "b148ff75",
+        "proto" : "phatjam98.elasticprotos.test.Composite",
+        "schema_version" : 1
+      }
+    },
+    "dynamic" : "strict",
+    "properties" : {
+      "children" : {
+        "properties" : {
+          "grandchild" : {
+            "properties" : {
+              "note" : {
+                "ignore_above" : 256,
+                "type" : "keyword"
+              }
+            },
+            "type" : "object"
+          },
+          "name" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          },
+          "rank" : {
+            "type" : "integer"
+          }
+        },
+        "type" : "nested"
+      },
+      "choice_child" : {
+        "properties" : {
+          "grandchild" : {
+            "properties" : {
+              "note" : {
+                "ignore_above" : 256,
+                "type" : "keyword"
+              }
+            },
+            "type" : "object"
+          },
+          "name" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          },
+          "rank" : {
+            "type" : "integer"
+          }
+        },
+        "type" : "object"
+      },
+      "choice_int" : {
+        "type" : "long"
+      },
+      "choice_string" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "int_map" : {
+        "dynamic" : true,
+        "type" : "object"
+      },
+      "message_map" : {
+        "dynamic" : true,
+        "type" : "object"
+      },
+      "single_child" : {
+        "properties" : {
+          "grandchild" : {
+            "properties" : {
+              "note" : {
+                "ignore_above" : 256,
+                "type" : "keyword"
+              }
+            },
+            "type" : "object"
+          },
+          "name" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          },
+          "rank" : {
+            "type" : "integer"
+          }
+        },
+        "type" : "object"
+      },
+      "string_map" : {
+        "dynamic" : true,
+        "type" : "object"
+      }
+    }
+  },
+  "name" : "composite-vb148ff75",
+  "nestedPaths" : [ "children" ],
+  "settings" : { },
+  "warnings" : [ ]
+}

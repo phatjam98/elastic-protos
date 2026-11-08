@@ -1,0 +1,102 @@
+syntax = "proto3";
+
+package phatjam98.elasticprotos.v1;
+
+import "google/protobuf/descriptor.proto";
+
+option java_package = "com.phatjam98.elasticprotos.proto";
+option java_multiple_files = true;
+option java_outer_classname = "ElasticOptionsProto";
+
+// Custom options that control how a message becomes an index and how each field is mapped.
+//
+//   import "phatjam98/elasticprotos/v1/elastic_options.proto";
+//
+//   message Document {
+//     option (phatjam98.elasticprotos.v1.elastic) = { alias: "documents" };
+//     string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = true];
+//     string title = 2 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
+//   }
+//
+// Precedence, lowest to highest: library defaults, these options, programmatic overrides,
+// raw_mapping_json.
+
+extend google.protobuf.MessageOptions {
+  MessageOpts elastic = 50001;
+}
+
+extend google.protobuf.FieldOptions {
+  FieldOpts elastic_field = 50002;
+}
+
+// Index-level settings for a message type.
+message MessageOpts {
+  string index = 1;             // base index name; default snake_case of the message name
+  string alias = 2;             // alias the application reads and writes through; default = index
+  int32 shards = 3;             // 0 = engine or migrator default
+  int32 replicas = 4;           // only read when has_replicas is true
+  bool has_replicas = 5;
+  DynamicMode dynamic = 6;      // default STRICT
+  string default_analyzer = 7;  // analyzer for TEXT fields that set none
+  string settings_json = 8;     // raw index settings JSON merged in (for analysis definitions)
+  string id_field = 9;          // field whose value is the document _id; alternatively mark a field id = true
+  bool skip = 10;               // never create an index for this message
+}
+
+enum DynamicMode {
+  DYNAMIC_DEFAULT = 0;  // STRICT
+  DYNAMIC_STRICT = 1;
+  DYNAMIC_FALSE = 2;
+  DYNAMIC_TRUE = 3;
+}
+
+// Engine field types that can be requested for a field. AUTO applies the default rules.
+enum EsType {
+  AUTO = 0;
+  KEYWORD = 1;
+  TEXT = 2;
+  SEARCH_AS_YOU_TYPE = 3;
+  INTEGER = 4;
+  LONG = 5;
+  DOUBLE = 6;
+  FLOAT = 7;
+  BOOLEAN = 8;
+  DATE = 9;
+  DATE_NANOS = 10;
+  GEO_POINT = 11;
+  GEO_SHAPE = 12;
+  OBJECT = 13;
+  NESTED = 14;
+  FLATTENED = 15;
+  BINARY = 16;
+  IP = 17;
+  IGNORE = 18;  // omitted from the mapping and from documents
+}
+
+// Tri-state boolean so an option can be left unset.
+enum Bool3 {
+  UNSET = 0;
+  TRUE = 1;
+  FALSE = 2;
+}
+
+// Field-level mapping settings.
+message FieldOpts {
+  EsType type = 1;
+  string analyzer = 2;
+  string search_analyzer = 3;
+  Bool3 keyword_subfield = 4;   // TEXT fields get a .keyword sub-field; default TRUE
+  int32 ignore_above = 5;       // keyword ignore_above; 0 = default 256
+  Bool3 index = 6;              // index: false disables searching the field
+  Bool3 doc_values = 7;
+  repeated string copy_to = 8;
+  string format = 9;            // date format; default strict_date_optional_time
+  string normalizer = 10;       // keyword normalizer
+  bool id = 11;                 // this field's value is the document _id
+  float boost = 12;             // query-time boost when searched by FULL_TEXT with no field list
+  bool full_text = 13;          // include in the FULL_TEXT default field set even if not TEXT
+  string name = 14;             // override the field name in the index
+  string raw_mapping_json = 15; // merged last into this field's mapping
+  Bool3 coerce = 16;
+  string null_value = 17;
+}

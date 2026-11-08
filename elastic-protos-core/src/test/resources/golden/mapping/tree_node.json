@@ -1,0 +1,34 @@
+{
+  "alias" : "tree_node",
+  "fullTextFields" : { },
+  "idField" : null,
+  "ignoredPaths" : [ ],
+  "mappings" : {
+    "_meta" : {
+      "elastic_protos" : {
+        "hash" : "7bc690ed",
+        "proto" : "phatjam98.elasticprotos.test.TreeNode",
+        "schema_version" : 1
+      }
+    },
+    "dynamic" : "strict",
+    "properties" : {
+      "children" : {
+        "enabled" : false,
+        "type" : "object"
+      },
+      "label" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "parent" : {
+        "enabled" : false,
+        "type" : "object"
+      }
+    }
+  },
+  "name" : "tree_node-v7bc690ed",
+  "nestedPaths" : [ ],
+  "settings" : { },
+  "warnings" : [ "children: recursive message phatjam98.elasticprotos.test.TreeNode is mapped as a disabled object", "parent: recursive message phatjam98.elasticprotos.test.TreeNode is mapped as a disabled object" ]
+}

@@ -1,0 +1,95 @@
+{
+  "alias" : "documents",
+  "fullTextFields" : {
+    "body" : 1.0,
+    "parties.name" : 1.0,
+    "title" : 3.0
+  },
+  "idField" : "id",
+  "ignoredPaths" : [ "internal_notes" ],
+  "mappings" : {
+    "_meta" : {
+      "elastic_protos" : {
+        "hash" : "d458ad60",
+        "proto" : "phatjam98.elasticprotos.example.Document",
+        "schema_version" : 1
+      }
+    },
+    "dynamic" : "strict",
+    "properties" : {
+      "body" : {
+        "analyzer" : "english",
+        "type" : "text"
+      },
+      "checksum" : {
+        "type" : "binary"
+      },
+      "filed_at" : {
+        "format" : "strict_date_optional_time",
+        "type" : "date"
+      },
+      "firm_id" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "id" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "metadata" : {
+        "type" : "flattened"
+      },
+      "parties" : {
+        "properties" : {
+          "email" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          },
+          "name" : {
+            "analyzer" : "english",
+            "fields" : {
+              "keyword" : {
+                "ignore_above" : 256,
+                "type" : "keyword"
+              }
+            },
+            "type" : "text"
+          },
+          "role" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          }
+        },
+        "type" : "nested"
+      },
+      "relevance" : {
+        "type" : "double"
+      },
+      "size_bytes" : {
+        "type" : "long"
+      },
+      "tags" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "title" : {
+        "analyzer" : "english",
+        "fields" : {
+          "keyword" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          }
+        },
+        "type" : "text"
+      },
+      "type" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      }
+    }
+  },
+  "name" : "documents-vd458ad60",
+  "nestedPaths" : [ "parties" ],
+  "settings" : { },
+  "warnings" : [ ]
+}
