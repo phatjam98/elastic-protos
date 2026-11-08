@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package phatjam98.elasticprotos.example;
+
+import "google/protobuf/timestamp.proto";
+import "phatjam98/elasticprotos/v1/elastic_options.proto";
+import "phatjam98/elasticprotos/v1/geo.proto";
+
+option java_package = "com.phatjam98.elasticprotos.proto.example";
+option java_multiple_files = true;
+option java_outer_classname = "FirmProtos";
+
+// A law firm. Index alias "firms", name resolved from the alias plus a mapping hash.
+message Firm {
+  option (phatjam98.elasticprotos.v1.elastic) = {
+    alias: "firms"
+    shards: 1
+  };
+
+  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = true];
+  string name = 2 [(phatjam98.elasticprotos.v1.elastic_field) = { type: TEXT boost: 2.0 }];
+  string domain = 3;
+  FirmStatus status = 4;
+  Address headquarters = 5;             // singular message => object
+  repeated Office offices = 6;          // repeated message => nested
+  map<string, string> labels = 7;       // map => dynamic object
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+enum FirmStatus {
+  FIRM_STATUS_UNSPECIFIED = 0;
+  ACTIVE = 1;
+  SUSPENDED = 2;
+  CLOSED = 3;
+}
+
+message Address {
+  string street = 1;
+  string city = 2;
+  string state = 3;
+  string postal_code = 4;
+  phatjam98.elasticprotos.v1.LatLon location = 5;  // LatLon => geo_point
+}
+
+message Office {
+  string name = 1 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
+  Address address = 2;
+  int32 headcount = 3;
+}
