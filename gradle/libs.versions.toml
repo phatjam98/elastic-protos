@@ -2,7 +2,7 @@
 [versions]
 # protobuf stays on the 3.25 line: generated code from 3.25 loads on 3.25+ and 4.x runtimes,
 # and Micronaut 4 consumers are pinned to 3.25 by the Micronaut platform BOM.
-protobuf = "3.25.9"
+protobuf = "4.36.2"
 protobuf-plugin = "0.10.0"
 es-rest-client = "9.5.5"
 os-rest-client = "3.9.0"
