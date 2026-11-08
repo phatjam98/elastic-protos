@@ -1,0 +1,30 @@
+micronaut:
+  application:
+    # Shown in the startup log.
+    name: micronaut-sample
+  server:
+    # HTTP port of the sample API; override with MICRONAUT_SERVER_PORT.
+    port: ${MICRONAUT_SERVER_PORT:8080}
+
+elastic-protos:
+  # Which adapter to use: elasticsearch or opensearch. Both are on the classpath.
+  engine: ${ELASTIC_PROTOS_ENGINE:elasticsearch}
+  # Cluster URLs (a comma-separated list is accepted from the environment). The backticks are
+  # required: Micronaut would otherwise split the default value at its first colon.
+  hosts: ${ELASTIC_PROTOS_HOSTS:`http://localhost:9200`}
+  bootstrap:
+    # Generated message classes whose indices are created or migrated on startup. The plan is
+    # logged at INFO; a failed or blocked index aborts startup (fail-on-error defaults to true).
+    classes:
+      - com.acme.search.proto.Document
+      - com.acme.search.proto.Firm
+  defaults:
+    # A single-node dev cluster has nowhere to put replicas; 0 keeps the indices green.
+    replicas: 0
+  query:
+    # Page size when a search does not set one (?size=0 or no size parameter).
+    default-size: 20
+
+seed:
+  # Index three sample documents after startup: ./gradlew run -Dseed.enabled=true
+  enabled: false

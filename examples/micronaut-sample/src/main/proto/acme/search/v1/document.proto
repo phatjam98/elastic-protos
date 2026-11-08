@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package acme.search.v1;
+
+import "google/protobuf/timestamp.proto";
+import "phatjam98/elasticprotos/v1/elastic_options.proto";
+
+option java_package = "com.acme.search.proto";
+option java_multiple_files = true;
+option java_outer_classname = "DocumentProtos";
+
+// A filed document, stored behind the "documents" alias and analyzed as English text.
+message Document {
+  option (phatjam98.elasticprotos.v1.elastic) = {
+    alias: "documents"
+    default_analyzer: "english"
+  };
+
+  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = true];
+  string firm_id = 2;                     // keyword
+  string title = 3 [(phatjam98.elasticprotos.v1.elastic_field) = { type: TEXT boost: 3.0 }];
+  string body = 4 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
+  DocumentType type = 5;                  // enum => keyword
+  repeated string tags = 6;               // keyword array
+  repeated Party parties = 7;             // repeated message => nested
+  google.protobuf.Timestamp filed_at = 8; // date
+  int64 size_bytes = 9;                   // long
+  // Kept in the proto but never sent to the engine.
+  string internal_notes = 10 [(phatjam98.elasticprotos.v1.elastic_field).type = IGNORE];
+}
+
+enum DocumentType {
+  DOCUMENT_TYPE_UNSPECIFIED = 0;
+  FILING = 1;
+  ORDER = 2;
+  MOTION = 3;
+  NOTICE = 4;
+}
+
+message Party {
+  string name = 1 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
+  PartyRole role = 2;
+  string email = 3;
+}
+
+enum PartyRole {
+  PARTY_ROLE_UNSPECIFIED = 0;
+  PLAINTIFF = 1;
+  DEFENDANT = 2;
+  COUNSEL = 3;
+}
