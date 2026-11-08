@@ -1,49 +1,55 @@
-import org.gradle.api.tasks.testing.logging.TestExceptionFormat
-import org.gradle.api.tasks.testing.logging.TestLogEvent
-
 plugins {
-    // Apply the groovy plugin to also add support for Groovy (needed for Spock)
-    id 'groovy'
-
-    // Apply the java-library plugin for API and implementation separation.
     id 'elastic-protos.library-conventions'
-    id 'io.micronaut.library' version "4.0.3"
 }
 
-// Set the base name for all archives (JARs)
-archivesBaseName = 'elasticsearch-micronaut'
-
-// Java toolchain managed by conventions
-
-micronaut {
-    version "$micronautVersion"
-    importMicronautPlatform = true
-}
-
-jar {
-    manifest {
-        attributes(
-                "Implementation-Title": project.name,
-                "Implementation-Version": project.version
-        )
-    }
-}
+description = 'Micronaut integration for elastic-protos: configuration, bean factories and startup index bootstrap'
 
 dependencies {
-    api(project(":elasticsearch-utils"))
-    implementation("com.google.guava:guava:32.1.2-jre")
-    implementation("com.fasterxml.jackson.core:jackson-databind:2.15.2")
+    api project(':elastic-protos-core')
 
-    testAnnotationProcessor("io.micronaut:micronaut-inject-java")
-    testImplementation("io.micronaut.test:micronaut-test-spock")
+    implementation platform(libs.micronaut.platform)
+    implementation libs.micronaut.inject
+    implementation libs.micronaut.context
+    annotationProcessor platform(libs.micronaut.platform)
+    annotationProcessor libs.micronaut.annotation.processor
+
+    // Either adapter may be on the application classpath; beans are conditional on which one is.
+    compileOnly project(':elastic-protos-elasticsearch')
+    compileOnly project(':elastic-protos-opensearch')
+
+    testAnnotationProcessor platform(libs.micronaut.platform)
+    testAnnotationProcessor libs.micronaut.annotation.processor
+}
+
+testing.suites.test {
+    dependencies {
+        implementation platform(libs.micronaut.platform)
+        implementation libs.micronaut.test.spock
+        // Compiles the Groovy test beans (@Factory, @Replaces, listeners).
+        implementation libs.micronaut.inject.groovy
+        implementation project(':elastic-protos-testkit')
+        implementation project(':elastic-protos-elasticsearch')
+        implementation project(':elastic-protos-opensearch')
+    }
 }
 
 jacocoTestCoverageVerification {
     violationRules {
         rule {
             limit {
-                minimum = 0.3
+                counter = 'LINE'
+                value = 'COVEREDRATIO'
+                minimum = 0.60
             }
         }
+    }
+}
+
+// Coverage counts our classes only, not the $...Definition classes Micronaut generates.
+afterEvaluate {
+    tasks.withType(JacocoReportBase).configureEach {
+        classDirectories.setFrom(files(classDirectories.files.collect {
+            fileTree(dir: it, exclude: ['**/$*'])
+        }))
     }
 }

@@ -1,114 +1,141 @@
+// Base conventions for every Java module: toolchain, Spock test suites, JaCoCo, Checkstyle, Javadoc.
 import org.gradle.api.tasks.testing.logging.TestExceptionFormat
 import org.gradle.api.tasks.testing.logging.TestLogEvent
 
 plugins {
-    id("java")
-    id("com.google.protobuf")
-    id("com.github.johnrengelman.shadow")
-    id("jacoco")
-    id("checkstyle")
-    id("maven-publish")
+    id 'java-library'
+    id 'groovy'
+    id 'jacoco'
+    id 'checkstyle'
+    id 'jvm-test-suite'
 }
 
-repositories {
-    maven { url "https://repo.osgeo.org/repository/release/" }
-    mavenCentral()
-    // TODO: Add your own artifact registry if needed
+def libs = extensions.getByType(VersionCatalogsExtension).named('libs')
+
+group = 'com.phatjam98'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+    withSourcesJar()
+    withJavadocJar()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 17
+    options.encoding = 'UTF-8'
+    options.compilerArgs.addAll(['-Xlint:all', '-Xlint:-processing', '-Xlint:-serial'])
+}
+
+tasks.withType(GroovyCompile).configureEach {
+    options.encoding = 'UTF-8'
 }
 
 dependencies {
-    implementation("org.slf4j:slf4j-api:2.0.7")
-    implementation("com.google.protobuf:protobuf-java:3.23.4")
-    implementation('com.google.protobuf:protobuf-java-util:3.23.4')
-    // TODO: Replace with open source geobuf library
-    // implementation("com.phatjam98:geobuf:$geobufVersion")
-
-    // elasticsearch
-    implementation("co.elastic.clients:elasticsearch-java:7.17.12")
-    implementation("org.elasticsearch:elasticsearch:7.17.12")
-    implementation("org.elasticsearch.client:elasticsearch-rest-client:7.17.12")
-
-    testImplementation("ch.qos.logback:logback-classic:1.4.8")
-    testImplementation platform("org.spockframework:spock-bom:2.3-groovy-4.0")
-    testImplementation "org.spockframework:spock-core"
-    testImplementation 'org.apache.groovy:groovy-json:4.0.13'
-    testImplementation "org.testcontainers:spock:$testcontainersVersion"
-    testImplementation "org.testcontainers:elasticsearch:$testcontainersVersion"
-    testRuntimeOnly 'net.bytebuddy:byte-buddy:1.14.5'
-    testRuntimeOnly "org.objenesis:objenesis:3.3"
+    implementation libs.findLibrary('slf4j-api').get()
 }
 
-configurations.all {
-    resolutionStrategy {
-        cacheDynamicVersionsFor 5, "minutes"
-        force 'co.elastic.clients:elasticsearch-java:7.17.12'
-        force 'org.elasticsearch.client:elasticsearch-rest-client:7.17.12'
-        force 'org.elasticsearch:elasticsearch:7.17.12'
+// Generated protobuf code is excluded from style, coverage and javadoc.
+def generatedPackage = 'com/phatjam98/elasticprotos/proto/**'
+
+testing {
+    suites {
+        configureEach {
+            useSpock(libs.findVersion('spock').get().requiredVersion)
+            dependencies {
+                implementation libs.findLibrary('groovy').get()
+                runtimeOnly platform(libs.findLibrary('junit-bom').get())
+                runtimeOnly libs.findLibrary('junit-platform-launcher').get()
+                runtimeOnly libs.findLibrary('logback-classic').get()
+            }
+            targets.configureEach {
+                testTask.configure {
+                    // Compilation always targets 17; -PtestJavaVersion=21 runs the tests on a newer JDK.
+                    def testJava = providers.gradleProperty('testJavaVersion').map { Integer.parseInt(it) }.getOrElse(17)
+                    javaLauncher = javaToolchains.launcherFor {
+                        languageVersion = JavaLanguageVersion.of(testJava)
+                    }
+                    systemProperty 'updateGolden', providers.gradleProperty('updateGolden').getOrElse('false')
+                    testLogging {
+                        events TestLogEvent.FAILED, TestLogEvent.SKIPPED
+                        exceptionFormat = TestExceptionFormat.FULL
+                        showExceptions = true
+                        showCauses = true
+                        showStackTraces = true
+                    }
+                }
+            }
+        }
+
+        // Docker-backed tests live in src/integrationTest and never run from `./gradlew test`.
+        integrationTest(JvmTestSuite) {
+            dependencies {
+                implementation project()
+            }
+            targets.configureEach {
+                testTask.configure {
+                    shouldRunAfter(tasks.named('test'))
+                    systemProperty 'elasticprotos.engineImage', providers.gradleProperty('engineImage').getOrElse('')
+                }
+            }
+        }
     }
 }
 
 jacoco {
-    toolVersion = jacocoVersion
+    toolVersion = libs.findVersion('jacoco').get().requiredVersion
 }
 
-jacocoTestReport {
-    dependsOn test
-    afterEvaluate {
+afterEvaluate {
+    tasks.withType(JacocoReportBase).configureEach {
         classDirectories.setFrom(files(classDirectories.files.collect {
-            fileTree(dir: it, exclude: [
-                    'com/phatjam98/core/common/proto/*',
-                    'com/phatjam98/core/protos/*',
-                    'com/phatjam98/protos/*',
-                    'com/google/protobuf/*'
-            ])
+            fileTree(dir: it, exclude: [generatedPackage])
         }))
     }
 }
 
-test {
-    useJUnitPlatform()
-    testLogging {
-        events TestLogEvent.FAILED,
-                TestLogEvent.PASSED,
-                TestLogEvent.SKIPPED,
-                TestLogEvent.STANDARD_OUT
-        exceptionFormat = TestExceptionFormat.FULL
-        showExceptions = true
-        showCauses = true
-        showStackTraces = true
-        outputs.upToDateWhen { false }
-        showStandardStreams = true
-
-        debug {
-            events TestLogEvent.STARTED,
-                    TestLogEvent.FAILED,
-                    TestLogEvent.PASSED,
-                    TestLogEvent.SKIPPED,
-                    TestLogEvent.STANDARD_ERROR,
-                    TestLogEvent.STANDARD_OUT
-            exceptionFormat TestExceptionFormat.FULL
-        }
-
-        info.events = debug.events
-        info.exceptionFormat = debug.exceptionFormat
-
-        afterSuite { desc, result ->
-            if (!desc.parent) { // will match the outermost suite
-                def output = "Results: ${result.resultType} (${result.testCount} tests, ${result.successfulTestCount} passed, ${result.failedTestCount} failed, ${result.skippedTestCount} skipped)"
-                def startItem = '|  ', endItem = '  |'
-                def repeatLength = startItem.length() + output.length() + endItem.length()
-                println('\n' + ('-' * repeatLength) + '\n' + startItem + output + endItem + '\n' + ('-' * repeatLength))
-            }
-        }
+tasks.named('jacocoTestReport', JacocoReport) {
+    dependsOn tasks.named('test')
+    reports {
+        xml.required = true
+        html.required = true
     }
-    finalizedBy jacocoTestReport
 }
 
-System.setProperty("org.checkstyle.google.suppressionfilter.config", project.projectDir.toString() + "/config/checkstyle/checkstyle-suppressions.xml")
+tasks.named('jacocoTestCoverageVerification') {
+    dependsOn tasks.named('test')
+}
+
+tasks.named('test') {
+    finalizedBy tasks.named('jacocoTestReport')
+}
+
 checkstyle {
-    toolVersion = "9.0"
-    config = rootProject.resources.text.fromFile("config/checkstyle/google-java-format.xml")
-    ignoreFailures = true
-    maxErrors = 0
+    toolVersion = libs.findVersion('checkstyle').get().requiredVersion
+    configDirectory = rootProject.layout.projectDirectory.dir('config/checkstyle')
+    configFile = rootProject.file('config/checkstyle/google_checks.xml')
+    configProperties = [
+            'org.checkstyle.google.suppressionfilter.config':
+                    rootProject.file('config/checkstyle/checkstyle-suppressions.xml').absolutePath,
+    ]
+    ignoreFailures = false
     maxWarnings = 0
+}
+
+tasks.withType(Checkstyle).configureEach {
+    exclude generatedPackage
+}
+
+tasks.named('javadoc', Javadoc) {
+    exclude generatedPackage
+    options {
+        encoding = 'UTF-8'
+        addBooleanOption('html5', true)
+        addStringOption('Xdoclint:all,-missing', '-quiet')
+    }
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('jacocoTestCoverageVerification'), tasks.named('javadoc')
 }

@@ -1,0 +1,32 @@
+plugins {
+    id 'elastic-protos.java-conventions'
+    id 'elastic-protos.proto-conventions'
+}
+
+description = 'Internal test support for elastic-protos: example protos, golden fixtures and the shared engine integration specification'
+
+dependencies {
+    api project(':elastic-protos-core')
+    api platform(libs.spock.bom)
+    api libs.spock.core
+    api libs.groovy
+    api libs.testcontainers.core
+}
+
+// The adapters back the runnable Demo only. Their integration suites depend on this module's main
+// output, and this module's main depends on their main output, so there is no task cycle.
+dependencies {
+    implementation project(':elastic-protos-elasticsearch')
+    implementation project(':elastic-protos-opensearch')
+    // Console logging for the Demo; this module is internal and never published.
+    runtimeOnly libs.logback.classic
+}
+
+// ./gradlew :elastic-protos-testkit:demo --args="elasticsearch http://localhost:9200"
+tasks.register('demo', JavaExec) {
+    group = 'application'
+    description = 'Bootstraps, indexes and searches the sample data on a running cluster: --args="<elasticsearch|opensearch> <url>".'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.phatjam98.elasticprotos.testkit.Demo'
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }
+}

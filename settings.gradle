@@ -1,8 +1,26 @@
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
 plugins {
-  id 'org.gradle.toolchains.foojay-resolver-convention' version '0.7.0'
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
 }
 
 rootProject.name = 'elastic-protos'
 
-include 'elasticsearch-micronaut'
-include 'elasticsearch-utils'
+dependencyResolutionManagement {
+    repositoriesMode = RepositoriesMode.FAIL_ON_PROJECT_REPOS
+    repositories {
+        mavenCentral()
+    }
+}
+
+include 'elastic-protos-core'
+include 'elastic-protos-elasticsearch'
+include 'elastic-protos-opensearch'
+include 'elastic-protos-micronaut'
+include 'elastic-protos-testkit'
+include 'elastic-protos-bom'

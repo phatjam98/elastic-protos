@@ -1,0 +1,44 @@
+plugins {
+    id 'elastic-protos.library-conventions'
+}
+
+description = 'OpenSearch 2.x and 3.x adapter for elastic-protos, built on the official low-level REST client'
+
+dependencies {
+    api project(':elastic-protos-core')
+    // api, not implementation: OpenSearchEngine.of(RestClient) exposes the client type, so consumers need it on the compile classpath.
+    api libs.os.rest.client
+}
+
+testing.suites.integrationTest {
+    dependencies {
+        implementation project(':elastic-protos-testkit')
+        implementation libs.testcontainers.core
+        implementation libs.testcontainers.spock
+        implementation libs.os.testcontainers
+    }
+}
+
+// Server image for the integration suite; override with -PengineImage=<image>.
+// Verified locally (EngineIntegrationSpec green):
+//   opensearchproject/opensearch:3.9.0   (default)
+//   opensearchproject/opensearch:2.19.7
+def defaultEngineImage = 'opensearchproject/opensearch:3.9.0'
+testing.suites.integrationTest.targets.configureEach {
+    testTask.configure {
+        systemProperty 'elasticprotos.engineImage', providers.gradleProperty('engineImage').getOrElse(defaultEngineImage)
+    }
+}
+
+// Unit specs only; the Docker-backed integration suite is not counted.
+jacocoTestCoverageVerification {
+    violationRules {
+        rule {
+            limit {
+                counter = 'LINE'
+                value = 'COVEREDRATIO'
+                minimum = 0.70
+            }
+        }
+    }
+}

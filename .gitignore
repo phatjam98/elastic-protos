@@ -1,7 +1,32 @@
-.idea/
-
-### Gradle template
-.gradle
-**/build/
+# Gradle
+.gradle/
+build/
 !src/**/build/
-**/.gradle
+buildSrc/.gradle/
+buildSrc/build/
+.kotlin/
+
+# IDEs
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.project
+.classpath
+.settings/
+out/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local environment and secrets (JReleaser credentials, GPG keys)
+.env
+.env.local
+*.gpg
+*.asc
+
+# Logs and temp
+*.log
+*.tmp

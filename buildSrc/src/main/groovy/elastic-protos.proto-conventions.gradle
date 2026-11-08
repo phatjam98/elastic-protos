@@ -1,0 +1,18 @@
+// Applied to modules that compile .proto files. The .proto sources are packaged into the jar so
+// downstream protoc invocations can import them.
+plugins {
+    id 'com.google.protobuf'
+}
+
+def libs = extensions.getByType(VersionCatalogsExtension).named('libs')
+
+dependencies {
+    api libs.findLibrary('protobuf-java').get()
+    implementation libs.findLibrary('protobuf-java-util').get()
+}
+
+protobuf {
+    protoc {
+        artifact = "com.google.protobuf:protoc:${libs.findVersion('protobuf').get().requiredVersion}"
+    }
+}

@@ -1,0 +1,16 @@
+plugins {
+    id 'java-platform'
+    id 'elastic-protos.publish-conventions'
+}
+
+description = 'Bill of materials aligning the versions of all elastic-protos modules'
+group = 'com.phatjam98'
+
+dependencies {
+    constraints {
+        api project(':elastic-protos-core')
+        api project(':elastic-protos-elasticsearch')
+        api project(':elastic-protos-opensearch')
+        api project(':elastic-protos-micronaut')
+    }
+}

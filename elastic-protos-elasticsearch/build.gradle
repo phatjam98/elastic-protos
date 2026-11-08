@@ -1,0 +1,44 @@
+plugins {
+    id 'elastic-protos.library-conventions'
+}
+
+description = 'Elasticsearch 8.x and 9.x adapter for elastic-protos, built on the official low-level REST client'
+
+dependencies {
+    api project(':elastic-protos-core')
+    // api, not implementation: ElasticsearchEngine.of(RestClient) exposes the client type, so consumers need it on the compile classpath.
+    api libs.es.rest.client
+}
+
+testing.suites.integrationTest {
+    dependencies {
+        implementation project(':elastic-protos-testkit')
+        implementation libs.testcontainers.core
+        implementation libs.testcontainers.elasticsearch
+        implementation libs.testcontainers.spock
+    }
+}
+
+// Server image for the integration suite; override with -PengineImage=<image>.
+// Verified locally (EngineIntegrationSpec green):
+//   docker.elastic.co/elasticsearch/elasticsearch:9.5.5   (default)
+//   docker.elastic.co/elasticsearch/elasticsearch:8.19.23
+def defaultEngineImage = 'docker.elastic.co/elasticsearch/elasticsearch:9.5.5'
+testing.suites.integrationTest.targets.configureEach {
+    testTask.configure {
+        systemProperty 'elasticprotos.engineImage', providers.gradleProperty('engineImage').getOrElse(defaultEngineImage)
+    }
+}
+
+// Unit specs only; the Docker-backed integration suite is not counted.
+jacocoTestCoverageVerification {
+    violationRules {
+        rule {
+            limit {
+                counter = 'LINE'
+                value = 'COVEREDRATIO'
+                minimum = 0.70
+            }
+        }
+    }
+}
