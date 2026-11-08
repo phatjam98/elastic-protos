@@ -119,13 +119,34 @@ public final class ProtoMapper {
   }
 
   /**
-   * Returns whether a message opts out of indexing with {@code skip: true}.
+   * Returns whether a message declares {@code skip: TRUE} in its proto options. Programmatic
+   * overrides are not consulted; use {@link #skips(Descriptor)} for the decision this mapper makes.
+   *
+   * @param descriptor the message
+   * @return true if the proto marks it skipped
+   */
+  public static boolean isSkipped(Descriptor descriptor) {
+    return OptionsReader.messageOpts(descriptor).getSkip() == Bool3.TRUE;
+  }
+
+  /**
+   * Returns whether this mapper leaves a message without an index: its proto declares {@code skip:
+   * TRUE} and no override sets {@code skip} to {@code FALSE}, or an override sets it to {@code
+   * TRUE}.
    *
    * @param descriptor the message
    * @return true if it should not get an index
    */
-  public static boolean isSkipped(Descriptor descriptor) {
-    return OptionsReader.messageOpts(descriptor).getSkip();
+  public boolean skips(Descriptor descriptor) {
+    return mergedMessageOpts(descriptor, overrides).getSkip() == Bool3.TRUE;
+  }
+
+  private static MessageOpts mergedMessageOpts(Descriptor descriptor, MappingOverrides overrides) {
+    MessageOpts declared = OptionsReader.messageOpts(descriptor);
+    return overrides
+        .message(descriptor)
+        .map(override -> declared.toBuilder().mergeFrom(override).build())
+        .orElse(declared);
   }
 
   /**
@@ -194,17 +215,12 @@ public final class ProtoMapper {
     Run(Descriptor root, MappingOverrides runOverrides) {
       this.root = root;
       this.runOverrides = runOverrides;
-      MessageOpts declared = OptionsReader.messageOpts(root);
-      this.messageOpts =
-          runOverrides
-              .message(root)
-              .map(override -> declared.toBuilder().mergeFrom(override).build())
-              .orElse(declared);
+      this.messageOpts = mergedMessageOpts(root, runOverrides);
     }
 
     IndexDefinition run() {
-      if (messageOpts.getSkip()) {
-        throw new MappingException(root.getFullName(), "message is marked skip = true");
+      if (messageOpts.getSkip() == Bool3.TRUE) {
+        throw new MappingException(root.getFullName(), "message is marked skip = TRUE");
       }
       String declaredAlias =
           messageOpts.getAlias().isEmpty()
@@ -395,10 +411,11 @@ public final class ProtoMapper {
       fields.put(
           path,
           new FieldInfo(path, protoPath, kind, field.isRepeated(), keywordSubfield, boost, field));
-      if (kind.isText() || options.getFullText()) {
+      if (options.getFullText() == Bool3.TRUE
+          || (kind.isText() && options.getFullText() != Bool3.FALSE)) {
         fullTextFields.put(path, boost);
       }
-      if (options.getId()) {
+      if (options.getId() == Bool3.TRUE) {
         if (idField == null) {
           idField = path;
         } else if (!idField.equals(path)) {
@@ -450,10 +467,11 @@ public final class ProtoMapper {
         case INT64:
         case SFIXED64:
         case SINT64:
-        case FIXED64:
           return FieldKind.LONG;
         case UINT64:
-          warnings.add(path + ": uint64 does not fit a long and is mapped as keyword");
+        case FIXED64:
+          warnings.add(path + ": " + (field.getType() == FieldDescriptor.Type.UINT64 ? "uint64"
+              : "fixed64") + " does not fit a long and is mapped as keyword");
           return FieldKind.KEYWORD;
         case INT32:
         case SFIXED32:

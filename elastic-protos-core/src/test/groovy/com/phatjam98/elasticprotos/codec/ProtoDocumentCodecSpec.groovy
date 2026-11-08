@@ -145,6 +145,39 @@ class ProtoDocumentCodecSpec extends Specification {
     codec.fromDocument([int64_value: 123, uint64_value: 5], Scalars) == message
   }
 
+  def "a 64-bit value that does not fit the mapped long is a CodecException naming the field"() {
+    given: 'uint64 forced to LONG; 2^64 - 1 prints as an unsigned string'
+    def forced = ProtoDocumentCodec.of(ProtoMapper.builder().overrides(MappingOverrides.builder()
+        .forField(Scalars.descriptor, 'uint64_value') { it.type = EsType.LONG }.build()).build())
+    def message = Scalars.newBuilder().setUint64Value(-1L).setFixed64Value(-1L).build()
+
+    expect: 'fixed64 maps to keyword, so its full range is a string'
+    codec.toDocument(message) == [uint64_value: '18446744073709551615', fixed64_value: '18446744073709551615']
+    codec.fromDocument(codec.toDocument(message), Scalars) == message
+
+    when:
+    forced.toDocument(message)
+
+    then:
+    def e = thrown(CodecException)
+    e.message.contains('uint64_value')
+    e.message.contains('18446744073709551615')
+    e.message.contains('long')
+    e.cause instanceof NumberFormatException
+  }
+
+  def "a lat/lon message always writes both coordinates, even when they are 0"() {
+    expect:
+    codec.toDocument(Geo.newBuilder().setPoint(LatLon.newBuilder().setLon(10)).build()).point == [lat: 0.0d, lon: 10.0d]
+    codec.toDocument(Geo.newBuilder().setPoint(LatLon.newBuilder().setLat(-5)).build()).point == [lat: -5.0d, lon: 0.0d]
+    codec.toDocument(Geo.newBuilder().setPoint(LatLon.getDefaultInstance()).build()).point == [lat: 0.0d, lon: 0.0d]
+    codec.toDocument(Geo.newBuilder().setCoordinates(Coordinates.getDefaultInstance()).build()).coordinates == [lat: 0.0d, lon: 0.0d]
+    !codec.toDocument(Geo.getDefaultInstance()).containsKey('point')
+
+    and: 'it reads back to the same message'
+    codec.fromDocument([point: [lat: 0.0d, lon: 10.0d]], Geo).point == LatLon.newBuilder().setLon(10).build()
+  }
+
   def "defaults are omitted unless includeDefaults is set"() {
     given:
     def withDefaults = ProtoDocumentCodec.of(ProtoMapper.withDefaults(), CodecConfig.standard().withIncludeDefaults(true))

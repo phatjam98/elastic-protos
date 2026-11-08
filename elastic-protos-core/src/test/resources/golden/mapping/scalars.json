@@ -6,7 +6,7 @@
   "mappings" : {
     "_meta" : {
       "elastic_protos" : {
-        "hash" : "8b137a47",
+        "hash" : "1f4f3c4f",
         "proto" : "phatjam98.elasticprotos.test.Scalars",
         "schema_version" : 1
       }
@@ -30,7 +30,8 @@
         "type" : "long"
       },
       "fixed64_value" : {
-        "type" : "long"
+        "ignore_above" : 256,
+        "type" : "keyword"
       },
       "float_value" : {
         "type" : "float"
@@ -73,8 +74,8 @@
       }
     }
   },
-  "name" : "scalars-v8b137a47",
+  "name" : "scalars-v1f4f3c4f",
   "nestedPaths" : [ ],
   "settings" : { },
-  "warnings" : [ "uint64_value: uint64 does not fit a long and is mapped as keyword" ]
+  "warnings" : [ "uint64_value: uint64 does not fit a long and is mapped as keyword", "fixed64_value: fixed64 does not fit a long and is mapped as keyword" ]
 }

@@ -259,11 +259,17 @@ public final class ProtoDocumentCodec {
     switch (info.kind()) {
       case LONG:
       case INTEGER:
-        return config.int64AsNumber() && value instanceof String
-            ? Long.valueOf((String) value)
-            : value;
+        if (config.int64AsNumber() && value instanceof String) {
+          try {
+            return Long.valueOf((String) value);
+          } catch (NumberFormatException e) {
+            throw new CodecException("Field " + info.protoPath() + " holds " + value
+                + ", which does not fit the " + info.kind().esType() + " it is mapped as", e);
+          }
+        }
+        return value;
       case GEO_POINT:
-        return value instanceof Map ? latLon(asMap(value)) : value;
+        return value instanceof Map ? geoPoint(asMap(value)) : value;
       case GEO_SHAPE:
         if (value instanceof Map) {
           Map<String, Object> shape = asMap(value);
@@ -364,6 +370,17 @@ public final class ProtoDocumentCodec {
       return out;
     }
     return convert.apply(value);
+  }
+
+  /**
+   * Converts a printed lat/lon message to {@code {"lat": .., "lon": ..}}. Canonical JSON leaves out
+   * coordinates that are 0, and engines reject a point without both, so missing ones are 0.0.
+   */
+  private static Map<String, Object> geoPoint(Map<String, Object> in) {
+    Map<String, Object> out = latLon(in);
+    out.putIfAbsent("lat", 0.0d);
+    out.putIfAbsent("lon", 0.0d);
+    return out;
   }
 
   /** Normalizes a lat/lon-like object to the {@code {"lat": .., "lon": ..}} form engines accept. */
