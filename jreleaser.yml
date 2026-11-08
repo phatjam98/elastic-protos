@@ -1,28 +1,39 @@
+# JReleaser configuration for elastic-protos.
+#
+# Gradle stages every published module into build/staging-deploy (./gradlew stageAll), and JReleaser
+# signs and deploys from there:
+#   - SNAPSHOT versions: `./gradlew jreleaserDeploy` -> nexus2 snapshot-deploy (Central snapshots repo)
+#   - release versions:  `./gradlew jreleaserFullRelease` -> mavenCentral release-deploy + GitHub release
+# Credentials and the signing key come from JRELEASER_* environment variables, never from this file.
 project:
   name: elastic-protos
-  description: Elasticsearch Java library with Micronaut integration
+  description: Protobuf-driven index mappings, migrations and queries for Elasticsearch and OpenSearch
   longDescription: |
-    A modern Java library providing high-level interfaces for Elasticsearch interactions, including client factory,
-    service layer, request builders, geo utilities, and comprehensive models for search operations.
+    elastic-protos turns Protocol Buffer message definitions into Elasticsearch and OpenSearch index
+    mappings, keeps indices in step as the protos evolve, and searches them with a proto-defined query DSL.
 
     Features:
-    - Multi-module architecture (Java 11 + Java 17)
-    - Protocol Buffer integration for type-safe queries
-    - Micronaut-based service layer with dependency injection
-    - Comprehensive query builders for Elasticsearch
-    - Geo utilities and bulk operations support
-    - High test coverage requirements (60% utils, 30% micronaut)
+    - Engine-agnostic core with adapters for Elasticsearch 8.x/9.x and OpenSearch 2.x/3.x, built on the
+      official low-level REST clients
+    - Index mappings driven by proto field and message options, with programmatic overrides
+    - Hash-versioned indices with automatic PUT_MAPPING or REINDEX migrations behind a stable alias
+    - Protobuf <-> JSON document codec
+    - Proto query DSL compiled to search requests, including full-text search
+    - Optional Micronaut 4 module with configuration, bean factories and startup bootstrap
   links:
     homepage: https://github.com/phatjam98/elastic-protos
     documentation: https://github.com/phatjam98/elastic-protos#readme
+    bugTracker: https://github.com/phatjam98/elastic-protos/issues
   authors:
     - Travis Carter
   license: Apache-2.0
   inceptionYear: 2024
   stereotype: NONE
-  java:
-    groupId: com.phatjam98
-    version: 11
+  languages:
+    java:
+      groupId: com.phatjam98
+      version: 17
+      multiProject: true
 
 release:
   github:
@@ -32,13 +43,13 @@ release:
     owner: phatjam98
     name: elastic-protos
     tagName: 'v{{projectVersion}}'
-    releaseName: 'Elastic Protos {{projectVersion}}'
+    releaseName: 'elastic-protos {{projectVersion}}'
     branch: main
     branchPush: main
     overwrite: false
     draft: false
     prerelease:
-      pattern: '.*(-SNAPSHOT|-alpha|-beta|-rc)'
+      pattern: '.*-(SNAPSHOT|alpha|beta|rc|RC|M).*'
       enabled: true
     issues:
       enabled: true
@@ -48,18 +59,41 @@ release:
       enabled: true
       formatted: ALWAYS
       preset: conventional-commits
+      skipMergeCommits: true
+      # Labels come from the conventional-commits preset labelers (one per commit type). Commits with
+      # these labels are dropped from the changelog; dependabot uses build(deps) / ci(deps).
+      excludeLabels:
+        - merge
+        - chore
+        - ci
+        - docs
+        - build
+        - test
+      hide:
+        categories:
+          - merge
+          - tasks
+          - build
+          - docs
+          - test
+        contributors:
+          - '[bot]'
+          - 'GitHub'
+          - 'dependabot'
 
 signing:
-  active: ALWAYS
-  armored: true
-  verify: true
-  mode: MEMORY
+  pgp:
+    # Key material comes from JRELEASER_GPG_PUBLIC_KEY / JRELEASER_GPG_SECRET_KEY / JRELEASER_GPG_PASSPHRASE.
+    active: ALWAYS
+    armored: true
+    verify: true
+    mode: MEMORY
 
 deploy:
   maven:
     pomchecker:
-      version: 1.11.0
-      failOnError: false
+      # version omitted: JReleaser 1.27 uses its bundled default (PomChecker 1.15.0)
+      failOnError: true
       failOnWarning: false
     mavenCentral:
       release-deploy:
@@ -86,17 +120,6 @@ deploy:
         snapshotSupported: true
         closeRepository: true
         releaseRepository: true
-        stagingRepositories:
-          - build/staging-deploy
-
-files:
-  artifacts:
-    - path: elasticsearch-utils/build/libs/elasticsearch-utils-{{projectVersion}}.jar
-    - path: elasticsearch-utils/build/libs/elasticsearch-utils-{{projectVersion}}-sources.jar
-    - path: elasticsearch-utils/build/libs/elasticsearch-utils-{{projectVersion}}-javadoc.jar
-    - path: elasticsearch-micronaut/build/libs/elasticsearch-micronaut-{{projectVersion}}.jar
-    - path: elasticsearch-micronaut/build/libs/elasticsearch-micronaut-{{projectVersion}}-sources.jar
-    - path: elasticsearch-micronaut/build/libs/elasticsearch-micronaut-{{projectVersion}}-javadoc.jar
 
 announce:
   enabled: false

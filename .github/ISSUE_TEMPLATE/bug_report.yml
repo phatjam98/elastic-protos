@@ -1,0 +1,58 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. For security problems, do not open an issue: follow docs/SECURITY.md.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead. Include stack traces.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: A minimal proto (with its elastic / elastic_field options) and the code that triggers the problem.
+      render: java
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: elastic-protos version
+      placeholder: 1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: modules
+    attributes:
+      label: Modules involved
+      multiple: true
+      options:
+        - elastic-protos-core
+        - elastic-protos-elasticsearch
+        - elastic-protos-opensearch
+        - elastic-protos-micronaut
+        - elastic-protos-bom
+    validations:
+      required: true
+  - type: input
+    id: engine
+    attributes:
+      label: Engine and version
+      placeholder: Elasticsearch 9.5.5 / OpenSearch 2.19.7 / not engine related
+  - type: input
+    id: runtime
+    attributes:
+      label: Java, protobuf-java and (if used) Micronaut versions
+      placeholder: Temurin 17.0.17, protobuf-java 3.25.9, Micronaut 4.10
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Generated mapping (IndexDefinition.mappings()), compiled query (CompiledSearch.body()), migration plan report, logs.
