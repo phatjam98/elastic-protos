@@ -229,6 +229,8 @@ public class ElasticProtosConfiguration {
    *   <li>{@code delete-old}: delete the old index after a successful reindex; default false
    *   <li>{@code removed-fields}: {@code KEEP} (default) or {@code REINDEX}
    *   <li>{@code dry-run}: plan and log only; default false
+   *   <li>{@code clear-stale-write-block}: lift a write block found on an alias target that needs
+   *       no reindex, assuming an interrupted reindex left it; default true
    *   <li>{@code fail-on-error}: abort startup when an index fails or is blocked; default true
    *   <li>{@code reindex-timeout}: how long a reindex may take; default {@code 10m}
    * </ul>
@@ -243,6 +245,7 @@ public class ElasticProtosConfiguration {
     private boolean deleteOld;
     private RemovedFieldPolicy removedFields = RemovedFieldPolicy.KEEP;
     private boolean dryRun;
+    private boolean clearStaleWriteBlock = true;
     private boolean failOnError = true;
     private Duration reindexTimeout = Duration.ofMinutes(10);
 
@@ -314,6 +317,16 @@ public class ElasticProtosConfiguration {
     /** Sets {@code dry-run}. */
     public void setDryRun(boolean dryRun) {
       this.dryRun = dryRun;
+    }
+
+    /** Returns {@code clear-stale-write-block}. */
+    public boolean isClearStaleWriteBlock() {
+      return clearStaleWriteBlock;
+    }
+
+    /** Sets {@code clear-stale-write-block}. */
+    public void setClearStaleWriteBlock(boolean clearStaleWriteBlock) {
+      this.clearStaleWriteBlock = clearStaleWriteBlock;
     }
 
     /** Returns {@code fail-on-error}. */

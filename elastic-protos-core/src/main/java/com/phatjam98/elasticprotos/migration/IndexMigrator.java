@@ -18,6 +18,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,6 +33,17 @@ import org.slf4j.LoggerFactory;
  * been swapped, so writes fail for that window; zero-downtime dual writes are out of scope. The
  * old index is retained, still write-blocked, unless {@link MigrationOptions#deleteOldAfter()};
  * {@link #rollback(IndexPlan, String)} points the alias back at it.
+ *
+ * <p>When a reindex fails, the old index is unblocked and the new index is deleted, but only if
+ * this run created it and the alias does not point at it. An index that already has the target
+ * name when a reindex starts is a leftover from an interrupted run: it is reused when its recorded
+ * hash is the target hash and recreated otherwise. A write block found on the index an alias
+ * points at is assumed to be left by an interrupted reindex and is cleared when that index needs
+ * no reindex, unless {@link MigrationOptions#clearStaleWriteBlock()} is false.
+ *
+ * <p>Running the migrator for the same aliases from several processes at once is unsupported and
+ * can be destructive: one process can clear the write block or delete the index another is
+ * reindexing into. Run it from one instance or a dedicated job.
  */
 public final class IndexMigrator {
 
@@ -74,7 +86,7 @@ public final class IndexMigrator {
   public MigrationPlan plan(List<Descriptor> messages) {
     List<IndexPlan> items = new ArrayList<>();
     for (Descriptor descriptor : messages) {
-      if (ProtoMapper.isSkipped(descriptor)) {
+      if (mapper.skips(descriptor)) {
         continue;
       }
       items.add(planOne(mapper.map(descriptor)));
@@ -95,6 +107,37 @@ public final class IndexMigrator {
       descriptors.add(ProtoMapper.descriptorOf(type));
     }
     return plan(descriptors);
+  }
+
+  /** Adds the warning for a write-blocked current index and marks the plan. */
+  private IndexPlan withWriteBlock(IndexPlan plan) {
+    String warning = "index " + plan.currentIndex() + " has a write block (index.blocks.write)"
+        + ", probably left by an interrupted reindex; ";
+    switch (plan.action()) {
+      case NO_OP:
+      case PUT_MAPPING:
+        warning += options.clearStaleWriteBlock()
+            ? "it will be cleared (clearStaleWriteBlock)"
+            : "it is left in place (clearStaleWriteBlock is false) and writes through "
+                + plan.alias() + " fail until it is cleared";
+        break;
+      case REINDEX:
+        warning += "the reindex moves the alias to an unblocked index";
+        break;
+      default:
+        warning += "writes through " + plan.alias() + " fail until it is cleared";
+        break;
+    }
+    List<String> warnings = new ArrayList<>(plan.warnings());
+    warnings.add(warning);
+    return new IndexPlan(plan.target(), plan.action(), plan.currentIndex(), plan.currentHash(),
+        plan.diff(), plan.reason(), warnings, true);
+  }
+
+  /** Reads {@code index.blocks.write} from settings as engines return them (nested, strings). */
+  private static boolean isWriteBlocked(Map<String, Object> settings) {
+    Object write = map(map(map(settings.get("index")).get("blocks"))).get("write");
+    return "true".equals(String.valueOf(write));
   }
 
   private IndexPlan planOne(IndexDefinition target) {
@@ -126,6 +169,12 @@ public final class IndexMigrator {
     String current = holders.get(0);
     Map<String, Object> mappings = engine.getMappings(current);
     Map<String, Object> settings = engine.getSettings(current);
+    IndexPlan plan = planExisting(target, current, mappings, settings);
+    return isWriteBlocked(settings) ? withWriteBlock(plan) : plan;
+  }
+
+  private IndexPlan planExisting(IndexDefinition target, String current,
+      Map<String, Object> mappings, Map<String, Object> settings) {
     String currentHash = recordedHash(mappings);
     MappingDiff diff = DiffClassifier.diff(mappings, target.mappings(), settings,
         target.settings());
@@ -286,6 +335,7 @@ public final class IndexMigrator {
           LOG.info("{}: adding fields {} to {}", item.alias(), paths(item.diff().added()),
               item.currentIndex());
           engine.putMappings(item.currentIndex(), item.target().mappings());
+          clearStaleWriteBlock(item);
           return new Outcome(item, Status.APPLIED, item.currentIndex(), List.of(), null);
         case REINDEX:
           return reindex(item);
@@ -294,12 +344,23 @@ public final class IndexMigrator {
           return new Outcome(item, Status.SKIPPED, item.currentIndex(), List.of(), null);
         default:
           LOG.info("{}: {} is up to date", item.alias(), item.currentIndex());
-          return new Outcome(item, Status.SKIPPED, item.currentIndex(), List.of(), null);
+          return new Outcome(item, clearStaleWriteBlock(item) ? Status.APPLIED : Status.SKIPPED,
+              item.currentIndex(), List.of(), null);
       }
     } catch (RuntimeException e) {
       LOG.info("{}: {} failed: {}", item.alias(), item.action(), e.getMessage());
       return new Outcome(item, Status.FAILED, item.currentIndex(), List.of(), e);
     }
+  }
+
+  private boolean clearStaleWriteBlock(IndexPlan item) {
+    if (!item.writeBlocked() || !options.clearStaleWriteBlock()) {
+      return false;
+    }
+    LOG.warn("{}: clearing the write block on {}, assumed to be left by an interrupted reindex",
+        item.alias(), item.currentIndex());
+    engine.setWriteBlock(item.currentIndex(), false);
+    return true;
   }
 
   private Outcome create(IndexPlan item) {
@@ -327,12 +388,7 @@ public final class IndexMigrator {
     String current = item.currentIndex();
     String next = target.name();
 
-    if (engine.indexExists(next)) {
-      LOG.info("{}: reusing existing index {}", alias, next);
-    } else {
-      LOG.info("{}: creating {} for the reindex from {}", alias, next, current);
-      engine.createIndex(next, creationSettings(target), target.mappings(), Set.of());
-    }
+    final boolean createdNext = prepareTarget(target, current);
     LOG.info("{}: blocking writes to {}", alias, current);
     engine.setWriteBlock(current, true);
     try {
@@ -361,8 +417,8 @@ public final class IndexMigrator {
             + " of " + before + " documents");
       }
     } catch (RuntimeException e) {
-      LOG.info("{}: reindex failed, unblocking {} and deleting {}", alias, current, next);
-      undo(current, next);
+      LOG.warn("{}: reindex {} -> {} failed: {}", alias, current, next, e.getMessage());
+      undo(alias, current, next, createdNext);
       if (e instanceof MigrationException) {
         throw e;
       }
@@ -375,9 +431,15 @@ public final class IndexMigrator {
       engine.updateAliases(List.of(AliasAction.remove(current, alias),
           AliasAction.add(next, alias)));
     } catch (RuntimeException e) {
-      undo(current, next);
-      throw new MigrationException("alias swap " + current + " -> " + next + " failed: "
-          + e.getMessage(), e);
+      Set<String> holders = aliasHolders(alias);
+      if (Set.of(next).equals(holders)) {
+        LOG.warn("{}: the alias swap reported a failure ({}) but {} now points at {} only;"
+            + " treating the migration as succeeded", alias, e.getMessage(), alias, next);
+      } else {
+        undo(alias, current, next, createdNext);
+        throw new MigrationException("alias swap " + current + " -> " + next + " failed: "
+            + e.getMessage(), e);
+      }
     }
     if (options.deleteOldAfter()) {
       LOG.info("{}: deleting old index {}", alias, current);
@@ -388,16 +450,81 @@ public final class IndexMigrator {
     return new Outcome(item, Status.APPLIED, next, List.of(current), null);
   }
 
-  private void undo(String current, String next) {
+  /**
+   * Makes sure the reindex target exists with the target mappings. An index that already has the
+   * target name is a leftover from an earlier run that did not finish: it is reused when it records
+   * the target hash, and deleted and recreated otherwise, since its mappings are unknown. The index
+   * the alias points at is never touched.
+   *
+   * @return whether this run created the index, and so may delete it if the migration fails
+   */
+  private boolean prepareTarget(IndexDefinition target, String current) {
+    String alias = target.alias();
+    String next = target.name();
+    if (engine.indexExists(next)) {
+      Set<String> holders = aliasHolders(alias);
+      if (holders == null || holders.contains(next)) {
+        throw new MigrationException("alias " + alias + " "
+            + (holders == null ? "could not be read" : "already points at " + next)
+            + " while migrating from " + current + "; another migration may be running."
+            + " Plan again once it has finished");
+      }
+      String hash = recordedHash(engine.getMappings(next));
+      if (hash.equals(target.contentHash())) {
+        LOG.info("{}: reusing {}, left over from an earlier attempt with the target hash {}",
+            alias, next, hash);
+        return false;
+      }
+      LOG.warn("{}: {} is left over from an earlier attempt with hash {} instead of {};"
+          + " deleting and recreating it", alias, next, hash, target.contentHash());
+      engine.deleteIndex(next);
+    }
+    LOG.info("{}: creating {} for the reindex from {}", alias, next, current);
+    engine.createIndex(next, creationSettings(target), target.mappings(), Set.of());
+    return true;
+  }
+
+  /** Returns the indices the alias points at, or null when they cannot be read. */
+  private Set<String> aliasHolders(String alias) {
+    try {
+      Set<String> holders = new TreeSet<>();
+      engine.getAliases(alias).forEach((index, names) -> {
+        if (names.contains(alias)) {
+          holders.add(index);
+        }
+      });
+      return holders;
+    } catch (RuntimeException e) {
+      LOG.warn("{}: could not read the alias: {}", alias, e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * Cleans up after a failed reindex: lifts the write block on the old index and deletes the new
+   * index, but only if this run created it and the alias, read again, does not point at it.
+   */
+  private void undo(String alias, String current, String next, boolean createdNext) {
     try {
       engine.setWriteBlock(current, false);
     } catch (RuntimeException e) {
-      LOG.info("could not unblock {}: {}", current, e.getMessage());
+      LOG.warn("{}: could not unblock {}: {}", alias, current, e.getMessage());
     }
+    if (!createdNext) {
+      LOG.warn("{}: keeping {}, which this run reused rather than created", alias, next);
+      return;
+    }
+    Set<String> holders = aliasHolders(alias);
+    if (holders == null || holders.contains(next)) {
+      LOG.warn("{}: not deleting {}: the alias {}", alias, next,
+          holders == null ? "could not be read" : "points at it");
+      return;
+    }
+    LOG.info("{}: deleting {}", alias, next);
     try {
       engine.deleteIndex(next);
     } catch (RuntimeException e) {
-      LOG.info("could not delete {}: {}", next, e.getMessage());
+      LOG.warn("{}: could not delete {}: {}", alias, next, e.getMessage());
     }
   }
 

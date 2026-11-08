@@ -40,6 +40,7 @@ class ConfigurationDefaultsSpec extends Specification {
       !deleteOld
       removedFields.name() == 'KEEP'
       !dryRun
+      clearStaleWriteBlock
       failOnError
       reindexTimeout == Duration.ofMinutes(10)
     }

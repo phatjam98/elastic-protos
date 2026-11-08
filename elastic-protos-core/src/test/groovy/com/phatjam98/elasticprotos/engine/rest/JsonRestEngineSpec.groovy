@@ -221,7 +221,8 @@ class JsonRestEngineSpec extends Specification {
     given:
     def failing = new FakeHttp().enqueue(200, [task: 't']).enqueue(200, [completed: true, response: [total: 1, failures: [[id: '1', cause: [reason: 'boom']]]]])
     def errored = new FakeHttp().enqueue(200, [task: 't']).enqueue(200, [completed: true, error: [reason: 'script_exception']])
-    def slow = new FakeHttp().enqueue(200, [task: 't']).enqueue(200, [completed: false]).enqueue(200, [completed: false]).enqueue(200, [completed: false])
+    def slow = new FakeHttp().enqueue(200, [task: 't']).enqueue(200, [completed: false])
+        .enqueue(200, [acknowledged: true]).enqueue(200, [completed: true, error: [reason: 'cancelled']])
 
     expect:
     !new JsonRestEngine(failing, Duration.ofMillis(1)).reindex(ReindexRequest.of('a', 'b')).ok()
@@ -235,11 +236,167 @@ class JsonRestEngineSpec extends Specification {
     errorEx.message.contains('script_exception')
 
     when:
-    new JsonRestEngine(slow, Duration.ofMillis(1)).reindex(ReindexRequest.of('a', 'b').withTimeout(Duration.ofMillis(2)))
+    new JsonRestEngine(slow, Duration.ofMillis(1)).reindex(ReindexRequest.of('a', 'b').withTimeout(Duration.ofNanos(1)))
 
     then:
     def e = thrown(EngineException)
     e.kind == EngineException.Kind.TIMEOUT
+  }
+
+  def "a reindex that times out is cancelled and awaited before the timeout is reported"() {
+    given:
+    http.enqueue(200, [task: 'n:7'])
+        .enqueue(200, [completed: false])
+        .enqueue(200, [nodes: [:]])
+        .enqueue(200, [completed: false])
+        .enqueue(200, [completed: true, error: [type: 'task_cancelled_exception', reason: 'by user request']])
+
+    when:
+    engine.reindex(ReindexRequest.of('a', 'b').withTimeout(Duration.ofNanos(1)))
+
+    then:
+    def e = thrown(EngineException)
+    e.kind == EngineException.Kind.TIMEOUT
+    e.message.contains('did not finish')
+    e.message.contains('the task was cancelled')
+    http.requests.collect { "${it.method} ${it.path}".toString() } == [
+        'POST /_reindex', 'GET /_tasks/n:7', 'POST /_tasks/n:7/_cancel', 'GET /_tasks/n:7', 'GET /_tasks/n:7']
+  }
+
+  def "transient poll failures are retried and the reindex then succeeds"() {
+    given:
+    http.enqueue(200, [task: 'n:1'])
+        .enqueue(503, [error: [type: 'unavailable', reason: 'busy']])
+        .enqueueFailure(new IOException('connection reset'))
+        .enqueue(502, 'bad gateway')
+        .enqueue(200, [completed: true, response: [total: 1, created: 1, failures: []]])
+
+    when:
+    def result = engine.reindex(ReindexRequest.of('a', 'b'))
+
+    then:
+    result.ok()
+    result.created() == 1
+    http.requests*.path == ['/_reindex'] + ['/_tasks/n:1'] * 4
+  }
+
+  def "a poll that keeps failing cancels the task after the retries"() {
+    given:
+    http.enqueue(200, [task: 'n:1'])
+    4.times { http.enqueue(503, [error: [type: 'unavailable', reason: 'busy']]) }
+    http.enqueue(200, [acknowledged: true])
+        .enqueue(500, 'still broken')
+        .enqueue(200, [completed: true])
+
+    when:
+    engine.reindex(ReindexRequest.of('a', 'b'))
+
+    then:
+    def e = thrown(EngineException)
+    e.kind == EngineException.Kind.TRANSIENT
+    e.status == 503
+    e.message.contains('polling reindex task n:1 failed')
+    e.message.contains('the task was cancelled')
+    http.requests.collect { "${it.method} ${it.path}".toString() } ==
+        ['POST /_reindex'] + ['GET /_tasks/n:1'] * 4 + ['POST /_tasks/n:1/_cancel', 'GET /_tasks/n:1', 'GET /_tasks/n:1']
+  }
+
+  def "a non-transient poll failure cancels at once; a task already gone counts as cancelled"() {
+    given:
+    http.enqueue(200, [task: 'n:1'])
+        .enqueue(403, [error: [type: 'security_exception', reason: 'no']])
+        .enqueue(404, [error: [type: 'resource_not_found_exception', reason: 'gone']])
+        .enqueue(404, [error: [type: 'resource_not_found_exception', reason: 'gone']])
+
+    when:
+    engine.reindex(ReindexRequest.of('a', 'b'))
+
+    then:
+    def e = thrown(EngineException)
+    e.kind == EngineException.Kind.UNAUTHORIZED
+    e.message.contains('the task was cancelled')
+    http.requests.size() == 4
+  }
+
+  def "a failed cancel is reported as such"() {
+    given:
+    http.enqueue(200, [task: 'n:1'])
+        .enqueue(400, [error: [type: 'illegal_argument_exception', reason: 'bad']])
+        .enqueue(500, 'cancel broke')
+
+    when:
+    engine.reindex(ReindexRequest.of('a', 'b'))
+
+    then:
+    def e = thrown(EngineException)
+    e.kind == EngineException.Kind.BAD_REQUEST
+    e.message.contains('cancelling the task failed')
+    e.message.contains('may still be running')
+  }
+
+  def "a cancelled task that does not stop within the cancel wait is reported as possibly running"() {
+    given:
+    http.enqueue(200, [task: 'n:1'])
+        .enqueue(200, [completed: false])
+        .enqueue(200, [nodes: [:]])
+        .enqueue(500, 'flaky')
+    def impatient = new JsonRestEngine(http, Duration.ofMillis(1), Duration.ofNanos(1))
+
+    when:
+    impatient.reindex(ReindexRequest.of('a', 'b').withTimeout(Duration.ofNanos(1)))
+
+    then:
+    def e = thrown(EngineException)
+    e.kind == EngineException.Kind.TIMEOUT
+    e.message.contains('asked to cancel but had not stopped within PT0.000000001S')
+  }
+
+  def "an interrupt while waiting for a cancelled task ends the wait"() {
+    given:
+    http.enqueue(200, [task: 'n:1'])
+        .enqueue(403, [error: [type: 'security_exception', reason: 'no']])
+        .enqueue(200, [nodes: [:]])
+        .enqueue(200, [completed: false])
+
+    when:
+    Thread.currentThread().interrupt()
+    engine.reindex(ReindexRequest.of('a', 'b'))
+
+    then:
+    def e = thrown(EngineException)
+    e.message.contains('interrupted while waiting for it to stop')
+    Thread.interrupted()
+  }
+
+  def "a failed cancel after an interrupt is attached to the interruption"() {
+    given:
+    http.enqueue(200, [task: 'n:1']).enqueue(200, [completed: false]).enqueueFailure(new IOException('down'))
+
+    when:
+    Thread.currentThread().interrupt()
+    new JsonRestEngine(http, Duration.ofSeconds(30)).reindex(ReindexRequest.of('a', 'b'))
+
+    then:
+    def e = thrown(EngineException)
+    e.message.contains('Interrupted')
+    e.suppressed*.message.any { it.contains('down') }
+    Thread.interrupted()
+  }
+
+  def "interrupting the wait cancels the task without waiting for it"() {
+    given:
+    http.enqueue(200, [task: 'n:1']).enqueue(200, [completed: false]).enqueue(200, [acknowledged: true])
+    def slowEngine = new JsonRestEngine(http, Duration.ofSeconds(30))
+
+    when:
+    Thread.currentThread().interrupt()
+    slowEngine.reindex(ReindexRequest.of('a', 'b'))
+
+    then:
+    def e = thrown(EngineException)
+    e.message.contains('Interrupted')
+    Thread.interrupted()
+    http.requests.last().path == '/_tasks/n:1/_cancel'
   }
 
   def "index, create, update and delete documents"() {

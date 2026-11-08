@@ -15,6 +15,8 @@ import java.util.List;
  *     current index
  * @param reason why the action was chosen
  * @param warnings things that will not be applied or deserve attention
+ * @param writeBlocked whether the current index has {@code index.blocks.write=true}; see {@link
+ *     MigrationOptions#clearStaleWriteBlock()}
  */
 public record IndexPlan(
     IndexDefinition target,
@@ -23,11 +25,24 @@ public record IndexPlan(
     String currentHash,
     MappingDiff diff,
     String reason,
-    List<String> warnings) {
+    List<String> warnings,
+    boolean writeBlocked) {
 
   /** Copies the warnings. */
   public IndexPlan {
     warnings = List.copyOf(warnings);
+  }
+
+  /** Creates a plan for an item whose current index, if any, is not write-blocked. */
+  public IndexPlan(
+      IndexDefinition target,
+      Action action,
+      String currentIndex,
+      String currentHash,
+      MappingDiff diff,
+      String reason,
+      List<String> warnings) {
+    this(target, action, currentIndex, currentHash, diff, reason, warnings, false);
   }
 
   /** Returns the alias being migrated. */

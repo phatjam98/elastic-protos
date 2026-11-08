@@ -30,6 +30,8 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.TimeUnit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A complete {@link SearchEngine} over the REST API shared by Elasticsearch and OpenSearch. The
@@ -41,12 +43,17 @@ import java.util.concurrent.TimeUnit;
  */
 public final class JsonRestEngine implements SearchEngine {
 
+  private static final Logger LOG = LoggerFactory.getLogger(JsonRestEngine.class);
   private static final Duration DEFAULT_POLL = Duration.ofMillis(500);
+  /** Transient failures tolerated in a row while polling a reindex task. */
+  private static final int POLL_RETRIES = 3;
+  private static final Duration DEFAULT_CANCEL_WAIT = Duration.ofSeconds(30);
   private static final String FLATTENED = "flattened";
   private static final String FLAT_OBJECT = "flat_object";
 
   private final RawHttp http;
   private final Duration reindexPoll;
+  private final Duration cancelWait;
   private volatile EngineInfo info;
 
   /** Creates an engine over a transport, polling reindex tasks every half second. */
@@ -56,8 +63,21 @@ public final class JsonRestEngine implements SearchEngine {
 
   /** Creates an engine over a transport with a custom reindex poll interval. */
   public JsonRestEngine(RawHttp http, Duration reindexPoll) {
+    this(http, reindexPoll, DEFAULT_CANCEL_WAIT);
+  }
+
+  /**
+   * Creates an engine with a custom reindex poll interval and a custom bound on how long a
+   * cancelled reindex task is awaited.
+   *
+   * @param http the transport
+   * @param reindexPoll the interval between polls of a running reindex task
+   * @param cancelWait how long to wait for a cancelled reindex task to stop
+   */
+  public JsonRestEngine(RawHttp http, Duration reindexPoll, Duration cancelWait) {
     this.http = http;
     this.reindexPoll = reindexPoll;
+    this.cancelWait = cancelWait;
   }
 
   /**
@@ -190,8 +210,24 @@ public final class JsonRestEngine implements SearchEngine {
     String task = string(started.get("task"));
 
     long deadline = System.nanoTime() + request.timeout().toNanos();
+    int pollFailures = 0;
     while (true) {
-      Map<String, Object> status = object(require(getRequest("/_tasks/" + task, Map.of())));
+      Map<String, Object> status;
+      try {
+        status = object(require(getRequest(taskPath(task), Map.of())));
+        pollFailures = 0;
+      } catch (EngineException e) {
+        if (isRetryable(e) && pollFailures < POLL_RETRIES) {
+          pollFailures++;
+          LOG.warn("polling reindex task {} failed (attempt {} of {}), retrying: {}", task,
+              pollFailures, POLL_RETRIES + 1, e.getMessage());
+          pauseOrCancel(task, reindexPoll.multipliedBy(pollFailures));
+          continue;
+        }
+        throw new EngineException(e.getKind(), e.getStatus(),
+            "polling reindex task " + task + " failed: " + e.getMessage() + "; "
+                + cancelTask(task), e);
+      }
       if (Boolean.TRUE.equals(status.get("completed"))) {
         Map<String, Object> response = map(status.get("response"));
         Map<String, Object> error = map(status.get("error"));
@@ -209,10 +245,79 @@ public final class JsonRestEngine implements SearchEngine {
       }
       if (System.nanoTime() > deadline) {
         throw new EngineException(Kind.TIMEOUT, 0,
-            "reindex task " + task + " did not finish within " + request.timeout());
+            "reindex task " + task + " did not finish within " + request.timeout() + "; "
+                + cancelTask(task));
       }
-      sleep();
+      pauseOrCancel(task, reindexPoll);
     }
+  }
+
+  /** Sleeps between polls; when interrupted, asks the engine to cancel the task and rethrows. */
+  private void pauseOrCancel(String task, Duration duration) {
+    try {
+      pause(duration);
+    } catch (EngineException interrupted) {
+      LOG.warn("interrupted while waiting for reindex task {}; cancelling it", task);
+      try {
+        perform("POST", taskPath(task) + "/_cancel", Map.of(), null, RawHttp.JSON);
+      } catch (EngineException e) {
+        interrupted.addSuppressed(e);
+      }
+      throw interrupted;
+    }
+  }
+
+  /**
+   * Cancels a reindex task and waits, for at most the cancel wait (30 seconds by default), until
+   * the engine reports it completed, so that the destination index is no longer being written when
+   * the caller cleans up. Never throws.
+   *
+   * @return a description of what happened, for the caller's error message
+   */
+  private String cancelTask(String task) {
+    try {
+      require(perform("POST", taskPath(task) + "/_cancel", Map.of(), null, RawHttp.JSON));
+    } catch (EngineException e) {
+      if (e.getKind() != Kind.NOT_FOUND) {
+        LOG.warn("could not cancel reindex task {}: {}", task, e.getMessage());
+        return "cancelling the task failed (" + e.getMessage() + "); it may still be running";
+      }
+      // not running any more; the status below says how it ended
+    }
+    long deadline = System.nanoTime() + cancelWait.toNanos();
+    String lastError = null;
+    while (true) {
+      try {
+        Map<String, Object> status = object(require(getRequest(taskPath(task), Map.of())));
+        if (Boolean.TRUE.equals(status.get("completed"))) {
+          LOG.info("reindex task {} was cancelled", task);
+          return "the task was cancelled";
+        }
+      } catch (EngineException e) {
+        if (e.getKind() == Kind.NOT_FOUND) {
+          return "the task was cancelled";
+        }
+        lastError = e.getMessage();
+      }
+      if (System.nanoTime() > deadline) {
+        LOG.warn("reindex task {} was asked to cancel but did not stop within {}{}", task,
+            cancelWait, lastError == null ? "" : " (last error: " + lastError + ")");
+        return "the task was asked to cancel but had not stopped within " + cancelWait;
+      }
+      try {
+        pause(reindexPoll);
+      } catch (EngineException interrupted) {
+        return "the task was asked to cancel; interrupted while waiting for it to stop";
+      }
+    }
+  }
+
+  private static boolean isRetryable(EngineException e) {
+    return e.getKind() == Kind.IO || e.getKind() == Kind.TRANSIENT || e.getStatus() >= 500;
+  }
+
+  private static String taskPath(String task) {
+    return "/_tasks/" + task;
   }
 
   @Override
@@ -542,9 +647,9 @@ public final class JsonRestEngine implements SearchEngine {
     }
   }
 
-  private void sleep() {
+  private static void pause(Duration duration) {
     try {
-      TimeUnit.NANOSECONDS.sleep(reindexPoll.toNanos());
+      TimeUnit.NANOSECONDS.sleep(duration.toNanos());
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       throw new EngineException(Kind.OTHER, 0, "Interrupted while waiting for reindex", e);

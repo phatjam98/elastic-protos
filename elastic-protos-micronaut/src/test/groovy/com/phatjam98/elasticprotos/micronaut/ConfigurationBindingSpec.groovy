@@ -33,6 +33,7 @@ import spock.lang.Specification
 @Property(name = 'elastic-protos.bootstrap.delete-old', value = 'true')
 @Property(name = 'elastic-protos.bootstrap.removed-fields', value = 'reindex')
 @Property(name = 'elastic-protos.bootstrap.dry-run', value = 'true')
+@Property(name = 'elastic-protos.bootstrap.clear-stale-write-block', value = 'false')
 @Property(name = 'elastic-protos.bootstrap.fail-on-error', value = 'false')
 @Property(name = 'elastic-protos.bootstrap.reindex-timeout', value = '90s')
 @Property(name = 'elastic-protos.defaults.shards', value = '3')
@@ -100,6 +101,7 @@ class ConfigurationBindingSpec extends Specification {
       deleteOld
       removedFields == RemovedFieldPolicy.REINDEX
       dryRun
+      !clearStaleWriteBlock
       !failOnError
       reindexTimeout == Duration.ofSeconds(90)
     }
@@ -151,7 +153,7 @@ class ConfigurationBindingSpec extends Specification {
         .withTrackTotalHits(false)
     compiler.config() == queryConfig
     migrationOptions == new MigrationOptions(FailurePolicy.CONTINUE, false, true,
-        RemovedFieldPolicy.REINDEX, 3, ReplicaPolicy.fixed(2), Duration.ofSeconds(90), true)
+        RemovedFieldPolicy.REINDEX, 3, ReplicaPolicy.fixed(2), Duration.ofSeconds(90), true, false)
     migrator.options() == migrationOptions
   }
 }

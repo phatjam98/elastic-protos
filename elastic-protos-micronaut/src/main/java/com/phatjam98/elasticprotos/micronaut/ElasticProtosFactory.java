@@ -145,7 +145,8 @@ public class ElasticProtosFactory {
         defaults.getShards(),
         replicas,
         bootstrap.getReindexTimeout(),
-        bootstrap.isDryRun());
+        bootstrap.isDryRun(),
+        bootstrap.isClearStaleWriteBlock());
   }
 
   /**

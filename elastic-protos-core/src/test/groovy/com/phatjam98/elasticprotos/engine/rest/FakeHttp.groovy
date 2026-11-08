@@ -16,12 +16,19 @@ class FakeHttp implements RawHttp {
   }
 
   final List<Recorded> requests = []
-  final Deque<RawHttp.Response> responses = new ArrayDeque<>()
+  /** Canned responses, or IOExceptions to throw for that request. */
+  final Deque<Object> responses = new ArrayDeque<>()
   boolean closed
   IOException failure
 
   FakeHttp enqueue(int status, Object body = null) {
     responses.add(new RawHttp.Response(status, body == null ? '' : (body instanceof String ? body : Json.canonical(body))))
+    this
+  }
+
+  /** Makes the next request fail with an IOException after it is recorded. */
+  FakeHttp enqueueFailure(IOException e) {
+    responses.add(e)
     this
   }
 
@@ -32,7 +39,11 @@ class FakeHttp implements RawHttp {
     }
     requests << new Recorded(method: method, path: path, params: params, body: body, contentType: contentType)
     assert !responses.isEmpty(): "no canned response for ${method} ${path}"
-    responses.poll()
+    def next = responses.poll()
+    if (next instanceof IOException) {
+      throw next
+    }
+    next as RawHttp.Response
   }
 
   Recorded getLast() { requests.last() }

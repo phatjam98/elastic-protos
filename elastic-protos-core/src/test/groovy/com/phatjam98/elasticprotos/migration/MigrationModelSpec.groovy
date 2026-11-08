@@ -11,6 +11,7 @@ class MigrationModelSpec extends Specification {
     expect:
     MigrationOptions.standard() == new MigrationOptions(FailurePolicy.FAIL_FAST, true, false,
         RemovedFieldPolicy.KEEP, 1, ReplicaPolicy.dataNodesMinusOne(1), Duration.ofMinutes(10), false)
+    MigrationOptions.standard().clearStaleWriteBlock()
   }
 
   def "with-copies change one component each"() {
@@ -27,6 +28,8 @@ class MigrationModelSpec extends Specification {
     base.withReindexTimeout(Duration.ofSeconds(5)).reindexTimeout() == Duration.ofSeconds(5)
     base.withDryRun(true).dryRun()
     base.withDryRun(true).withFailure(FailurePolicy.CONTINUE).failure() == FailurePolicy.CONTINUE
+    !base.withClearStaleWriteBlock(false).clearStaleWriteBlock()
+    !base.withClearStaleWriteBlock(false).withDryRun(true).clearStaleWriteBlock()
   }
 
   def "options are validated"() {

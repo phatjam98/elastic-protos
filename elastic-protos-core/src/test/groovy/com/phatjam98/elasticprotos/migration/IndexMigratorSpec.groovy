@@ -282,10 +282,252 @@ class IndexMigratorSpec extends Specification {
     when:
     def result = migrator(TITLE_KEYWORD).bootstrap(Document)
 
-    then:
+    then: 'it records the target hash, so it is reused'
     result.ok()
     engine.log().count { it.startsWith("createIndex ${DOC_V2}") } == 1
+    !engine.log().contains("deleteIndex ${DOC_V2}".toString())
     engine.documents(DOC_V2).size() == 2
+  }
+
+  def "a leftover target index with another hash or none is deleted and recreated: #label"() {
+    given:
+    migrator().bootstrap(Document)
+    seedDocuments(2)
+    engine.createIndex(DOC_V2, [:], leftoverMappings, [] as Set)
+    engine.index(DOC_V2, 'stale', [id: 'stale'], IndexOptions.defaults())
+    engine.clearLog()
+
+    when:
+    def result = migrator(TITLE_KEYWORD).bootstrap(Document)
+
+    then:
+    result.ok()
+    engine.log().indexOf("deleteIndex ${DOC_V2}".toString()) < engine.log().findIndexOf { it.startsWith("createIndex ${DOC_V2}") }
+    engine.log().contains("deleteIndex ${DOC_V2}".toString())
+    engine.documents(DOC_V2).keySet() == ['d0', 'd1'] as Set
+    engine.getMappings('documents')._meta.elastic_protos.hash == TITLE_KEYWORD.map(Document).contentHash()
+
+    where:
+    label        | leftoverMappings
+    'wrong hash' | DEFAULT.map(Document).mappings()
+    'no hash'    | [dynamic: 'false', properties: [id: [type: 'keyword']]]
+  }
+
+  def "a target index the alias already points at is never reused or deleted"() {
+    given: 'a plan made before another process moved the alias to the target name'
+    migrator().bootstrap(Document)
+    def plan = migrator(TITLE_KEYWORD).plan(Document)
+    engine.createIndex(DOC_V2, [:], TITLE_KEYWORD.map(Document).mappings(), [] as Set)
+    engine.updateAliases([AliasAction.remove(DOC_V1, 'documents'), AliasAction.add(DOC_V2, 'documents')])
+    engine.clearLog()
+
+    when:
+    def result = migrator(TITLE_KEYWORD).apply(plan)
+
+    then:
+    result.outcomes()[0].status() == MigrationResult.Status.FAILED
+    result.outcomes()[0].error().message.contains("already points at ${DOC_V2}")
+    engine.indices() == [(DOC_V1): [] as Set, (DOC_V2): ['documents'] as Set]
+    !engine.log().any { it.startsWith('deleteIndex') || it.startsWith('setWriteBlock') }
+  }
+
+  def "a failed reindex keeps a target index it reused rather than created"() {
+    given:
+    def failing = new InMemorySearchEngine() {
+      @Override
+      ReindexResult reindex(ReindexRequest request) {
+        throw new EngineException(EngineException.Kind.TIMEOUT, 0, 'took too long')
+      }
+    }
+    copyInto(failing)
+    failing.createIndex(DOC_V2, [:], TITLE_KEYWORD.map(Document).mappings(), [] as Set)
+
+    when:
+    def result = migrator(TITLE_KEYWORD, MigrationOptions.standard(), failing).bootstrap(Document)
+
+    then:
+    result.outcomes()[0].status() == MigrationResult.Status.FAILED
+    failing.indices().keySet() == [DOC_V1, DOC_V2] as Set
+    !failing.isWriteBlocked(DOC_V1)
+  }
+
+  def "a failed reindex never deletes the index the alias points at"() {
+    given: 'the reindex fails after the alias was moved to the new index behind our back'
+    def racing = new InMemorySearchEngine() {
+      @Override
+      ReindexResult reindex(ReindexRequest request) {
+        super.reindex(request)
+        updateAliases([AliasAction.remove(request.source(), 'documents'), AliasAction.add(request.dest(), 'documents')])
+        throw new EngineException(EngineException.Kind.IO, 0, 'connection reset')
+      }
+    }
+    copyInto(racing)
+
+    when:
+    def result = migrator(TITLE_KEYWORD, MigrationOptions.standard(), racing).bootstrap(Document)
+
+    then:
+    result.outcomes()[0].status() == MigrationResult.Status.FAILED
+    racing.indices()[DOC_V2] == ['documents'] as Set
+    !racing.log().contains("deleteIndex ${DOC_V2}".toString())
+  }
+
+  def "a failed reindex keeps the new index when the alias cannot be read again"() {
+    given:
+    def blind = new InMemorySearchEngine() {
+      boolean reindexed
+
+      @Override
+      ReindexResult reindex(ReindexRequest request) {
+        reindexed = true
+        throw new EngineException(EngineException.Kind.IO, 0, 'connection reset')
+      }
+
+      @Override
+      Map<String, Set<String>> getAliases(String aliasOrIndex) {
+        if (reindexed) {
+          throw new EngineException(EngineException.Kind.IO, 0, 'still down')
+        }
+        super.getAliases(aliasOrIndex)
+      }
+    }
+    copyInto(blind)
+
+    when:
+    def result = migrator(TITLE_KEYWORD, MigrationOptions.standard(), blind).bootstrap(Document)
+
+    then:
+    result.outcomes()[0].status() == MigrationResult.Status.FAILED
+    blind.indices().containsKey(DOC_V2)
+    !blind.isWriteBlocked(DOC_V1)
+  }
+
+  def "a leftover target index is not touched when the alias cannot be read"() {
+    given:
+    def blind = new InMemorySearchEngine() {
+      boolean planned
+
+      @Override
+      Map<String, Set<String>> getAliases(String aliasOrIndex) {
+        if (planned) {
+          throw new EngineException(EngineException.Kind.IO, 0, 'down')
+        }
+        super.getAliases(aliasOrIndex)
+      }
+    }
+    copyInto(blind)
+    blind.createIndex(DOC_V2, [:], DEFAULT.map(Document).mappings(), [] as Set)
+    def migrator = migrator(TITLE_KEYWORD, MigrationOptions.standard(), blind)
+    def plan = migrator.plan(Document)
+    blind.planned = true
+
+    when:
+    def result = migrator.apply(plan)
+
+    then:
+    result.outcomes()[0].error().message.contains('could not be read')
+    blind.indices().keySet() == [DOC_V1, DOC_V2] as Set
+  }
+
+  def "an alias swap that reports a failure but took effect counts as applied"() {
+    given:
+    def flaky = new InMemorySearchEngine() {
+      @Override
+      void updateAliases(List<AliasAction> actions) {
+        super.updateAliases(actions)
+        throw new EngineException(EngineException.Kind.IO, 0, 'response lost')
+      }
+    }
+    copyInto(flaky)
+
+    when:
+    def result = migrator(TITLE_KEYWORD, MigrationOptions.standard(), flaky).bootstrap(Document)
+
+    then:
+    result.ok()
+    result.outcomes()[0].status() == MigrationResult.Status.APPLIED
+    result.outcomes()[0].index() == DOC_V2
+    result.outcomes()[0].retainedIndices() == [DOC_V1]
+    flaky.indices() == [(DOC_V1): [] as Set, (DOC_V2): ['documents'] as Set]
+    flaky.documents(DOC_V2).size() == 3
+  }
+
+  def "a stale write block on the alias target is reported and cleared when no reindex is needed: #action"() {
+    given:
+    migrator(first).bootstrap(Document)
+    def current = first.map(Document).name()
+    engine.setWriteBlock(current, true)
+
+    when:
+    def plan = migrator().plan(Document)
+
+    then:
+    plan.items()[0].action() == action
+    plan.items()[0].writeBlocked()
+    plan.items()[0].warnings().any { it.contains("index ${current} has a write block") && it.contains('it will be cleared') }
+
+    when:
+    def result = migrator().apply(plan)
+
+    then:
+    result.ok()
+    result.outcomes()[0].status() == MigrationResult.Status.APPLIED
+    !engine.isWriteBlocked(current)
+    engine.index('documents', 'after', [id: 'after'], IndexOptions.defaults()).index() == current
+
+    where:
+    first        | action
+    DEFAULT      | Action.NO_OP
+    NO_RELEVANCE | Action.PUT_MAPPING
+  }
+
+  def "with clearStaleWriteBlock off a write block is reported and left in place"() {
+    given:
+    migrator().bootstrap(Document)
+    engine.setWriteBlock(DOC_V1, true)
+    def options = MigrationOptions.standard().withClearStaleWriteBlock(false)
+
+    when:
+    def result = migrator(DEFAULT, options).bootstrap(Document)
+
+    then:
+    result.outcomes()[0].status() == MigrationResult.Status.SKIPPED
+    result.outcomes()[0].plan().warnings().any { it.contains('left in place (clearStaleWriteBlock is false)') }
+    engine.isWriteBlocked(DOC_V1)
+  }
+
+  def "a write block on an index that is reindexed or blocked is reported, not cleared: #label"() {
+    given:
+    migrator().bootstrap(Document)
+    seedDocuments(1)
+    engine.setWriteBlock(DOC_V1, true)
+
+    when:
+    def result = migrator(TITLE_KEYWORD, options).bootstrap(Document)
+
+    then:
+    result.outcomes()[0].plan().action() == action
+    result.outcomes()[0].plan().warnings().any { it.contains("index ${DOC_V1} has a write block") && it.contains(text) }
+    engine.isWriteBlocked(DOC_V1)
+    engine.indices()[(action == Action.REINDEX ? DOC_V2 : DOC_V1)] == ['documents'] as Set
+
+    where:
+    label     | options                                              | action         | text
+    'reindex' | MigrationOptions.standard()                          | Action.REINDEX | 'moves the alias to an unblocked index'
+    'blocked' | MigrationOptions.standard().withAllowReindex(false) | Action.BLOCKED | 'fail until it is cleared'
+  }
+
+  def "a dry run reports a stale write block without clearing it"() {
+    given:
+    migrator().bootstrap(Document)
+    engine.setWriteBlock(DOC_V1, true)
+
+    when:
+    def result = migrator(DEFAULT, MigrationOptions.standard().withDryRun(true)).bootstrap(Document)
+
+    then:
+    result.outcomes()[0].status() == MigrationResult.Status.DRY_RUN
+    engine.isWriteBlocked(DOC_V1)
   }
 
   def "a migration script from the classpath is applied during the reindex"() {
