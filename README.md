@@ -166,7 +166,7 @@ message Document {
     default_analyzer: "english"
   };
 
-  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = true];
+  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = TRUE];
   string firm_id = 2;                     // keyword
   string title = 3 [(phatjam98.elasticprotos.v1.elastic_field) = { type: TEXT boost: 3.0 }];
   string body = 4 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
@@ -261,8 +261,8 @@ Index settings follow the same idea: `shards`/`replicas` options, then `settings
 | `enum` | `keyword` (the value name) |
 | `bool` | `boolean` |
 | `int32`, `sint32`, `sfixed32` | `integer` |
-| `uint32`, `fixed32`, `int64`, `sint64`, `sfixed64`, `fixed64` | `long` |
-| `uint64` | `keyword`, with a warning (does not fit a `long`) |
+| `uint32`, `fixed32`, `int64`, `sint64`, `sfixed64` | `long` |
+| `uint64`, `fixed64` | `keyword`, with a warning (unsigned 64-bit values do not fit a `long`) |
 | `float` / `double` | `float` / `double` |
 | `bytes` | `binary` |
 | repeated scalar | same type as the scalar (engines index arrays natively) |
@@ -301,8 +301,8 @@ options throw `MappingException`.
 | `dynamic` | Root dynamic mode: `DYNAMIC_STRICT`, `DYNAMIC_FALSE`, `DYNAMIC_TRUE` | `DYNAMIC_DEFAULT` = strict |
 | `default_analyzer` | Analyzer for `TEXT` fields that set none | none |
 | `settings_json` | Raw index settings JSON merged in (for example analysis definitions) | none |
-| `id_field` | Index path of the field whose value is the document `_id` (alternative to `id: true`) | none |
-| `skip` | Never create an index for this message | `false` |
+| `id_field` | Index path of the field whose value is the document `_id` (alternative to `id: TRUE`) | none |
+| `skip` | `TRUE`: never create an index for this message (`Bool3`) | unset (not skipped) |
 
 ### Field options
 
@@ -320,16 +320,17 @@ options throw `MappingException`.
 | `copy_to` | Target fields for `copy_to` | none |
 | `format` | Date format of a `DATE` / `DATE_NANOS` field | `strict_date_optional_time` |
 | `normalizer` | Normalizer of a keyword field | none |
-| `id` | This field's value is the document `_id` | `false` |
+| `id` | `TRUE`: this field's value is the document `_id` (`Bool3`) | unset |
 | `boost` | Boost when the field is searched by a `FULL_TEXT` query without a field list | `0`: 1.0 |
-| `full_text` | Include a non-text (keyword) field in the default `FULL_TEXT` field set | `false` |
+| `full_text` | `TRUE` includes a non-text (keyword) field in the default `FULL_TEXT` field set; `FALSE` leaves a `TEXT` field out of it (`Bool3`) | unset: `TEXT` fields only |
 | `name` | Field name in the index (the codec renames on write and read) | the proto field name |
 | `raw_mapping_json` | JSON deep-merged last into this field's mapping | none |
 | `coerce` | `coerce` of a numeric field (`TRUE` / `FALSE`) | unset |
 | `null_value` | `null_value` of the field | none |
 
 Tri-state options use `Bool3` (`UNSET`, `TRUE`, `FALSE`), so "not set" is distinguishable from
-`false`. A `TEXT` field without a `.keyword` sub-field cannot be used for exact matches or sorting;
+`false` and a programmatic override can turn off an option the proto turned on. This includes the
+on/off options `skip`, `id` and `full_text`: write `id: TRUE`, not `id: true`. A `TEXT` field without a `.keyword` sub-field cannot be used for exact matches or sorting;
 the compiler says so.
 
 ### Programmatic overrides
@@ -345,6 +346,8 @@ MappingOverrides overrides = MappingOverrides.builder()
     .forPath("firm_id", f -> f.setType(EsType.KEYWORD).setIgnoreAbove(64))
     .ignorePath("internal_notes")
     .forMessage("acme.search.v1.Document", m -> m.setShards(3))
+    // on/off options take a boolean; FALSE wins over TRUE in the proto
+    .fullText(Document.getDescriptor(), "title", false)
     .setting("analysis", Map.of("normalizer", Map.of("lowercase",
         Map.of("type", "custom", "filter", List.of("lowercase")))))
     .build();
@@ -356,6 +359,10 @@ ProtoMapper mapper = ProtoMapper.builder()
     .build();
 IndexDefinition documents = mapper.map(Document.class);
 ```
+
+Inside `forField` / `forMessage` callbacks, `skip`, `id` and `full_text` are `Bool3`:
+`f.setId(MappingOverrides.bool3(false))`. `ProtoMapper.isSkipped(descriptor)` reads only the proto;
+`mapper.skips(descriptor)`, which the migrator uses, applies the overrides too.
 
 ## Index naming and metadata
 
@@ -432,6 +439,7 @@ differences are reported as "settings differ; not applied".
 | `replicas` | `ReplicaPolicy.dataNodesMinusOne(1)`: data nodes minus one, between 0 and 1 |
 | `reindexTimeout` | 10 minutes |
 | `dryRun` | `false` |
+| `clearStaleWriteBlock` | `true`: lift a write block found on the alias target when it needs no reindex (see below) |
 
 ### Dry run
 
@@ -450,7 +458,11 @@ MigrationResult wouldDo = dryRun.bootstrap(Document.class);   // every outcome i
 
 A `REINDEX`:
 
-1. creates the new index (or reuses it if it already exists) without the alias;
+1. creates the new index without the alias. If an index with the target name already exists it is
+   a leftover from an earlier run that did not finish: it is reused when its `_meta` records the
+   target hash and the alias does not point at it, and otherwise deleted and recreated (logged as a
+   warning), because its mappings are unknown. If the alias already points at it, the item fails
+   without touching anything (another migration ran in the meantime; plan again);
 2. sets a write block on the old index and refreshes it;
 3. runs `_reindex` old to new, with the migration script if one is found;
 4. checks that both indices hold the same number of documents;
@@ -460,8 +472,25 @@ A `REINDEX`:
 
 **Writes through the alias fail from step 2 until step 5.** Plan for that window (retry writes,
 pause producers or run migrations in a maintenance slot); zero-downtime dual writes are out of
-scope. If any step fails, the old index is unblocked, the new one is deleted and the outcome is
-`FAILED` with a `MigrationException`.
+scope.
+
+If any step fails, the outcome is `FAILED` with a `MigrationException`, the old index is unblocked
+and the alias is read again: the new index is deleted only if this run created it and the alias
+does not point at it. If the alias swap reports an error but the alias in fact points at the new
+index alone (for example a lost response), the migration counts as applied.
+
+The `_reindex` runs as a server-side task that the engine polls. When the `reindexTimeout`
+expires, or polling fails, the task is cancelled (`POST /_tasks/{id}/_cancel`) and awaited for up
+to 30 seconds before the error is reported, so the cleanup above does not race a copy still in
+progress. Transient polling errors (5xx, 429, I/O) are retried three times with a short backoff
+first.
+
+**Write-block recovery.** A process killed between steps 2 and 5 leaves the old index, still
+behind the alias, write-blocked. The next plan reports a warning for any alias target with
+`index.blocks.write=true`. With `clearStaleWriteBlock` (the default), `apply` lifts the block when
+that index needs no reindex (`NO_OP` or `PUT_MAPPING`); a `REINDEX` moves the alias to a new,
+unblocked index anyway. The option assumes that a write block on a live alias target was left by
+an interrupted reindex; turn it off if you set write blocks on live indices yourself.
 
 ### Migration scripts
 
@@ -503,9 +532,17 @@ written to it after the swap are not copied back.
 
 ### Run the bootstrap from one place
 
-Plan and apply are not coordinated across processes. Run the bootstrap from a single instance, a
-deploy job or an init container, not from every replica at once. The Micronaut module's
-`elastic-protos.bootstrap.enabled: false` turns it off on the other instances.
+Plan and apply are not coordinated across processes. **Running the migrator for the same aliases
+from several instances at once is unsupported and can be destructive**: one instance can lift the
+write block, or delete the index, that another is reindexing into, and documents written in that
+window can be lost. Run the bootstrap from a single instance, a deploy job or an init container,
+not from every replica at once. The Micronaut module's `elastic-protos.bootstrap.enabled: false`
+turns it off on the other instances.
+
+A reindex can take minutes. Whatever runs it must not be killed mid-copy: on Kubernetes, give the
+pod that migrates a startup probe budget (`failureThreshold` x `periodSeconds`) longer than the
+`reindexTimeout`, or run the migration as a Job. An interrupted reindex is recovered on the next
+run (see [write-block recovery](#reindex-and-the-write-block-window)), but writes fail until then.
 
 ## Document codec
 
@@ -527,11 +564,11 @@ Document back = codec.fromDocument(source, Document.class);
 | Field names | Proto field names; `elastic_field.name` renames on write and back on read |
 | Ignored fields | `IGNORE` fields (and `Any`/`FieldMask`/`Empty`) are dropped from documents |
 | Defaults | Proto3 default values are omitted unless `includeDefaults`, so `EXISTS` means "was set" |
-| 64-bit integers | Written as JSON numbers (`int64AsNumber`, default true) instead of protobuf's strings; values beyond 2^53 lose precision in JavaScript consumers |
+| 64-bit integers | Fields mapped as `long` are written as JSON numbers (`int64AsNumber`, default true) instead of protobuf's strings; values beyond 2^53 lose precision in JavaScript consumers. `uint64`/`fixed64` map to `keyword` and stay strings. A value that does not fit the mapped `long` (an unsigned field forced to `LONG`) throws `CodecException` naming the field |
 | `Timestamp` | RFC 3339 strings; epoch-millisecond numbers are accepted when reading back |
 | Enums, bytes | Value names; base64 |
 | Wrappers, `Struct` | Unwrapped; plain JSON objects |
-| `LatLon` | `{"lat": .., "lon": ..}`; reading accepts objects, `[lon, lat]`, `"lat,lon"` and `POINT (lon lat)` |
+| `LatLon` | `{"lat": .., "lon": ..}`, always with both coordinates (a 0 coordinate, which canonical JSON omits, is written as `0.0`); reading accepts objects, `[lon, lat]`, `"lat,lon"` and `POINT (lon lat)` |
 | `GeoShape` | Its WKT string or its parsed GeoJSON object |
 | Unknown keys on read | `UnknownFieldPolicy.IGNORE` (default) drops them, since fields removed from a proto linger in old documents; `FAIL` throws `CodecException` |
 | Ids | `codec.idOf(message)` reads the field marked `id` (or named by `id_field`) |
@@ -592,7 +629,7 @@ Notes:
 
 - **Negation**: `not()` (`FieldCondition.negate`) moves the predicate to `must_not`.
 - **Full text**: with no field, `FULL_TEXT` searches every field in the index's full-text set (all
-  `TEXT` fields plus `full_text: true` fields) with their `boost`. `FullTextOptions` sets explicit
+  `TEXT` fields plus `full_text: TRUE` fields) with their `boost`. `FullTextOptions` sets explicit
   fields with boosts, `operator`, `fuzziness`, `type` (`BEST_FIELDS`, `PHRASE`, ...) and
   `minimum_should_match_pct`. `Criteria.fullText(q)` is added to every branch.
 - **Nested**: predicates on fields under `nested` paths are wrapped in `nested` queries, once per
@@ -803,8 +840,15 @@ class MyEngineFactory {
 `ElasticProtosBootstrap` loads the classes in `elastic-protos.bootstrap.classes`, logs the plan
 report at INFO and applies it. With `fail-on-error` (default) a failed or blocked index throws
 `ElasticProtosBootstrap.BootstrapException` and aborts startup. An empty class list skips the
-bootstrap; `enabled: false` removes the listener (see
-[Run the bootstrap from one place](#run-the-bootstrap-from-one-place)).
+bootstrap; `enabled: false` removes the listener.
+
+The bootstrap is enabled by default and runs in every instance that starts. **Concurrent bootstrap
+from several instances is unsupported and can be destructive** (see
+[Run the bootstrap from one place](#run-the-bootstrap-from-one-place)). With more than one replica,
+set `elastic-protos.bootstrap.enabled: false` on all but one instance, or on all of them and run
+the migration from a dedicated job. Because the bootstrap runs during startup, a reindex delays
+readiness: on Kubernetes, make the startup probe budget longer than
+`elastic-protos.bootstrap.reindex-timeout` so the pod is not killed mid-copy.
 
 ### ElasticProtosService
 
@@ -872,6 +916,7 @@ It also offers `bulkIndex`, `definition`, `pager` (a `SearchPager`), `plan`, `bo
 | `elastic-protos.bootstrap.delete-old` | `false` | Delete the old index after a successful reindex |
 | `elastic-protos.bootstrap.removed-fields` | `KEEP` | Or `REINDEX` |
 | `elastic-protos.bootstrap.dry-run` | `false` | Plan and log only |
+| `elastic-protos.bootstrap.clear-stale-write-block` | `true` | Lift a write block on an alias target that needs no reindex, assumed left by an interrupted reindex |
 | `elastic-protos.bootstrap.fail-on-error` | `true` | Abort startup when an index fails or is blocked |
 | `elastic-protos.bootstrap.reindex-timeout` | `10m` | How long a reindex may take |
 | `elastic-protos.defaults.shards` | `1` | Shards of new indices (message options win) |
@@ -903,7 +948,8 @@ before 3.3); `pager(...)` always adapts.
 
 - A reindex blocks writes for its duration; there is no dual-write, zero-downtime mode.
 - Shard and replica counts of existing indices are never changed by a migration.
-- Plans are not coordinated across processes; run the bootstrap from one place.
+- Plans are not coordinated across processes; concurrent bootstrap is unsupported and can be
+  destructive. Run the bootstrap from one place.
 - `NUM_RANGE` has no open-ended bounds (proto3 `double` has no presence).
 - The DSL covers queries, sorting and paging; aggregations, highlighting and the like go into the
   body map by hand.
