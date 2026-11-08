@@ -42,9 +42,11 @@ jobs:
           if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
             DRYRUN=false
+            SKIP_TAG=true
           else
             TAG="v${INPUT_VERSION#v}"
             DRYRUN="$INPUT_DRYRUN"
+            SKIP_TAG=false
           fi
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
             echo "::error::'$TAG' does not match ^v<major>.<minor>.<patch>(-rc.<n>)?$"
@@ -55,6 +57,7 @@ jobs:
             echo "tag=$TAG"
             echo "version=$VERSION"
             echo "dryrun=$DRYRUN"
+            echo "skip_tag=$SKIP_TAG"
           } >> "$GITHUB_OUTPUT"
           echo "Releasing $VERSION (tag $TAG, dry run: $DRYRUN)"
 
@@ -93,6 +96,9 @@ jobs:
           fi
           ./gradlew "${ARGS[@]}"
         env:
+          # A tag push already created the tag, so JReleaser must not re-create or move it; a manual
+          # dispatch has no tag yet and JReleaser creates it (skipTag defaults to false in jreleaser.yml).
+          JRELEASER_SKIP_TAG: ${{ steps.version.outputs.skip_tag }}
           JRELEASER_GITHUB_TOKEN: ${{ secrets.JRELEASER_GITHUB_TOKEN }}
           JRELEASER_MAVENCENTRAL_USERNAME: ${{ secrets.JRELEASER_MAVENCENTRAL_USERNAME }}
           JRELEASER_MAVENCENTRAL_PASSWORD: ${{ secrets.JRELEASER_MAVENCENTRAL_PASSWORD }}
