@@ -36,6 +36,13 @@ import java.util.concurrent.ConcurrentMap;
  * <p>Everything else follows protobuf's canonical JSON mapping with proto field names: timestamps
  * are RFC 3339 strings, enums are names, bytes are base64, wrappers are unwrapped and
  * {@code Struct} values are plain objects.
+ *
+ * <p>With {@link CodecConfig#includeDefaults()} (the default) proto3 fields without presence are
+ * written even when they hold their default value: {@code false}, {@code 0}, {@code ""}, the first
+ * enum value, {@code []} and {@code {}}. Fields with presence are written only when set: an unset
+ * sub-message, {@code Timestamp}, wrapper, {@code Struct}, proto3 {@code optional} field or oneof
+ * member stays absent. An empty string is written only to keyword and text fields; date, ip, geo,
+ * numeric and binary fields leave it out because the engine would reject it or it holds nothing.
  */
 public final class ProtoDocumentCodec {
 
@@ -256,6 +263,9 @@ public final class ProtoDocumentCodec {
   }
 
   private Object forwardValue(Object value, FieldDescriptor field, FieldInfo info, Schema schema) {
+    if ("".equals(value) && !keepsEmptyString(info.kind())) {
+      return null;
+    }
     switch (info.kind()) {
       case LONG:
       case INTEGER:
@@ -355,6 +365,15 @@ public final class ProtoDocumentCodec {
       default:
         return value;
     }
+  }
+
+  /**
+   * Returns whether an empty string is a value worth writing for a kind. Only keyword and text
+   * fields index {@code ""}; date, ip, geo and numeric fields would reject the document, and an
+   * empty binary value carries nothing, so a proto3 default {@code ""} is left out for them.
+   */
+  private static boolean keepsEmptyString(FieldKind kind) {
+    return kind == FieldKind.KEYWORD || kind.isText();
   }
 
   private static Object convertEach(

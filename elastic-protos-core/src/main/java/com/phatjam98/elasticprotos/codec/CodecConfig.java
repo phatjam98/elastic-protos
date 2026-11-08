@@ -5,8 +5,11 @@ import com.google.protobuf.TypeRegistry;
 /**
  * Codec settings.
  *
- * @param includeDefaults also write proto3 fields that hold their default value; by default they
- *     are omitted so that an {@code exists} query means "was set"
+ * @param includeDefaults write proto3 fields that hold their default value ({@code false},
+ *     {@code 0}, {@code ""}, the first enum value, empty repeated and map fields), so that
+ *     {@code EQUALS}, ranges and sorting see default values like any other; true by default.
+ *     Unset message fields (sub-messages, timestamps, wrappers) and unset oneof members are never
+ *     written. With false, defaults are omitted and {@code EXISTS} means "was set"
  * @param int64AsNumber write 64-bit integers as JSON numbers rather than the strings protobuf's
  *     JSON mapping uses; values beyond 2^53 lose precision in JavaScript consumers
  * @param unknownFields what to do with unknown document keys when reading back
@@ -19,9 +22,9 @@ public record CodecConfig(
     UnknownFieldPolicy unknownFields,
     TypeRegistry anyTypes) {
 
-  /** Omit defaults, 64-bit integers as numbers, ignore unknown keys, no Any types. */
+  /** Include defaults, 64-bit integers as numbers, ignore unknown keys, no Any types. */
   public static CodecConfig standard() {
-    return new CodecConfig(false, true, UnknownFieldPolicy.IGNORE,
+    return new CodecConfig(true, true, UnknownFieldPolicy.IGNORE,
         TypeRegistry.getEmptyTypeRegistry());
   }
 

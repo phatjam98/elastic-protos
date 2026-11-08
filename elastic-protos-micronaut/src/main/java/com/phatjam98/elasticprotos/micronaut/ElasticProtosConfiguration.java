@@ -478,7 +478,8 @@ public class ElasticProtosConfiguration {
    * {@link CodecConfig#standard()}.
    *
    * <ul>
-   *   <li>{@code include-defaults}: also write proto3 default values; default false
+   *   <li>{@code include-defaults}: write proto3 default values (false, 0, "", first enum value,
+   *       empty lists and maps) so EQUALS, ranges and sorts see them; default true
    *   <li>{@code int64-as-number}: write 64-bit integers as JSON numbers; default true
    *   <li>{@code unknown-fields}: {@code IGNORE} (default) or {@code FAIL} when reading back
    * </ul>

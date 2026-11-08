@@ -43,7 +43,7 @@ import spock.lang.Specification
 @Property(name = 'elastic-protos.mapping.keyword-subfield', value = 'false')
 @Property(name = 'elastic-protos.mapping.ignore-above', value = '512')
 @Property(name = 'elastic-protos.mapping.max-depth', value = '3')
-@Property(name = 'elastic-protos.codec.include-defaults', value = 'true')
+@Property(name = 'elastic-protos.codec.include-defaults', value = 'false')
 @Property(name = 'elastic-protos.codec.int64-as-number', value = 'false')
 @Property(name = 'elastic-protos.codec.unknown-fields', value = 'FAIL')
 @Property(name = 'elastic-protos.query.allow-leading-wildcards', value = 'true')
@@ -122,7 +122,7 @@ class ConfigurationBindingSpec extends Specification {
 
   def "binds codec, query and bulk"() {
     expect:
-    config.codec.includeDefaults
+    !config.codec.includeDefaults
     !config.codec.int64AsNumber
     config.codec.unknownFields == UnknownFieldPolicy.FAIL
     with(config.query) {
@@ -145,7 +145,7 @@ class ConfigurationBindingSpec extends Specification {
     mapper.defaults() == mappingDefaults
     mapper.map(Firm).alias() == 'dev-firms'
     mapper.map(Firm).name().startsWith('dev-firms-v')
-    codec.config().includeDefaults()
+    !codec.config().includeDefaults()
     !codec.config().int64AsNumber()
     codec.config().unknownFields() == UnknownFieldPolicy.FAIL
     queryConfig == QueryCompilerConfig.standard().withAllowLeadingWildcards(true).withLenient(true)

@@ -31,6 +31,7 @@ import com.phatjam98.elasticprotos.proto.test.Color
 import com.phatjam98.elasticprotos.proto.test.Composite
 import com.phatjam98.elasticprotos.proto.test.Coordinates
 import com.phatjam98.elasticprotos.proto.test.Geo
+import com.phatjam98.elasticprotos.proto.test.Grandchild
 import com.phatjam98.elasticprotos.proto.test.IdByOption
 import com.phatjam98.elasticprotos.proto.test.Scalars
 import com.phatjam98.elasticprotos.proto.test.TreeNode
@@ -44,6 +45,9 @@ class ProtoDocumentCodecSpec extends Specification {
 
   @Shared
   ProtoDocumentCodec codec = ProtoDocumentCodec.of(ProtoMapper.withDefaults())
+
+  @Shared
+  ProtoDocumentCodec sparse = ProtoDocumentCodec.of(ProtoMapper.withDefaults(), CodecConfig.standard().withIncludeDefaults(false))
 
   static final Timestamp FILED = Timestamps.parse('2024-03-04T05:06:07.123Z')
 
@@ -97,7 +101,7 @@ class ProtoDocumentCodecSpec extends Specification {
     doc.checksum == 'YWJj'
     doc.metadata == [pages: 12.0d]
     doc.relevance == 0.5d
-    doc.parties == [[email: 'legal@acme.example', name: 'Acme Corp', role: 'DEFENDANT'], [name: 'Jane Doe', role: 'PLAINTIFF']]
+    doc.parties == [[email: 'legal@acme.example', name: 'Acme Corp', role: 'DEFENDANT'], [email: '', name: 'Jane Doe', role: 'PLAINTIFF']]
     !doc.containsKey('internal_notes')
     Json.canonical(doc) == codec.toJson(document())
   }
@@ -107,11 +111,15 @@ class ProtoDocumentCodecSpec extends Specification {
     def doc = codec.toDocument(firm())
 
     then:
-    doc.headquarters == [city: 'Las Vegas', location: [lat: 36.17d, lon: -115.14d], state: 'NV']
-    doc.offices == [[address: [city: 'Reno', location: [lat: 39.53d, lon: -119.81d]], headcount: 12, name: 'Reno']]
+    doc.headquarters == [city: 'Las Vegas', location: [lat: 36.17d, lon: -115.14d], postal_code: '', state: 'NV', street: '']
+    doc.offices == [[address: [city: 'Reno', location: [lat: 39.53d, lon: -119.81d], postal_code: '', state: '', street: ''], headcount: 12, name: 'Reno']]
     doc.labels == [tier: 'gold']
     doc.status == 'ACTIVE'
     doc.created_at == '2024-03-04T05:06:07.123Z'
+    !doc.containsKey('updated_at')
+
+    and: 'without defaults only set values are written'
+    sparse.toDocument(firm()).headquarters == [city: 'Las Vegas', location: [lat: 36.17d, lon: -115.14d], state: 'NV']
   }
 
   @Unroll
@@ -129,7 +137,10 @@ class ProtoDocumentCodecSpec extends Specification {
     'Document' | document()                                                              | document().toBuilder().clearInternalNotes().build()
     'Scalars'  | Scalars.newBuilder().setInt64Value(Long.MAX_VALUE).setUint64Value(-1L).setStringValue('s').setEnumValue(Color.RED).addRepeatedInts(1).addRepeatedInts(2).setBytesValue(ByteString.copyFrom(new byte[] {1, 2, 3})).setDoubleValue(1.5d).setBoolValue(true).build() | message
     'InboxItem' | InboxItem.newBuilder().setId('in-1').setSubject('hi').setStatus(InboxStatus.UNREAD).setDocument(document()).addRecipientEmails('a@b.c').build() | InboxItem.newBuilder().setId('in-1').setSubject('hi').setStatus(InboxStatus.UNREAD).setDocument(document().toBuilder().clearInternalNotes()).addRecipientEmails('a@b.c').build()
-    'Composite' | Composite.newBuilder().setSingleChild(Child.newBuilder().setName('c').setRank(2)).addChildren(Child.newBuilder().setName('k')).putStringMap('a', 'b').putIntMap(1, 2.5d).setChoiceInt(7L).build() | message
+    'Composite' | Composite.newBuilder().setSingleChild(Child.newBuilder().setName('c').setRank(2)).addChildren(Child.newBuilder().setName('k')).putStringMap('a', 'b').putMessageMap('m', Child.newBuilder().setName('v').setGrandchild(Grandchild.newBuilder().setNote('n')).build()).putIntMap(1, 2.5d).setChoiceInt(7L).build() | message
+    'defaults' | Scalars.getDefaultInstance()                                            | message
+    'empty Firm' | Firm.getDefaultInstance()                                             | message
+    'Composite with default oneof' | Composite.newBuilder().setChoiceChild(Child.getDefaultInstance()).build() | message
     'TreeNode' | TreeNode.newBuilder().setLabel('root').addChildren(TreeNode.newBuilder().setLabel('leaf')).build() | message
   }
 
@@ -139,8 +150,9 @@ class ProtoDocumentCodecSpec extends Specification {
     def strings = ProtoDocumentCodec.of(ProtoMapper.withDefaults(), CodecConfig.standard().withInt64AsNumber(false))
 
     expect:
-    codec.toDocument(message) == [int64_value: 123L, uint64_value: '5']
-    strings.toDocument(message) == [int64_value: '123', uint64_value: '5']
+    sparse.toDocument(message) == [int64_value: 123L, uint64_value: '5']
+    strings.toDocument(message).subMap(['int64_value', 'uint64_value', 'sint64_value']) == [int64_value: '123', uint64_value: '5', sint64_value: '0']
+    codec.toDocument(message).sint64_value == 0L
     codec.fromDocument([int64_value: '123', uint64_value: '5'], Scalars) == message
     codec.fromDocument([int64_value: 123, uint64_value: 5], Scalars) == message
   }
@@ -152,7 +164,7 @@ class ProtoDocumentCodecSpec extends Specification {
     def message = Scalars.newBuilder().setUint64Value(-1L).setFixed64Value(-1L).build()
 
     expect: 'fixed64 maps to keyword, so its full range is a string'
-    codec.toDocument(message) == [uint64_value: '18446744073709551615', fixed64_value: '18446744073709551615']
+    sparse.toDocument(message) == [uint64_value: '18446744073709551615', fixed64_value: '18446744073709551615']
     codec.fromDocument(codec.toDocument(message), Scalars) == message
 
     when:
@@ -178,14 +190,89 @@ class ProtoDocumentCodecSpec extends Specification {
     codec.fromDocument([point: [lat: 0.0d, lon: 10.0d]], Geo).point == LatLon.newBuilder().setLon(10).build()
   }
 
-  def "defaults are omitted unless includeDefaults is set"() {
-    given:
-    def withDefaults = ProtoDocumentCodec.of(ProtoMapper.withDefaults(), CodecConfig.standard().withIncludeDefaults(true))
+  def "proto3 default values are written by default"() {
+    when:
+    def doc = codec.toDocument(Scalars.getDefaultInstance())
+    def json = codec.toJson(Scalars.getDefaultInstance())
 
+    then: 'every scalar, enum and repeated field without presence is present with its default'
+    codec.config().includeDefaults()
+    CodecConfig.standard().includeDefaults()
+    doc == [bool_value: false, double_value: 0.0d, enum_value: 'COLOR_UNSPECIFIED', fixed32_value: 0L,
+            fixed64_value: '0', float_value: 0.0d, int32_value: 0, int64_value: 0L, repeated_ints: [],
+            repeated_strings: [], sfixed32_value: 0, sfixed64_value: 0L, sint32_value: 0, sint64_value: 0L,
+            string_value: '', uint32_value: 0L, uint64_value: '0']
+    json.contains('"bool_value":false')
+    json.contains('"int32_value":0')
+    json.contains('"string_value":""')
+    json.contains('"enum_value":"COLOR_UNSPECIFIED"')
+    json.contains('"repeated_strings":[]')
+
+    and: 'an empty bytes value carries nothing and is left out'
+    !doc.containsKey('bytes_value')
+
+    and: 'it reads back to the same message'
+    codec.fromDocument(doc, Scalars) == Scalars.getDefaultInstance()
+  }
+
+  def "defaults are omitted when includeDefaults is false"() {
     expect:
-    codec.toDocument(Scalars.getDefaultInstance()) == [:]
-    withDefaults.toDocument(Scalars.getDefaultInstance()).keySet().containsAll(['string_value', 'int32_value', 'bool_value', 'repeated_strings'])
-    withDefaults.config().includeDefaults()
+    !sparse.config().includeDefaults()
+    sparse.toDocument(Scalars.getDefaultInstance()) == [:]
+    sparse.toDocument(Composite.getDefaultInstance()) == [:]
+    sparse.toDocument(Scalars.newBuilder().setBoolValue(true).build()) == [bool_value: true]
+  }
+
+  def "unset fields with presence stay absent when defaults are written"() {
+    expect: 'unset sub-messages, timestamps, wrappers, Struct and Any are not written, not even as {}'
+    codec.toDocument(WellKnown.getDefaultInstance()) == [:]
+
+    and: 'maps and repeated fields are written empty; an unset message and oneof are absent'
+    codec.toDocument(Composite.getDefaultInstance()) == [children: [], int_map: [:], message_map: [:], string_map: [:]]
+
+    and: 'only the set oneof member is written, even when it holds a default'
+    codec.toDocument(Composite.newBuilder().setChoiceInt(0L).build()).subMap(['choice_int', 'choice_string', 'choice_child']) == [choice_int: 0L]
+    codec.toDocument(Composite.newBuilder().setChoiceChild(Child.getDefaultInstance()).build()).choice_child == [name: '', rank: 0]
+
+    and: 'a set sub-message is written with its own defaults, its unset children stay absent'
+    codec.toDocument(Composite.newBuilder().setSingleChild(Child.getDefaultInstance()).build()).single_child == [name: '', rank: 0]
+
+    and: 'proto3 optional, Struct, bytes and timestamps of an empty Document are absent; ignored fields too'
+    codec.toDocument(Document.getDefaultInstance()) == [body: '', firm_id: '', id: '', parties: [], size_bytes: 0L, tags: [], title: '', type: 'DOCUMENT_TYPE_UNSPECIFIED']
+
+    and: 'an empty Firm has no headquarters object and no epoch timestamps'
+    codec.toDocument(Firm.getDefaultInstance()) == [domain: '', id: '', labels: [:], name: '', offices: [], status: 'FIRM_STATUS_UNSPECIFIED']
+  }
+
+  def "an empty string is left out where the engine would reject it"() {
+    expect: 'string fields mapped as geo_point, geo_shape, date and ip'
+    codec.toDocument(Geo.getDefaultInstance()) == [:]
+    !codec.toDocument(Annotated.getDefaultInstance()).containsKey('birthday')
+    !codec.toDocument(Annotated.getDefaultInstance()).containsKey('ip')
+
+    and: 'a GeoShape message with neither wkt nor geojson is left out'
+    !codec.toDocument(Geo.newBuilder().setShape(GeoShape.getDefaultInstance()).build()).containsKey('shape')
+
+    and: 'keyword and text fields keep it'
+    codec.toDocument(Annotated.getDefaultInstance()).subMap(['code', 'title']) == [code: '', title: '']
+  }
+
+  def "maps are plain JSON objects with string keys and read back"() {
+    given:
+    def message = Composite.newBuilder()
+        .putStringMap('env', 'prod')
+        .putMessageMap('k', Child.newBuilder().setName('c').build())
+        .putIntMap(7, 1.5d)
+        .build()
+
+    when:
+    def doc = codec.toDocument(message)
+
+    then:
+    doc.string_map == [env: 'prod']
+    doc.message_map == [k: [name: 'c', rank: 0]]
+    doc.int_map == ['7': 1.5d]
+    codec.fromDocument(doc, Composite) == message
   }
 
   def "well-known types follow protobuf's JSON mapping and Any is dropped"() {
@@ -272,7 +359,10 @@ class ProtoDocumentCodecSpec extends Specification {
     def doc = codec.toDocument(message)
 
     then:
-    doc == [id: 'a', renamed_field: 'r', title: 't']
+    sparse.toDocument(message) == [id: 'a', renamed_field: 'r', title: 't']
+    !doc.containsKey('secret')
+    doc.renamed_field == 'r'
+    !doc.containsKey('renamed')
     codec.fromDocument(doc, Annotated) == message.toBuilder().clearSecret().build()
     codec.fromDocument([id: 'a', secret: 'leaked'], Annotated) == Annotated.newBuilder().setId('a').build()
   }
