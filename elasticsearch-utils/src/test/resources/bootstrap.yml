@@ -1,3 +1,0 @@
-elasticsearch:
-  enabled: true
-  httpHosts: "http://localhost:9200"

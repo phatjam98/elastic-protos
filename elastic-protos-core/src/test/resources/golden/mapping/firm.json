@@ -1,0 +1,124 @@
+{
+  "alias" : "firms",
+  "fullTextFields" : {
+    "name" : 2.0,
+    "offices.name" : 1.0
+  },
+  "idField" : "id",
+  "ignoredPaths" : [ ],
+  "mappings" : {
+    "_meta" : {
+      "elastic_protos" : {
+        "hash" : "e891e500",
+        "proto" : "phatjam98.elasticprotos.example.Firm",
+        "schema_version" : 1
+      }
+    },
+    "dynamic" : "strict",
+    "properties" : {
+      "created_at" : {
+        "format" : "strict_date_optional_time",
+        "type" : "date"
+      },
+      "domain" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "headquarters" : {
+        "properties" : {
+          "city" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          },
+          "location" : {
+            "type" : "geo_point"
+          },
+          "postal_code" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          },
+          "state" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          },
+          "street" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          }
+        },
+        "type" : "object"
+      },
+      "id" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "labels" : {
+        "type" : "flattened"
+      },
+      "name" : {
+        "fields" : {
+          "keyword" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          }
+        },
+        "type" : "text"
+      },
+      "offices" : {
+        "properties" : {
+          "address" : {
+            "properties" : {
+              "city" : {
+                "ignore_above" : 256,
+                "type" : "keyword"
+              },
+              "location" : {
+                "type" : "geo_point"
+              },
+              "postal_code" : {
+                "ignore_above" : 256,
+                "type" : "keyword"
+              },
+              "state" : {
+                "ignore_above" : 256,
+                "type" : "keyword"
+              },
+              "street" : {
+                "ignore_above" : 256,
+                "type" : "keyword"
+              }
+            },
+            "type" : "object"
+          },
+          "headcount" : {
+            "type" : "integer"
+          },
+          "name" : {
+            "fields" : {
+              "keyword" : {
+                "ignore_above" : 256,
+                "type" : "keyword"
+              }
+            },
+            "type" : "text"
+          }
+        },
+        "type" : "nested"
+      },
+      "status" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "updated_at" : {
+        "format" : "strict_date_optional_time",
+        "type" : "date"
+      }
+    }
+  },
+  "name" : "firms-ve891e500",
+  "nestedPaths" : [ "offices" ],
+  "settings" : {
+    "number_of_shards" : 1
+  },
+  "warnings" : [ ]
+}

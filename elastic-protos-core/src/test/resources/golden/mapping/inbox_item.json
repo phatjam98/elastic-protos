@@ -1,0 +1,127 @@
+{
+  "alias" : "inbox_items",
+  "fullTextFields" : {
+    "document.body" : 1.0,
+    "document.parties.name" : 1.0,
+    "document.title" : 3.0,
+    "subject" : 1.0
+  },
+  "idField" : "id",
+  "ignoredPaths" : [ "document.internal_notes" ],
+  "mappings" : {
+    "_meta" : {
+      "elastic_protos" : {
+        "hash" : "33ca6fb8",
+        "proto" : "phatjam98.elasticprotos.example.InboxItem",
+        "schema_version" : 1
+      }
+    },
+    "dynamic" : "strict",
+    "properties" : {
+      "document" : {
+        "properties" : {
+          "body" : {
+            "type" : "text"
+          },
+          "checksum" : {
+            "type" : "binary"
+          },
+          "filed_at" : {
+            "format" : "strict_date_optional_time",
+            "type" : "date"
+          },
+          "firm_id" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          },
+          "id" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          },
+          "metadata" : {
+            "type" : "flattened"
+          },
+          "parties" : {
+            "properties" : {
+              "email" : {
+                "ignore_above" : 256,
+                "type" : "keyword"
+              },
+              "name" : {
+                "fields" : {
+                  "keyword" : {
+                    "ignore_above" : 256,
+                    "type" : "keyword"
+                  }
+                },
+                "type" : "text"
+              },
+              "role" : {
+                "ignore_above" : 256,
+                "type" : "keyword"
+              }
+            },
+            "type" : "nested"
+          },
+          "relevance" : {
+            "type" : "double"
+          },
+          "size_bytes" : {
+            "type" : "long"
+          },
+          "tags" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          },
+          "title" : {
+            "fields" : {
+              "keyword" : {
+                "ignore_above" : 256,
+                "type" : "keyword"
+              }
+            },
+            "type" : "text"
+          },
+          "type" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          }
+        },
+        "type" : "object"
+      },
+      "firm_id" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "id" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "received_at" : {
+        "format" : "strict_date_optional_time",
+        "type" : "date"
+      },
+      "recipient_emails" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "status" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "subject" : {
+        "fields" : {
+          "keyword" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          }
+        },
+        "type" : "text"
+      }
+    }
+  },
+  "name" : "inbox_items-v33ca6fb8",
+  "nestedPaths" : [ "document.parties" ],
+  "settings" : { },
+  "warnings" : [ "document.id: more than one field is marked id; using id" ]
+}

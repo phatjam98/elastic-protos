@@ -1,0 +1,19 @@
+{
+  "from" : 0,
+  "query" : {
+    "bool" : {
+      "must" : [ {
+        "multi_match" : {
+          "fields" : [ "title^2.5", "body" ],
+          "fuzziness" : "AUTO",
+          "minimum_should_match" : "75%",
+          "operator" : "and",
+          "query" : "breach",
+          "type" : "most_fields"
+        }
+      } ]
+    }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

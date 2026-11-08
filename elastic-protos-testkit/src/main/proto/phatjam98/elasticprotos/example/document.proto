@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package phatjam98.elasticprotos.example;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "phatjam98/elasticprotos/v1/elastic_options.proto";
+
+option java_package = "com.phatjam98.elasticprotos.proto.example";
+option java_multiple_files = true;
+option java_outer_classname = "DocumentProtos";
+
+// A filed document. The primary full-text target of the example application.
+message Document {
+  option (phatjam98.elasticprotos.v1.elastic) = {
+    alias: "documents"
+    default_analyzer: "english"
+  };
+
+  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = TRUE];
+  string firm_id = 2;
+  string title = 3 [(phatjam98.elasticprotos.v1.elastic_field) = { type: TEXT boost: 3.0 }];
+  string body = 4 [(phatjam98.elasticprotos.v1.elastic_field) = { type: TEXT keyword_subfield: FALSE }];
+  DocumentType type = 5;
+  repeated string tags = 6;             // repeated scalar => keyword array
+  repeated Party parties = 7;           // nested
+  google.protobuf.Timestamp filed_at = 8;
+  int64 size_bytes = 9;
+  bytes checksum = 10;                  // binary
+  google.protobuf.Struct metadata = 11; // flattened
+  string internal_notes = 12 [(phatjam98.elasticprotos.v1.elastic_field).type = IGNORE];
+  optional double relevance = 13;
+}
+
+enum DocumentType {
+  DOCUMENT_TYPE_UNSPECIFIED = 0;
+  FILING = 1;
+  ORDER = 2;
+  MOTION = 3;
+  NOTICE = 4;
+}
+
+message Party {
+  string name = 1 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
+  PartyRole role = 2;
+  string email = 3;
+}
+
+enum PartyRole {
+  PARTY_ROLE_UNSPECIFIED = 0;
+  PLAINTIFF = 1;
+  DEFENDANT = 2;
+  COUNSEL = 3;
+}

@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package phatjam98.elasticprotos.example;
+
+import "google/protobuf/timestamp.proto";
+import "phatjam98/elasticprotos/v1/elastic_options.proto";
+import "phatjam98/elasticprotos/example/document.proto";
+
+option java_package = "com.phatjam98.elasticprotos.proto.example";
+option java_multiple_files = true;
+option java_outer_classname = "InboxItemProtos";
+
+// A notification delivered to a firm's inbox. Embeds the related document as an object.
+message InboxItem {
+  option (phatjam98.elasticprotos.v1.elastic) = { alias: "inbox_items" };
+
+  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = TRUE];
+  string firm_id = 2;
+  string subject = 3 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
+  InboxStatus status = 4;
+  google.protobuf.Timestamp received_at = 5;
+  Document document = 6;
+  repeated string recipient_emails = 7;
+}
+
+enum InboxStatus {
+  INBOX_STATUS_UNSPECIFIED = 0;
+  UNREAD = 1;
+  READ = 2;
+  ARCHIVED = 3;
+}

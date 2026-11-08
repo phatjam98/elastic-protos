@@ -1,0 +1,42 @@
+// Maven publication for modules released to Maven Central. Every module stages into the single
+// root build/staging-deploy directory that jreleaser.yml points at.
+plugins {
+    id 'maven-publish'
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from(plugins.hasPlugin('java-platform') ? components.javaPlatform : components.java)
+            pom {
+                name = project.provider { "${project.group}:${project.name}".toString() }
+                description = project.provider { project.description ?: project.name }
+                url = 'https://github.com/phatjam98/elastic-protos'
+                licenses {
+                    license {
+                        name = 'The Apache License, Version 2.0'
+                        url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+                    }
+                }
+                developers {
+                    developer {
+                        id = 'phatjam98'
+                        name = 'Travis Carter'
+                        email = 'phatjam98@gmail.com'
+                    }
+                }
+                scm {
+                    connection = 'scm:git:git://github.com/phatjam98/elastic-protos.git'
+                    developerConnection = 'scm:git:ssh://github.com/phatjam98/elastic-protos.git'
+                    url = 'https://github.com/phatjam98/elastic-protos'
+                }
+            }
+        }
+    }
+    repositories {
+        maven {
+            name = 'staging'
+            url = rootProject.layout.buildDirectory.dir('staging-deploy')
+        }
+    }
+}

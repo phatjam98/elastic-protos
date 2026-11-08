@@ -1,0 +1,80 @@
+// A plain `application` build with the Micronaut annotation processors: no Micronaut Gradle
+// plugin, so the only version that has to line up with Micronaut is the platform BOM below.
+plugins {
+    id 'application'
+    id 'groovy'
+    id 'com.google.protobuf' version '0.10.0'
+}
+
+group = 'com.acme.search'
+version = '0.1.0'
+
+def micronautVersion = '4.10.22'          // io.micronaut.platform:micronaut-platform
+def protobufVersion = '3.25.9'            // protoc; must not be newer than the protobuf-java runtime
+def testcontainersVersion = '2.0.5'
+
+repositories {
+    // mavenLocal first so `./gradlew publishToMavenLocal` in the repository root is picked up.
+    mavenLocal()
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+dependencies {
+    implementation platform("com.phatjam98:elastic-protos-bom:${elasticProtosVersion}")
+    implementation 'com.phatjam98:elastic-protos-core'
+    implementation 'com.phatjam98:elastic-protos-micronaut'
+    // Both adapters are on the classpath; `elastic-protos.engine` picks one at runtime.
+    implementation 'com.phatjam98:elastic-protos-elasticsearch'
+    implementation 'com.phatjam98:elastic-protos-opensearch'
+
+    annotationProcessor platform("io.micronaut.platform:micronaut-platform:${micronautVersion}")
+    annotationProcessor 'io.micronaut:micronaut-inject-java'
+    implementation platform("io.micronaut.platform:micronaut-platform:${micronautVersion}")
+    implementation 'io.micronaut:micronaut-http-server-netty'
+    implementation 'io.micronaut:micronaut-jackson-databind'
+    implementation 'com.google.protobuf:protobuf-java-util'
+    runtimeOnly 'ch.qos.logback:logback-classic'
+    runtimeOnly 'org.yaml:snakeyaml'
+
+    testImplementation platform("io.micronaut.platform:micronaut-platform:${micronautVersion}")
+    testImplementation 'io.micronaut.test:micronaut-test-spock'
+    testImplementation 'io.micronaut:micronaut-http-client'
+    // Compiles the Groovy test beans and @MicronautTest specs.
+    testImplementation 'io.micronaut:micronaut-inject-groovy'
+    testImplementation "org.testcontainers:testcontainers-elasticsearch:${testcontainersVersion}"
+    testImplementation "org.testcontainers:testcontainers-spock:${testcontainersVersion}"
+    testImplementation 'org.spockframework:spock-core'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+protobuf {
+    protoc { artifact = "com.google.protobuf:protoc:${protobufVersion}" }
+}
+
+application {
+    mainClass = 'com.acme.search.Application'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 17
+    options.encoding = 'UTF-8'
+}
+
+tasks.named('run') {
+    // Forwards -Dseed.enabled=true (and any other -D) from the Gradle command line to the app.
+    systemProperties System.getProperties().findAll { k, v -> k.toString().startsWith('seed.') }
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat = 'full'
+    }
+}

@@ -1,0 +1,30 @@
+{
+  "alias" : "id_by_option",
+  "fullTextFields" : { },
+  "idField" : "key",
+  "ignoredPaths" : [ ],
+  "mappings" : {
+    "_meta" : {
+      "elastic_protos" : {
+        "hash" : "7f691732",
+        "proto" : "phatjam98.elasticprotos.test.IdByOption",
+        "schema_version" : 1
+      }
+    },
+    "dynamic" : "strict",
+    "properties" : {
+      "key" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "value" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      }
+    }
+  },
+  "name" : "id_by_option-v7f691732",
+  "nestedPaths" : [ ],
+  "settings" : { },
+  "warnings" : [ ]
+}

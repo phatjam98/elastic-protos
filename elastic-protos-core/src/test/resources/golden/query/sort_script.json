@@ -1,0 +1,18 @@
+{
+  "from" : 0,
+  "query" : {
+    "match_all" : { }
+  },
+  "size" : 10,
+  "sort" : [ {
+    "_script" : {
+      "order" : "desc",
+      "script" : {
+        "lang" : "painless",
+        "source" : "doc['size_bytes'].value * 2"
+      },
+      "type" : "number"
+    }
+  } ],
+  "track_total_hits" : true
+}

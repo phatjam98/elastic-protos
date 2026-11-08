@@ -1,0 +1,21 @@
+{
+  "pit" : {
+    "id" : "pit-123",
+    "keep_alive" : "5m"
+  },
+  "query" : {
+    "match_all" : { }
+  },
+  "search_after" : [ 1700000000000, "doc-9", 42 ],
+  "size" : 50,
+  "sort" : [ {
+    "filed_at" : {
+      "order" : "desc"
+    }
+  }, {
+    "_shard_doc" : {
+      "order" : "asc"
+    }
+  } ],
+  "track_total_hits" : true
+}

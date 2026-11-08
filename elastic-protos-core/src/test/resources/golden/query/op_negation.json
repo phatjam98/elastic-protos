@@ -1,0 +1,19 @@
+{
+  "from" : 0,
+  "query" : {
+    "bool" : {
+      "must" : [ {
+        "match" : {
+          "title" : "appeal"
+        }
+      } ],
+      "must_not" : [ {
+        "term" : {
+          "type" : "ORDER"
+        }
+      } ]
+    }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

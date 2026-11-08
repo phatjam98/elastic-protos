@@ -1,0 +1,19 @@
+{
+  "from" : 0,
+  "query" : {
+    "match_all" : { }
+  },
+  "size" : 10,
+  "sort" : [ {
+    "_geo_distance" : {
+      "distance_type" : "arc",
+      "headquarters.location" : {
+        "lat" : 36.17,
+        "lon" : -115.14
+      },
+      "order" : "asc",
+      "unit" : "mi"
+    }
+  } ],
+  "track_total_hits" : true
+}

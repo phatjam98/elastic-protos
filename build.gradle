@@ -1,19 +1,36 @@
-// Root project configuration
-// Subprojects handle their own configurations via buildSrc conventions
-
-allprojects {
-    repositories {
-        mavenCentral()
-        maven { url "https://repo.osgeo.org/repository/release/" }
-    }
+plugins {
+    id 'base'
+    alias(libs.plugins.jreleaser)
 }
 
-// Print version for root project
-task showVersion {
-    doLast {
-        println "Root project version: $version"
-        subprojects {
-            println "${it.name} version: ${it.version}"
-        }
-    }
+description = 'Protobuf-driven index mappings, migrations and queries for Elasticsearch and OpenSearch'
+
+jreleaser {
+    configFile = file('jreleaser.yml')
+}
+
+// Modules that publish to Maven Central. The testkit stays internal.
+def publishedModules = [
+        'elastic-protos-core',
+        'elastic-protos-elasticsearch',
+        'elastic-protos-opensearch',
+        'elastic-protos-micronaut',
+        'elastic-protos-bom',
+]
+
+tasks.register('stageAll') {
+    group = 'publishing'
+    description = 'Publishes every module to the shared build/staging-deploy directory for JReleaser.'
+    dependsOn publishedModules.collect { ":${it}:publishAllPublicationsToStagingRepository" }
+}
+
+tasks.named('jreleaserFullRelease') {
+    dependsOn 'stageAll'
+}
+
+tasks.register('showVersion') {
+    group = 'help'
+    description = 'Prints the project version.'
+    def v = version
+    doLast { println "elastic-protos version: ${v}" }
 }

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/phatjam98/elastic-protos/security/advisories/new
+    about: Please report vulnerabilities privately, as described in docs/SECURITY.md.
+  - name: Documentation
+    url: https://github.com/phatjam98/elastic-protos#readme
+    about: Usage, configuration and the option reference.

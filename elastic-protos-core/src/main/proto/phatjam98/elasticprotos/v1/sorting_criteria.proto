@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package phatjam98.elasticprotos.v1;
+
+import "phatjam98/elasticprotos/v1/flat_struct.proto";
+import "phatjam98/elasticprotos/v1/geo.proto";
+
+option java_package = "com.phatjam98.elasticprotos.proto";
+option java_multiple_files = true;
+option java_outer_classname = "SortingCriteriaProtos";
+
+enum SortingOrder {
+  ORDER_UNDEFINED = 0;
+  ASC = 1;
+  DESC = 2;
+}
+
+// One sort clause.
+message SortingCriteria {
+  oneof sort_type {
+    FieldSort field_sort = 1;
+    ScoreSort score_sort = 2;
+    GeoDistanceSort geo_distance_sort = 3;
+    ScriptSort script_sort = 4;
+  }
+}
+
+// Sort by a field value. Text fields sort by their keyword sub-field.
+message FieldSort {
+  SortingOrder order = 1;
+  string field_name = 2;
+}
+
+// Sort by relevance score.
+message ScoreSort {
+  SortingOrder order = 1;
+}
+
+// Sort by distance from a point; the field must be a geo_point.
+message GeoDistanceSort {
+  string field_name = 1;
+  SortingOrder order = 2;
+  DistanceType distance_type = 3;
+  DistanceUnit distance_unit = 4;
+  LatLon point = 5;
+}
+
+// Sort by an inline Painless script.
+message ScriptSort {
+  string script_or_id = 1;
+  ScriptSortType sort_type = 2;
+  SortingOrder order = 3;
+}
+
+enum ScriptSortType {
+  UNKNOWN_TYPE = 0;
+  STRING = 1;
+  NUMBER = 2;
+}
+
+enum DistanceUnit {
+  UNKNOWN_UNIT = 0;
+  INCH = 1;
+  YARD = 2;
+  FEET = 3;
+  KILOMETERS = 4;
+  NAUTICALMILES = 5;
+  MILLIMETERS = 6;
+  CENTIMETERS = 7;
+  MILES = 8;
+  METERS = 9;
+}

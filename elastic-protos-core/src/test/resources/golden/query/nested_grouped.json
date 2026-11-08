@@ -1,0 +1,41 @@
+{
+  "from" : 0,
+  "query" : {
+    "bool" : {
+      "filter" : [ {
+        "term" : {
+          "name.keyword" : "Acme LLP"
+        }
+      } ],
+      "must" : [ {
+        "nested" : {
+          "path" : "offices",
+          "query" : {
+            "bool" : {
+              "filter" : [ {
+                "range" : {
+                  "offices.headcount" : {
+                    "gte" : 10,
+                    "lte" : 100
+                  }
+                }
+              } ],
+              "must" : [ {
+                "match" : {
+                  "offices.name" : "Las Vegas"
+                }
+              } ],
+              "must_not" : [ {
+                "term" : {
+                  "offices.address.city" : "Reno"
+                }
+              } ]
+            }
+          }
+        }
+      } ]
+    }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

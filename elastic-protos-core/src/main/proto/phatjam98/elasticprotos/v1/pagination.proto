@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package phatjam98.elasticprotos.v1;
+
+import "phatjam98/elasticprotos/v1/flat_struct.proto";
+
+option java_package = "com.phatjam98.elasticprotos.proto";
+option java_multiple_files = true;
+option java_outer_classname = "PaginationProtos";
+
+// Paging state. Use from/size for shallow paging; for deep or consistent paging open a
+// point in time, pass its id as cursor and feed the last hit's sort values back as search_after.
+message Pagination {
+  sint32 size = 1;                           // page size; 0 means engine default
+  sint32 from = 2;                           // offset, ignored when cursor is set
+  string cursor = 3;                         // point-in-time id returned by the engine
+  sint32 total = 4;                          // total hits, set on responses
+  repeated PrimitiveValue search_after = 5;  // sort values of the last hit of the previous page
+  string keep_alive = 6;                     // point-in-time keep-alive, e.g. "1m"
+}

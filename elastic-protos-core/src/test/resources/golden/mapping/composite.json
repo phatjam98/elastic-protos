@@ -1,0 +1,101 @@
+{
+  "alias" : "composite",
+  "fullTextFields" : { },
+  "idField" : null,
+  "ignoredPaths" : [ ],
+  "mappings" : {
+    "_meta" : {
+      "elastic_protos" : {
+        "hash" : "5e01d47d",
+        "proto" : "phatjam98.elasticprotos.test.Composite",
+        "schema_version" : 1
+      }
+    },
+    "dynamic" : "strict",
+    "properties" : {
+      "children" : {
+        "properties" : {
+          "grandchild" : {
+            "properties" : {
+              "note" : {
+                "ignore_above" : 256,
+                "type" : "keyword"
+              }
+            },
+            "type" : "object"
+          },
+          "name" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          },
+          "rank" : {
+            "type" : "integer"
+          }
+        },
+        "type" : "nested"
+      },
+      "choice_child" : {
+        "properties" : {
+          "grandchild" : {
+            "properties" : {
+              "note" : {
+                "ignore_above" : 256,
+                "type" : "keyword"
+              }
+            },
+            "type" : "object"
+          },
+          "name" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          },
+          "rank" : {
+            "type" : "integer"
+          }
+        },
+        "type" : "object"
+      },
+      "choice_int" : {
+        "type" : "long"
+      },
+      "choice_string" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "int_map" : {
+        "type" : "flattened"
+      },
+      "message_map" : {
+        "type" : "flattened"
+      },
+      "single_child" : {
+        "properties" : {
+          "grandchild" : {
+            "properties" : {
+              "note" : {
+                "ignore_above" : 256,
+                "type" : "keyword"
+              }
+            },
+            "type" : "object"
+          },
+          "name" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          },
+          "rank" : {
+            "type" : "integer"
+          }
+        },
+        "type" : "object"
+      },
+      "string_map" : {
+        "type" : "flattened"
+      }
+    }
+  },
+  "name" : "composite-v5e01d47d",
+  "nestedPaths" : [ "children" ],
+  "settings" : { },
+  "warnings" : [ ]
+}

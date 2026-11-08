@@ -1,0 +1,141 @@
+{
+  "alias" : "annotated",
+  "fullTextFields" : {
+    "body" : 1.0,
+    "copied" : 1.0,
+    "title" : 2.5
+  },
+  "idField" : "id",
+  "ignoredPaths" : [ "secret" ],
+  "mappings" : {
+    "_meta" : {
+      "elastic_protos" : {
+        "hash" : "92d6cd00",
+        "proto" : "phatjam98.elasticprotos.test.Annotated",
+        "schema_version" : 1
+      }
+    },
+    "dynamic" : false,
+    "properties" : {
+      "as_long" : {
+        "type" : "long"
+      },
+      "birthday" : {
+        "format" : "yyyy-MM-dd",
+        "type" : "date"
+      },
+      "body" : {
+        "analyzer" : "folding",
+        "search_analyzer" : "standard",
+        "type" : "text"
+      },
+      "code" : {
+        "ignore_above" : 64,
+        "normalizer" : "lowercase",
+        "type" : "keyword"
+      },
+      "copied" : {
+        "copy_to" : [ "all_text" ],
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "flattened_map" : {
+        "type" : "flattened"
+      },
+      "forced_nested" : {
+        "properties" : {
+          "grandchild" : {
+            "properties" : {
+              "note" : {
+                "ignore_above" : 256,
+                "type" : "keyword"
+              }
+            },
+            "type" : "object"
+          },
+          "name" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          },
+          "rank" : {
+            "type" : "integer"
+          }
+        },
+        "type" : "nested"
+      },
+      "forced_object" : {
+        "properties" : {
+          "grandchild" : {
+            "properties" : {
+              "note" : {
+                "ignore_above" : 256,
+                "type" : "keyword"
+              }
+            },
+            "type" : "object"
+          },
+          "name" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          },
+          "rank" : {
+            "type" : "integer"
+          }
+        },
+        "type" : "object"
+      },
+      "id" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "ip" : {
+        "type" : "ip"
+      },
+      "raw" : {
+        "eager_global_ordinals" : true,
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "renamed_field" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "title" : {
+        "analyzer" : "english",
+        "fields" : {
+          "keyword" : {
+            "ignore_above" : 256,
+            "type" : "keyword"
+          }
+        },
+        "type" : "text"
+      },
+      "unsearchable" : {
+        "doc_values" : false,
+        "ignore_above" : 256,
+        "index" : false,
+        "type" : "keyword"
+      },
+      "with_null" : {
+        "ignore_above" : 256,
+        "null_value" : "N/A",
+        "type" : "keyword"
+      }
+    }
+  },
+  "name" : "annotated_docs-v92d6cd00",
+  "nestedPaths" : [ "forced_nested" ],
+  "settings" : {
+    "analysis" : {
+      "analyzer" : {
+        "folding" : {
+          "filter" : [ "lowercase", "asciifolding" ],
+          "tokenizer" : "standard"
+        }
+      }
+    },
+    "number_of_replicas" : 0,
+    "number_of_shards" : 2
+  },
+  "warnings" : [ ]
+}

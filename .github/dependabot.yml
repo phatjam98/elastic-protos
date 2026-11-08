@@ -1,0 +1,41 @@
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      gradle-plugins:
+        patterns:
+          - 'org.jreleaser*'
+          - 'com.google.protobuf:protobuf-gradle-plugin'
+          - 'org.gradle.toolchains.foojay-resolver-convention*'
+          - 'com.puppycrawl.tools:checkstyle'
+          - 'org.jacoco*'
+      micronaut:
+        patterns:
+          - 'io.micronaut*'
+      protobuf:
+        patterns:
+          - 'com.google.protobuf*'
+      test:
+        patterns:
+          - 'org.spockframework*'
+          - 'org.junit*'
+          - 'org.testcontainers*'
+          - 'org.opensearch:opensearch-testcontainers'
+          - 'org.apache.groovy*'
+      all-other:
+        patterns:
+          - '*'
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+      include: scope

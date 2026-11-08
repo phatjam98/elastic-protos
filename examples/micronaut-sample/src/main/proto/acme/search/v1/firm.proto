@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package acme.search.v1;
+
+import "google/protobuf/timestamp.proto";
+import "phatjam98/elasticprotos/v1/elastic_options.proto";
+
+option java_package = "com.acme.search.proto";
+option java_multiple_files = true;
+option java_outer_classname = "FirmProtos";
+
+// A law firm, stored behind the "firms" alias.
+message Firm {
+  option (phatjam98.elasticprotos.v1.elastic) = {
+    alias: "firms"
+    shards: 1
+  };
+
+  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = TRUE];
+  string name = 2 [(phatjam98.elasticprotos.v1.elastic_field) = { type: TEXT boost: 2.0 }];
+  string domain = 3;                    // keyword
+  FirmStatus status = 4;                // enum => keyword
+  Address headquarters = 5;             // singular message => object
+  map<string, string> labels = 6;       // map => flattened
+  google.protobuf.Timestamp created_at = 7;
+}
+
+enum FirmStatus {
+  FIRM_STATUS_UNSPECIFIED = 0;
+  ACTIVE = 1;
+  SUSPENDED = 2;
+  CLOSED = 3;
+}
+
+message Address {
+  string street = 1;
+  string city = 2;
+  string state = 3;
+  string postal_code = 4;
+}

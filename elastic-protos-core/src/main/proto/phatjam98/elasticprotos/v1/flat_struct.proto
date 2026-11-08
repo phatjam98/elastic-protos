@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package phatjam98.elasticprotos.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "phatjam98/elasticprotos/v1/geo.proto";
+
+option java_package = "com.phatjam98.elasticprotos.proto";
+option java_multiple_files = true;
+option java_outer_classname = "FlatStructProtos";
+
+// A non-recursive map of dynamically typed values.
+message FlatStruct {
+  map<string, FlatValue> fields = 1;
+}
+
+// A dynamically typed value used as the operand of a FieldCondition.
+message FlatValue {
+  reserved 9;            // formerly a geobuf geometry; use geo_shape_value or lat_lon_value
+  reserved "geo_value";
+
+  oneof kind {
+    google.protobuf.NullValue null_value = 1;
+    double number_value = 2;
+    string string_value = 3;
+    bool bool_value = 4;
+    google.protobuf.Timestamp timestamp_value = 7;
+    RangeValue range_value = 8;
+    PrimitiveList list_value = 10;
+    GeoDistanceValue geo_distance_value = 11;
+    GeoBoundingBoxValue geo_bounding_box_value = 12;
+    GeoShape geo_shape_value = 13;
+    LatLon lat_lon_value = 14;
+    int64 int_value = 15;  // exact 64-bit integer; number_value is a double
+  }
+}
+
+// A numeric range. Bounds are optional and inclusivity is explicit.
+message RangeValue {
+  double min = 1;
+  double max = 2;
+  bool min_inclusive = 3;
+  bool max_inclusive = 4;
+}
+
+// A scalar value.
+message PrimitiveValue {
+  oneof kind {
+    double number_value = 1;
+    string string_value = 2;
+    bool bool_value = 3;
+    int64 int_value = 4;
+  }
+}
+
+// A list of scalars, so FlatValue can carry lists without recursion.
+message PrimitiveList {
+  repeated PrimitiveValue values = 1;
+}
+
+// A radius around a point.
+message GeoDistanceValue {
+  LatLon point = 1;
+  string distance = 2;            // e.g. "10km", "5mi"
+  DistanceType distance_type = 3;
+}
+
+// How to compute distance: arc (default) or plane (faster, inaccurate over long distances).
+enum DistanceType {
+  ARC = 0;
+  PLANE = 1;
+}
+
+// A rectangle given either as WKT or as two corners.
+message GeoBoundingBoxValue {
+  string wkt = 1;
+  LatLon top_left = 2;
+  LatLon bottom_right = 3;
+}

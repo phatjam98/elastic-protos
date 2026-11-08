@@ -1,0 +1,37 @@
+{
+  "alias" : "geo",
+  "fullTextFields" : { },
+  "idField" : null,
+  "ignoredPaths" : [ ],
+  "mappings" : {
+    "_meta" : {
+      "elastic_protos" : {
+        "hash" : "b842881a",
+        "proto" : "phatjam98.elasticprotos.test.Geo",
+        "schema_version" : 1
+      }
+    },
+    "dynamic" : "strict",
+    "properties" : {
+      "coordinates" : {
+        "type" : "geo_point"
+      },
+      "point" : {
+        "type" : "geo_point"
+      },
+      "shape" : {
+        "type" : "geo_shape"
+      },
+      "wkt_point" : {
+        "type" : "geo_point"
+      },
+      "wkt_shape" : {
+        "type" : "geo_shape"
+      }
+    }
+  },
+  "name" : "geo-vb842881a",
+  "nestedPaths" : [ ],
+  "settings" : { },
+  "warnings" : [ ]
+}

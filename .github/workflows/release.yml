@@ -1,0 +1,120 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, without the leading v (e.g. 1.0.0 or 1.0.0-rc.1)'
+        required: true
+        type: string
+      dryrun:
+        description: 'Dry run: stage, sign and validate, but upload nothing and create no tag or release'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    env:
+      INPUT_VERSION: ${{ inputs.version }}
+      INPUT_DRYRUN: ${{ inputs.dryrun }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and validate version
+        id: version
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            DRYRUN=false
+            SKIP_TAG=true
+          else
+            TAG="v${INPUT_VERSION#v}"
+            DRYRUN="$INPUT_DRYRUN"
+            SKIP_TAG=false
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "::error::'$TAG' does not match ^v<major>.<minor>.<patch>(-rc.<n>)?$"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "dryrun=$DRYRUN"
+            echo "skip_tag=$SKIP_TAG"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing $VERSION (tag $TAG, dry run: $DRYRUN)"
+
+      - name: Require the release commit to be on main
+        run: |
+          git fetch --no-tags origin main
+          if ! git branch -r --contains "$GITHUB_SHA" | grep -qx '  origin/main'; then
+            echo "::error::$GITHUB_SHA is not contained in origin/main; releases are cut from main only"
+            exit 1
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Import GPG key
+        uses: crazy-max/ghaction-import-gpg@v7
+        with:
+          gpg_private_key: ${{ secrets.JRELEASER_GPG_SECRET_KEY }}
+          passphrase: ${{ secrets.JRELEASER_GPG_PASSPHRASE }}
+
+      # -Pversion goes to every Gradle invocation so build, stageAll and JReleaser agree on the version.
+      - name: Build
+        run: ./gradlew build -Pversion="${{ steps.version.outputs.version }}"
+
+      - name: Release with JReleaser
+        run: |
+          ARGS=(jreleaserFullRelease -Pversion="${{ steps.version.outputs.version }}")
+          if [[ "${{ steps.version.outputs.dryrun }}" == "true" ]]; then
+            ARGS+=(--dryrun)
+          fi
+          ./gradlew "${ARGS[@]}"
+        env:
+          # A tag push already created the tag, so JReleaser must not re-create or move it; a manual
+          # dispatch has no tag yet and JReleaser creates it (skipTag defaults to false in jreleaser.yml).
+          JRELEASER_SKIP_TAG: ${{ steps.version.outputs.skip_tag }}
+          JRELEASER_GITHUB_TOKEN: ${{ secrets.JRELEASER_GITHUB_TOKEN }}
+          JRELEASER_MAVENCENTRAL_USERNAME: ${{ secrets.JRELEASER_MAVENCENTRAL_USERNAME }}
+          JRELEASER_MAVENCENTRAL_PASSWORD: ${{ secrets.JRELEASER_MAVENCENTRAL_PASSWORD }}
+          JRELEASER_NEXUS2_USERNAME: ${{ secrets.JRELEASER_NEXUS2_USERNAME }}
+          JRELEASER_NEXUS2_PASSWORD: ${{ secrets.JRELEASER_NEXUS2_PASSWORD }}
+          JRELEASER_GPG_PASSPHRASE: ${{ secrets.JRELEASER_GPG_PASSPHRASE }}
+          JRELEASER_GPG_PUBLIC_KEY: ${{ secrets.JRELEASER_GPG_PUBLIC_KEY }}
+          JRELEASER_GPG_SECRET_KEY: ${{ secrets.JRELEASER_GPG_SECRET_KEY }}
+
+      - name: Upload JReleaser logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jreleaser-release-${{ steps.version.outputs.version }}
+          path: |
+            build/jreleaser/trace.log
+            build/jreleaser/output.properties
+            build/jreleaser/release/CHANGELOG.md
+          if-no-files-found: ignore

@@ -1,0 +1,52 @@
+{
+  "alias" : "well_known",
+  "fullTextFields" : { },
+  "idField" : null,
+  "ignoredPaths" : [ "any_value", "empty_value", "field_mask" ],
+  "mappings" : {
+    "_meta" : {
+      "elastic_protos" : {
+        "hash" : "8e774410",
+        "proto" : "phatjam98.elasticprotos.test.WellKnown",
+        "schema_version" : 1
+      }
+    },
+    "dynamic" : "strict",
+    "properties" : {
+      "bool_wrapper" : {
+        "type" : "boolean"
+      },
+      "double_wrapper" : {
+        "type" : "double"
+      },
+      "duration_value" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "int64_wrapper" : {
+        "type" : "long"
+      },
+      "list_value" : {
+        "type" : "flattened"
+      },
+      "string_wrapper" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "struct_value" : {
+        "type" : "flattened"
+      },
+      "timestamp_value" : {
+        "format" : "strict_date_optional_time",
+        "type" : "date"
+      },
+      "value_value" : {
+        "type" : "flattened"
+      }
+    }
+  },
+  "name" : "well_known-v8e774410",
+  "nestedPaths" : [ ],
+  "settings" : { },
+  "warnings" : [ "any_value: google.protobuf.Any has no index representation and is ignored", "field_mask: google.protobuf.FieldMask has no index representation and is ignored", "empty_value: google.protobuf.Empty has no index representation and is ignored" ]
+}

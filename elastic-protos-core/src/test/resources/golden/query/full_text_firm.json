@@ -1,0 +1,37 @@
+{
+  "from" : 0,
+  "query" : {
+    "bool" : {
+      "filter" : [ {
+        "term" : {
+          "status" : "ACTIVE"
+        }
+      } ],
+      "must" : [ {
+        "bool" : {
+          "minimum_should_match" : 1,
+          "should" : [ {
+            "multi_match" : {
+              "fields" : [ "name^2" ],
+              "query" : "acme",
+              "type" : "best_fields"
+            }
+          }, {
+            "nested" : {
+              "path" : "offices",
+              "query" : {
+                "multi_match" : {
+                  "fields" : [ "offices.name" ],
+                  "query" : "acme",
+                  "type" : "best_fields"
+                }
+              }
+            }
+          } ]
+        }
+      } ]
+    }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

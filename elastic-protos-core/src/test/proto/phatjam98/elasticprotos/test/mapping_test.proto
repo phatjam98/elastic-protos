@@ -1,0 +1,171 @@
+syntax = "proto3";
+
+package phatjam98.elasticprotos.test;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/wrappers.proto";
+import "phatjam98/elasticprotos/v1/elastic_options.proto";
+import "phatjam98/elasticprotos/v1/geo.proto";
+
+option java_package = "com.phatjam98.elasticprotos.proto.test";
+option java_multiple_files = true;
+option java_outer_classname = "MappingTestProtos";
+
+// Every scalar type with no options: exercises the default rules.
+message Scalars {
+  double double_value = 1;
+  float float_value = 2;
+  int64 int64_value = 3;
+  uint64 uint64_value = 4;
+  fixed64 fixed64_value = 5;
+  sfixed64 sfixed64_value = 6;
+  sint64 sint64_value = 7;
+  int32 int32_value = 8;
+  uint32 uint32_value = 9;
+  fixed32 fixed32_value = 10;
+  sfixed32 sfixed32_value = 11;
+  sint32 sint32_value = 12;
+  bool bool_value = 13;
+  string string_value = 14;
+  bytes bytes_value = 15;
+  Color enum_value = 16;
+  repeated string repeated_strings = 17;
+  repeated int32 repeated_ints = 18;
+}
+
+enum Color {
+  COLOR_UNSPECIFIED = 0;
+  RED = 1;
+  BLUE = 2;
+}
+
+// Well-known types with no options.
+message WellKnown {
+  google.protobuf.Timestamp timestamp_value = 1;
+  google.protobuf.Duration duration_value = 2;
+  google.protobuf.StringValue string_wrapper = 3;
+  google.protobuf.Int64Value int64_wrapper = 4;
+  google.protobuf.BoolValue bool_wrapper = 5;
+  google.protobuf.DoubleValue double_wrapper = 6;
+  google.protobuf.Struct struct_value = 7;
+  google.protobuf.Value value_value = 8;
+  google.protobuf.ListValue list_value = 9;
+  google.protobuf.Any any_value = 10;
+  google.protobuf.FieldMask field_mask = 11;
+  google.protobuf.Empty empty_value = 12;
+}
+
+// Messages, repeated messages, maps and oneofs.
+message Composite {
+  Child single_child = 1;
+  repeated Child children = 2;
+  map<string, string> string_map = 3;
+  map<string, Child> message_map = 4;
+  map<int32, double> int_map = 5;
+  oneof choice {
+    string choice_string = 6;
+    int64 choice_int = 7;
+    Child choice_child = 8;
+  }
+}
+
+message Child {
+  string name = 1;
+  int32 rank = 2;
+  Grandchild grandchild = 3;
+}
+
+message Grandchild {
+  string note = 1;
+}
+
+// Self-referential message to exercise the recursion guard.
+message TreeNode {
+  string label = 1;
+  repeated TreeNode children = 2;
+  TreeNode parent = 3;
+}
+
+// Geo forms.
+message Geo {
+  phatjam98.elasticprotos.v1.LatLon point = 1;
+  phatjam98.elasticprotos.v1.GeoShape shape = 2;
+  string wkt_point = 3 [(phatjam98.elasticprotos.v1.elastic_field).type = GEO_POINT];
+  string wkt_shape = 4 [(phatjam98.elasticprotos.v1.elastic_field).type = GEO_SHAPE];
+  Coordinates coordinates = 5 [(phatjam98.elasticprotos.v1.elastic_field).type = GEO_POINT];
+}
+
+message Coordinates {
+  double latitude = 1;
+  double longitude = 2;
+}
+
+// Field and message options.
+message Annotated {
+  option (phatjam98.elasticprotos.v1.elastic) = {
+    index: "annotated_docs"
+    alias: "annotated"
+    shards: 2
+    replicas: 0
+    has_replicas: true
+    dynamic: DYNAMIC_FALSE
+    default_analyzer: "english"
+    settings_json: "{\"analysis\":{\"analyzer\":{\"folding\":{\"tokenizer\":\"standard\",\"filter\":[\"lowercase\",\"asciifolding\"]}}}}"
+  };
+
+  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = TRUE];
+  string title = 2 [(phatjam98.elasticprotos.v1.elastic_field) = { type: TEXT boost: 2.5 }];
+  string body = 3 [(phatjam98.elasticprotos.v1.elastic_field) = { type: TEXT analyzer: "folding" search_analyzer: "standard" keyword_subfield: FALSE }];
+  string code = 4 [(phatjam98.elasticprotos.v1.elastic_field) = { ignore_above: 64 normalizer: "lowercase" }];
+  string secret = 5 [(phatjam98.elasticprotos.v1.elastic_field).type = IGNORE];
+  string unsearchable = 6 [(phatjam98.elasticprotos.v1.elastic_field) = { index: FALSE doc_values: FALSE }];
+  string renamed = 7 [(phatjam98.elasticprotos.v1.elastic_field).name = "renamed_field"];
+  string copied = 8 [(phatjam98.elasticprotos.v1.elastic_field) = { copy_to: ["all_text"] full_text: TRUE }];
+  string birthday = 9 [(phatjam98.elasticprotos.v1.elastic_field) = { type: DATE format: "yyyy-MM-dd" }];
+  int32 as_long = 10 [(phatjam98.elasticprotos.v1.elastic_field).type = LONG];
+  Child forced_nested = 11 [(phatjam98.elasticprotos.v1.elastic_field).type = NESTED];
+  repeated Child forced_object = 12 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+  map<string, string> flattened_map = 13 [(phatjam98.elasticprotos.v1.elastic_field).type = FLATTENED];
+  string raw = 14 [(phatjam98.elasticprotos.v1.elastic_field) = { raw_mapping_json: "{\"type\":\"keyword\",\"eager_global_ordinals\":true}" }];
+  string ip = 15 [(phatjam98.elasticprotos.v1.elastic_field).type = IP];
+  string with_null = 16 [(phatjam98.elasticprotos.v1.elastic_field) = { null_value: "N/A" coerce: FALSE }];
+}
+
+// Message-level id_field and skip.
+message IdByOption {
+  option (phatjam98.elasticprotos.v1.elastic) = { id_field: "key" };
+  string key = 1;
+  string value = 2;
+}
+
+message Skipped {
+  option (phatjam98.elasticprotos.v1.elastic) = { skip: TRUE };
+  string value = 1;
+}
+
+// Same fields as Scalars in a different declaration order with different numbers: must hash equal.
+message ScalarsReordered {
+  repeated int32 repeated_ints = 101;
+  repeated string repeated_strings = 102;
+  Color enum_value = 103;
+  bytes bytes_value = 104;
+  string string_value = 105;
+  bool bool_value = 106;
+  sint32 sint32_value = 107;
+  sfixed32 sfixed32_value = 108;
+  fixed32 fixed32_value = 109;
+  uint32 uint32_value = 110;
+  int32 int32_value = 111;
+  sint64 sint64_value = 112;
+  sfixed64 sfixed64_value = 113;
+  fixed64 fixed64_value = 114;
+  uint64 uint64_value = 115;
+  int64 int64_value = 116;
+  float float_value = 117;
+  double double_value = 118;
+}

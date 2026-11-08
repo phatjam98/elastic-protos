@@ -1,0 +1,252 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_call:
+
+permissions:
+  contents: read
+  checks: write
+
+concurrency:
+  # Prefixed so the group never collides with a calling workflow (snapshot.yml) on the same ref.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: static checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      # Task names without a project path run in every module that has them; the BOM has none.
+      - name: Checkstyle and Javadoc
+        run: ./gradlew checkstyleMain checkstyleTest checkstyleIntegrationTest javadoc --continue
+
+  unit:
+    name: unit tests (JDK ${{ matrix.java }})
+    needs: static
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: [ 17, 21 ]
+        include:
+          - java: 17
+            jdks: |
+              17
+          # The last version listed becomes JAVA_HOME; compilation always uses the 17 toolchain.
+          - java: 21
+            jdks: |
+              21
+              17
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up JDKs
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.jdks }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      # fromEnv lets the toolchain resolver use the JDKs setup-java installed instead of downloading.
+      - name: Build
+        run: >-
+          ./gradlew build
+          -PtestJavaVersion=${{ matrix.java }}
+          -Porg.gradle.java.installations.fromEnv=JAVA_HOME_17_X64,JAVA_HOME_21_X64
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-test-results-jdk${{ matrix.java }}
+          path: |
+            **/build/test-results/test/
+            **/build/reports/tests/test/
+          if-no-files-found: ignore
+
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-jacoco-jdk${{ matrix.java }}
+          path: '**/build/reports/jacoco/**'
+          if-no-files-found: ignore
+
+  integration:
+    name: integration (${{ matrix.engine }} ${{ matrix.image }})
+    needs: static
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: elasticsearch
+            label: es-8.19.23
+            image: docker.elastic.co/elasticsearch/elasticsearch:8.19.23
+          - engine: elasticsearch
+            label: es-9.5.5
+            image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5
+          - engine: opensearch
+            label: os-2.19.7
+            image: opensearchproject/opensearch:2.19.7
+          - engine: opensearch
+            label: os-3.9.0
+            image: opensearchproject/opensearch:3.9.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: Raise vm.max_map_count for the search engine container
+        run: sudo sysctl -w vm.max_map_count=262144
+
+      - name: Integration tests
+        run: ./gradlew :elastic-protos-${{ matrix.engine }}:integrationTest -PengineImage=${{ matrix.image }}
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-test-results-${{ matrix.label }}
+          path: |
+            elastic-protos-${{ matrix.engine }}/build/test-results/integrationTest/
+            elastic-protos-${{ matrix.engine }}/build/reports/tests/integrationTest/
+          if-no-files-found: ignore
+
+  coverage:
+    name: coverage
+    needs: unit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: Coverage report and gates
+        run: ./gradlew jacocoTestReport jacocoTestCoverageVerification
+
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jacoco-reports
+          path: '**/build/reports/jacoco/**'
+          if-no-files-found: warn
+
+  stage:
+    name: stage publications
+    needs: unit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      # Proves every published module stages (jar, sources, javadoc, pom, module) without secrets.
+      - name: Stage all modules
+        run: ./gradlew stageAll
+
+      - name: List staged files
+        run: find build/staging-deploy -type f | sort
+
+      - name: Upload staged repository
+        uses: actions/upload-artifact@v7
+        with:
+          name: staging-deploy
+          path: build/staging-deploy
+          if-no-files-found: error
+
+  sample:
+    name: example application
+    needs: unit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: Raise vm.max_map_count for the search engine container
+        run: sudo sysctl -w vm.max_map_count=262144
+
+      # The sample is a standalone build that resolves elastic-protos from mavenLocal().
+      - name: Publish the library to Maven Local
+        run: ./gradlew publishToMavenLocal
+
+      # Docker is available on ubuntu-latest, so the Testcontainers spec runs here too.
+      - name: Build the example application
+        working-directory: examples/micronaut-sample
+        run: ./gradlew build
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sample-test-results
+          path: |
+            examples/micronaut-sample/build/test-results/test/
+            examples/micronaut-sample/build/reports/tests/test/
+          if-no-files-found: ignore

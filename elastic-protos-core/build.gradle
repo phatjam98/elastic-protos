@@ -1,0 +1,52 @@
+plugins {
+    id 'elastic-protos.library-conventions'
+    id 'elastic-protos.proto-conventions'
+}
+
+description = 'Engine-agnostic core of elastic-protos: protobuf-driven index mappings, document codec, migrations and query compilation'
+
+dependencies {
+    implementation platform(libs.jackson.bom)
+    implementation libs.jackson.databind
+}
+
+jacocoTestCoverageVerification {
+    violationRules {
+        rule {
+            limit {
+                counter = 'LINE'
+                value = 'COVEREDRATIO'
+                minimum = 0.90
+            }
+        }
+    }
+}
+
+// Downstream builds import our .proto files from this jar, so make sure they are in it.
+def jarTask = tasks.named('jar', Jar)
+tasks.register('verifyJarContents') {
+    group = 'verification'
+    description = 'Checks that the core jar ships its .proto sources.'
+    dependsOn jarTask
+    def jarFile = jarTask.flatMap { it.archiveFile }
+    doLast {
+        def entries = new java.util.zip.ZipFile(jarFile.get().asFile).withCloseable { zip ->
+            zip.entries().collect { it.name }
+        }
+        def protos = entries.findAll { it.startsWith('phatjam98/elasticprotos/v1/') && it.endsWith('.proto') }
+        if (protos.isEmpty()) {
+            throw new GradleException('core jar does not contain the .proto files under phatjam98/elasticprotos/v1/')
+        }
+        logger.lifecycle("core jar ships ${protos.size()} proto files")
+    }
+}
+
+tasks.named('check') {
+    dependsOn 'verifyJarContents'
+}
+
+testing.suites.test {
+    dependencies {
+        implementation project(':elastic-protos-testkit')
+    }
+}
