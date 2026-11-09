@@ -185,7 +185,8 @@ An unknown id is a `404`.
 (batched per `elastic-protos.bulk.*`) and answers `202 Accepted`. A listener passed to
 `bulkBuffer(listener, errorListener)` counts the bulk requests and indexed items and collects the
 reason of every failed item or failed request in `errors`, which Micronaut leaves out of the JSON
-when it is empty.
+when it is empty. The error listener receives each failed request's batch of operations with the
+exception; the controller records the batch size and the reason.
 
 ```bash
 curl -s -X POST http://localhost:8080/documents/_bulk -H 'Content-Type: application/json' -d '[

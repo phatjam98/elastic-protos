@@ -4,6 +4,7 @@ import com.acme.search.proto.Document;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.phatjam98.elasticprotos.engine.BulkBuffer;
+import com.phatjam98.elasticprotos.engine.EngineException;
 import com.phatjam98.elasticprotos.engine.Hit;
 import com.phatjam98.elasticprotos.engine.IndexOptions;
 import com.phatjam98.elasticprotos.engine.IndexResult;
@@ -96,18 +97,20 @@ public class DocumentController {
     AtomicInteger indexed = new AtomicInteger();
     List<String> errors = new CopyOnWriteArrayList<>();
     // The buffer sends batches as they fill (elastic-protos.bulk.*) and the rest on close; the
-    // listeners see every batch result and every failed bulk request.
+    // listeners see every batch result and every failed bulk request with its operations.
     try (BulkBuffer buffer = elastic.bulkBuffer(
         result -> {
           batches.incrementAndGet();
           indexed.addAndGet(result.items().size() - result.failures().size());
           result.failures().forEach(item -> errors.add(item.id() + ": " + item.error()));
         },
-        error -> {
+        (batch, error) -> {
           batches.incrementAndGet();
-          errors.add(String.valueOf(error.getMessage()));
+          errors.add(batch.size() + " operations failed: " + error.getMessage());
         })) {
       documents.forEach(document -> buffer.add(elastic.indexOp(document)));
+    } catch (EngineException e) {
+      // close() throws when the last batch fails; the error listener has already recorded it.
     }
     // Bulk writes are not refreshed; make them searchable before answering.
     elastic.engine().refresh(elastic.definition(Document.class).alias());
