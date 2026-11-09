@@ -88,11 +88,33 @@ class MigrationModelSpec extends Specification {
                          outcome(Action.NO_OP, MigrationResult.Status.SKIPPED),
                          outcome(Action.REINDEX, MigrationResult.Status.DRY_RUN)]).ok()
     !new MigrationResult([outcome(Action.CREATE, MigrationResult.Status.FAILED)]).ok()
-    !new MigrationResult([outcome(Action.BLOCKED, MigrationResult.Status.SKIPPED)]).ok()
+    !new MigrationResult([outcome(Action.BLOCKED, MigrationResult.Status.BLOCKED)]).ok()
     !new MigrationResult([outcome(Action.BLOCKED, MigrationResult.Status.DRY_RUN)]).ok()
+    !new MigrationResult([outcome(Action.NO_OP, MigrationResult.Status.BLOCKED)]).ok()
     new MigrationResult([outcome(Action.CREATE, MigrationResult.Status.APPLIED),
-                         outcome(Action.BLOCKED, MigrationResult.Status.SKIPPED)]).problems().size() == 1
+                         outcome(Action.BLOCKED, MigrationResult.Status.BLOCKED)]).problems().size() == 1
     plan(Action.CREATE).alias() == 'firms'
+  }
+
+  def "an outcome without counts has none, and copies its lists"() {
+    given:
+    def target = ProtoMapper.withDefaults().map(Firm)
+    def plan = new IndexPlan(target, Action.REINDEX, 'old', 'h', MappingDiff.empty(), 'r', [])
+    def warnings = ['w']
+
+    when:
+    def plain = new MigrationResult.Outcome(plan, MigrationResult.Status.APPLIED, 'new', [], null)
+    def counted = new MigrationResult.Outcome(plan, MigrationResult.Status.APPLIED, 'new', ['old'], null,
+        3L, 2L, warnings)
+    warnings << 'later'
+
+    then:
+    plain.sourceCount() == null
+    plain.destCount() == null
+    plain.warnings().isEmpty()
+    counted.sourceCount() == 3L
+    counted.destCount() == 2L
+    counted.warnings() == ['w']
   }
 
   def "an empty plan has no changes"() {

@@ -20,6 +20,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.regex.Pattern;
 
 /**
  * Turns a protobuf message descriptor into an {@link IndexDefinition}.
@@ -44,6 +45,7 @@ public final class ProtoMapper {
   private static final String TIMESTAMP = "google.protobuf.Timestamp";
   private static final String LAT_LON = "phatjam98.elasticprotos.v1.LatLon";
   private static final String GEO_SHAPE = "phatjam98.elasticprotos.v1.GeoShape";
+  private static final Pattern VALID_NAME = Pattern.compile("^[^.\\s]+$");
   private static final Set<String> LAT_NAMES = Set.of("lat", "latitude");
   private static final Set<String> LON_NAMES = Set.of("lon", "lng", "longitude");
   private static final Set<String> STRUCT_LIKE =
@@ -83,6 +85,11 @@ public final class ProtoMapper {
   /** Returns the defaults this mapper applies. */
   public MappingDefaults defaults() {
     return defaults;
+  }
+
+  /** Returns the naming strategy this mapper applies. */
+  public IndexNamingStrategy naming() {
+    return naming;
   }
 
   /**
@@ -234,6 +241,7 @@ public final class ProtoMapper {
       ancestors.push(root);
       final Map<String, Object> properties = properties(root, "", "");
       ancestors.pop();
+      checkLimits(properties);
 
       if (!messageOpts.getIdField().isEmpty()) {
         if (!fields.containsKey(messageOpts.getIdField())) {
@@ -270,6 +278,28 @@ public final class ProtoMapper {
           warnings);
     }
 
+    /**
+     * Rejects mappings the engine would refuse under its default field limits: more {@code
+     * nested} fields than {@link MappingDefaults#maxNestedFields()}, or more fields in total than
+     * {@link MappingDefaults#maxTotalFields()}.
+     */
+    private void checkLimits(Map<String, Object> properties) {
+      int[] counts = new int[2];
+      count(properties, counts);
+      int nested = counts[0];
+      int total = counts[1];
+      if (defaults.maxNestedFields() > 0 && nested > defaults.maxNestedFields()) {
+        throw new MappingException(root.getFullName(), "maps " + nested
+            + " nested fields, more than maxNestedFields " + defaults.maxNestedFields()
+            + " (index.mapping.nested_fields.limit)");
+      }
+      if (defaults.maxTotalFields() > 0 && total > defaults.maxTotalFields()) {
+        throw new MappingException(root.getFullName(), "maps " + total
+            + " fields, more than maxTotalFields " + defaults.maxTotalFields()
+            + " (index.mapping.total_fields.limit)");
+      }
+    }
+
     private Map<String, Object> settings() {
       Map<String, Object> settings = new TreeMap<>();
       if (messageOpts.getShards() > 0) {
@@ -303,6 +333,10 @@ public final class ProtoMapper {
           continue;
         }
         String esName = options.getName().isEmpty() ? field.getName() : options.getName();
+        if (!VALID_NAME.matcher(esName).matches()) {
+          throw new MappingException(protoPath, "elastic_field.name '" + esName
+              + "' must be non-empty and contain no '.' or whitespace");
+        }
         String path = join(pathPrefix, esName);
         Map<String, Object> property = property(field, options, path, protoPath);
         if (property == null) {
@@ -575,6 +609,32 @@ public final class ProtoMapper {
             throw new MappingException(path, kind + " cannot be applied to message " + typeName);
           }
           break;
+      }
+    }
+  }
+
+  /**
+   * Counts the fields of a {@code properties} object the way the engines count them for their
+   * field limits: every property, object and nested containers included, and every multi-field.
+   *
+   * @param counts {@code [nested fields, total fields]}, incremented in place
+   */
+  @SuppressWarnings("unchecked")
+  private static void count(Map<String, Object> properties, int[] counts) {
+    for (Object value : properties.values()) {
+      if (!(value instanceof Map)) {
+        continue;
+      }
+      Map<String, Object> property = (Map<String, Object>) value;
+      counts[1]++;
+      if ("nested".equals(property.get("type"))) {
+        counts[0]++;
+      }
+      if (property.get("properties") instanceof Map) {
+        count((Map<String, Object>) property.get("properties"), counts);
+      }
+      if (property.get("fields") instanceof Map) {
+        count((Map<String, Object>) property.get("fields"), counts);
       }
     }
   }

@@ -208,11 +208,10 @@ class IndexMigratorSpec extends Specification {
     again.toReport().contains("up to date (hash ${DEFAULT.map(Document).contentHash()})")
   }
 
-  def "a new multi-field and a dynamic change are compatible"() {
+  def "a dynamic change is compatible"() {
     given:
     migrator().bootstrap(Document)
     def mapper = ProtoMapper.builder().overrides(MappingOverrides.builder()
-        .forPath('body') { it.setKeywordSubfield(com.phatjam98.elasticprotos.proto.Bool3.TRUE) }
         .forMessage(Document.descriptor) { it.setDynamic(DynamicMode.DYNAMIC_FALSE) }
         .build()).build()
 
@@ -222,9 +221,44 @@ class IndexMigratorSpec extends Specification {
     then:
     result.ok()
     result.outcomes()[0].plan().action() == Action.PUT_MAPPING
-    result.outcomes()[0].plan().diff().added()*.path == ['body.keyword']
+    result.outcomes()[0].plan().diff().added().isEmpty()
     result.outcomes()[0].plan().diff().paramChanged()*.path == ['<root>:dynamic']
     engine.getMappings('documents').dynamic == 'false'
+  }
+
+  def "a new multi-field is applied by reindexing, so old documents are indexed into it"() {
+    given:
+    migrator().bootstrap(Document)
+    seedDocuments()
+    def mapper = ProtoMapper.builder().overrides(MappingOverrides.builder()
+        .forPath('body') { it.setKeywordSubfield(com.phatjam98.elasticprotos.proto.Bool3.TRUE) }
+        .build()).build()
+    String next = mapper.map(Document).name()
+
+    when:
+    def plan = migrator(mapper).plan(Document)
+
+    then:
+    plan.items()[0].action() == Action.REINDEX
+    plan.items()[0].diff().added()*.path == ['body.keyword']
+    plan.items()[0].diff().unindexedAdditions()*.path == ['body.keyword']
+    plan.items()[0].diff().additiveOnly()
+    plan.items()[0].reason() ==
+        'breaking change: added [body.keyword], which existing documents were never indexed into'
+    plan.items()[0].target().name() == next
+
+    when:
+    def result = migrator(mapper).apply(plan)
+
+    then:
+    result.ok()
+    result.outcomes()[0].index() == next
+    result.outcomes()[0].sourceCount() == 3L
+    result.outcomes()[0].destCount() == 3L
+    result.outcomes()[0].warnings().isEmpty()
+    engine.indices()[next] == ['documents'] as Set
+    engine.documents(next).keySet() == ['d0', 'd1', 'd2'] as Set
+    engine.getMappings('documents').properties.body.fields.keyword.type == 'keyword'
   }
 
   def "a breaking change reindexes, swaps the alias atomically and retains the old index"() {
@@ -632,6 +666,43 @@ class IndexMigratorSpec extends Specification {
     'count'    | new ReindexResult(3, 3, 0, [], 1, false)               | 'copied 2 of 3'
   }
 
+  def "with a migration script, a differing document count is a warning, not a failure"() {
+    given: 'a script that the engine runs and that drops a document'
+    def dropping = new CannedReindexEngine(answer: new ReindexResult(3, 2, 0, [], 1, false), dropOne: true)
+    copyInto(dropping)
+    MigrationScriptProvider script = { alias, from, to -> Optional.of("ctx._source.remove('body')") } as MigrationScriptProvider
+    def scripted = IndexMigrator.builder().engine(dropping).mapper(TITLE_KEYWORD).scriptProvider(script).build()
+
+    when:
+    def result = scripted.bootstrap(Document)
+    def outcome = result.outcomes()[0]
+
+    then:
+    result.ok()
+    outcome.status() == MigrationResult.Status.APPLIED
+    outcome.index() == DOC_V2
+    outcome.sourceCount() == 3L
+    outcome.destCount() == 2L
+    outcome.warnings() == ["the migration script left 2 documents in ${DOC_V2} from 3 in ${DOC_V1}".toString()]
+    dropping.indices()[DOC_V2] == ['documents'] as Set
+  }
+
+  def "with a migration script, reindex failures still fail the migration"() {
+    given:
+    def broken = new CannedReindexEngine(answer: new ReindexResult(3, 2, 0, [[cause: 'bad']], 1, false))
+    copyInto(broken)
+    MigrationScriptProvider script = { alias, from, to -> Optional.of("ctx._source.remove('body')") } as MigrationScriptProvider
+
+    when:
+    def result = IndexMigrator.builder().engine(broken).mapper(TITLE_KEYWORD).scriptProvider(script).build()
+        .bootstrap(Document)
+
+    then:
+    result.outcomes()[0].status() == MigrationResult.Status.FAILED
+    result.outcomes()[0].error().message.contains('1 failures')
+    broken.indices().keySet() == [DOC_V1] as Set
+  }
+
   def "a failed alias swap and failing cleanup still report the original problem"() {
     given:
     def stubborn = new InMemorySearchEngine() {
@@ -708,7 +779,7 @@ class IndexMigratorSpec extends Specification {
     plan.items()[0].action() == Action.BLOCKED
     plan.items()[0].reason().contains('a concrete index named like the alias exists')
     plan.blocked() == plan.items()
-    result.outcomes()[0].status() == MigrationResult.Status.SKIPPED
+    result.outcomes()[0].status() == MigrationResult.Status.BLOCKED
     !result.ok()
   }
 
@@ -751,16 +822,170 @@ class IndexMigratorSpec extends Specification {
     item.currentIndex() == DOC_V1
   }
 
-  def "an index that already has the target name but other mappings is blocked"() {
-    given:
+  def "reverting a PUT_MAPPING reindexes into the next generation of the index name"() {
+    given: 'v1 is created, then v2 adds relevance in place, so the index keeps the v1 name'
+    migrator(NO_RELEVANCE).bootstrap(Document)
+    String v1 = NO_RELEVANCE.map(Document).name()
+    engine.index('documents', 'd1', [id: 'd1', title: 'T', body: 'b'], IndexOptions.defaults())
+    assert migrator().bootstrap(Document).outcomes()[0].plan().action() == Action.PUT_MAPPING
+    assert engine.indices() == [(v1): ['documents'] as Set]
+    def revert = migrator(NO_RELEVANCE, MigrationOptions.standard().withRemovedFields(RemovedFieldPolicy.REINDEX))
+
+    when: 'v1 is deployed again with removed fields reindexed'
+    def plan = revert.plan(Document)
+    def item = plan.items()[0]
+
+    then: 'the target name is the live index, so the new index is generation 2'
+    item.action() == Action.REINDEX
+    item.currentIndex() == v1
+    item.target().name() == "${v1}-g2".toString()
+    item.target().contentHash() == NO_RELEVANCE.map(Document).contentHash()
+    item.reason() == "breaking change: removed [relevance]; ${v1} already has the target name, so the new index is ${v1}-g2".toString()
+    plan.toReport().contains("REINDEX     documents: ${v1} -> ${v1}-g2")
+
+    when:
+    def result = revert.apply(plan)
+
+    then:
+    result.ok()
+    result.outcomes()[0].index() == "${v1}-g2".toString()
+    result.outcomes()[0].retainedIndices() == [v1]
+    engine.indices() == [(v1): [] as Set, ("${v1}-g2".toString()): ['documents'] as Set]
+    engine.documents("${v1}-g2".toString()).keySet() == ['d1'] as Set
+    engine.getMappings('documents')._meta.elastic_protos.hash == NO_RELEVANCE.map(Document).contentHash()
+    revert.plan(Document).items()[0].action() == Action.NO_OP
+  }
+
+  def "a generation is skipped while it exists with another hash, and reused as a leftover with the target hash"() {
+    given: 'the alias points at an index with the target name but other mappings'
     engine.createIndex(DOC_V1, [:], TITLE_KEYWORD.map(Document).mappings(), ['documents'] as Set)
+    engine.createIndex("${DOC_V1}-g2".toString(), [:], TITLE_KEYWORD.map(Document).mappings(), [] as Set)
+    if (leftover) {
+      engine.createIndex("${DOC_V1}-g3".toString(), [:], DEFAULT.map(Document).mappings(), [] as Set)
+    }
 
     when:
     def item = migrator().plan(Document).items()[0]
+    def result = migrator().apply(new MigrationPlan([item]))
+
+    then:
+    item.action() == Action.REINDEX
+    item.target().name() == "${DOC_V1}-g3".toString()
+    result.ok()
+    engine.indices()["${DOC_V1}-g3".toString()] == ['documents'] as Set
+    engine.log().count { it.startsWith("createIndex ${DOC_V1}-g3") } == 1
+
+    where:
+    leftover << [false, true]
+  }
+
+  def "a write-blocked index retained by an earlier reindex is never reused or deleted"() {
+    given: 'v1 -> v2 by reindex: v1 is retained, write-blocked, with its documents'
+    migrator().bootstrap(Document)
+    seedDocuments()
+    assert migrator(TITLE_KEYWORD).bootstrap(Document).ok()
+    assert engine.isWriteBlocked(DOC_V1)
+    engine.clearLog()
+
+    when: 'v1 is deployed again'
+    def back = migrator().plan(Document).items()[0]
+
+    then: 'its plain name is the retained copy, so the new index is its second generation'
+    back.action() == Action.REINDEX
+    back.currentIndex() == DOC_V2
+    back.target().name() == "${DOC_V1}-g2".toString()
+    back.reason() == "breaking change: title type keyword -> text; ${DOC_V1} exists and is write-blocked (retained from an earlier reindex), so the new index is ${DOC_V1}-g2".toString()
+
+    when:
+    def result = migrator().apply(new MigrationPlan([back]))
+
+    then: 'v1 is untouched'
+    result.ok()
+    engine.indices() == [(DOC_V1): [] as Set, (DOC_V2): [] as Set, ("${DOC_V1}-g2".toString()): ['documents'] as Set]
+    engine.isWriteBlocked(DOC_V1)
+    engine.isWriteBlocked(DOC_V2)
+    engine.documents(DOC_V1).keySet() == ['d0', 'd1', 'd2'] as Set
+    engine.documents("${DOC_V1}-g2".toString()).keySet() == ['d0', 'd1', 'd2'] as Set
+    !engine.log().any { it == "deleteIndex ${DOC_V1}".toString() || it == "createIndex ${DOC_V1}".toString() }
+    engine.log().contains("createIndex ${DOC_V1}-g2".toString())
+    migrator().plan(Document).items()[0].action() == Action.NO_OP
+
+    when: 'and v2 again: its plain name is retained and blocked too'
+    def again = migrator(TITLE_KEYWORD).plan(Document).items()[0]
+    def second = migrator(TITLE_KEYWORD).apply(new MigrationPlan([again]))
+
+    then:
+    again.action() == Action.REINDEX
+    again.target().name() == "${DOC_V2}-g2".toString()
+    again.reason().endsWith("${DOC_V2} exists and is write-blocked (retained from an earlier reindex), so the new index is ${DOC_V2}-g2")
+    second.ok()
+    engine.indices()["${DOC_V2}-g2".toString()] == ['documents'] as Set
+    engine.documents(DOC_V2).keySet() == ['d0', 'd1', 'd2'] as Set
+    engine.isWriteBlocked(DOC_V2)
+    !engine.log().any { it == "deleteIndex ${DOC_V2}".toString() }
+  }
+
+  def "an unblocked leftover with the plain name keeps the reuse and recreate rules"() {
+    given:
+    migrator().bootstrap(Document)
+    engine.createIndex(DOC_V2, [:], [:], [] as Set)
+
+    when:
+    def item = migrator(TITLE_KEYWORD).plan(Document).items()[0]
+
+    then:
+    item.target().name() == DOC_V2
+    item.reason() == 'breaking change: title type text -> keyword'
+  }
+
+  def "a write-blocked target found at apply time fails the item without touching it"() {
+    given: 'a plan made before another run left the target name retained and blocked'
+    migrator().bootstrap(Document)
+    def plan = migrator(TITLE_KEYWORD).plan(Document)
+    engine.createIndex(DOC_V2, [:], TITLE_KEYWORD.map(Document).mappings(), [] as Set)
+    engine.setWriteBlock(DOC_V2, true)
+
+    when:
+    def result = migrator(TITLE_KEYWORD).apply(plan)
+
+    then:
+    result.outcomes()[0].status() == MigrationResult.Status.FAILED
+    result.outcomes()[0].error().message.contains("${DOC_V2} exists and is write-blocked")
+    engine.indexExists(DOC_V2)
+    engine.isWriteBlocked(DOC_V2)
+    engine.indices()[DOC_V1] == ['documents'] as Set
+    !engine.isWriteBlocked(DOC_V1)
+  }
+
+  def "a custom naming strategy decides generation names"() {
+    given: 'a strategy whose generations all collide is blocked rather than looping'
+    def naming = new IndexNamingStrategy() {
+      @Override
+      String indexName(String base, String hash) { "${base}-v${hash}" }
+
+      @Override
+      String generationName(String name, int generation) { "${name}-taken" }
+    }
+    def mapper = ProtoMapper.builder().naming(naming).build()
+    String name = mapper.map(Document).name()
+    engine.createIndex(name, [:], TITLE_KEYWORD.map(Document).mappings(), ['documents'] as Set)
+    engine.createIndex("${name}-taken".toString(), [:], TITLE_KEYWORD.map(Document).mappings(), [] as Set)
+
+    when:
+    def item = migrator(mapper).plan(Document).items()[0]
 
     then:
     item.action() == Action.BLOCKED
     item.reason().contains('already has the target name')
+    item.reason().contains('no free generation')
+  }
+
+  def "the default naming leaves generation 1 alone"() {
+    expect:
+    IndexNamingStrategy.DEFAULT.generationName('documents-vabc', 1) == 'documents-vabc'
+    IndexNamingStrategy.DEFAULT.generationName('documents-vabc', 2) == 'documents-vabc-g2'
+    IndexNamingStrategy.prefixed('dev').generationName('dev-documents-vabc', 3) == 'dev-documents-vabc-g3'
+    DEFAULT.naming() == IndexNamingStrategy.DEFAULT
   }
 
   def "settings differences are warnings, never changes"() {
@@ -822,8 +1047,9 @@ class IndexMigratorSpec extends Specification {
     def result = migrator().bootstrap(Document, Firm)
 
     then:
-    result.outcomes()*.status == [MigrationResult.Status.SKIPPED, MigrationResult.Status.APPLIED]
+    result.outcomes()*.status == [MigrationResult.Status.BLOCKED, MigrationResult.Status.APPLIED]
     !result.ok()
+    result.problems()*.status == [MigrationResult.Status.BLOCKED]
   }
 
   def "a dry run changes nothing"() {
@@ -874,6 +1100,7 @@ class IndexMigratorSpec extends Specification {
     json.items[0].targetIndex == DOC_V2
     json.items[0].targetHash == TITLE_KEYWORD.map(Document).contentHash()
     json.items[0].diff.typeChanged == [[path: 'title', before: 'text', after: 'keyword']]
+    json.items[0].diff.unindexedAdditions == []
     json.items[0].diff.settingsChanged == false
     json.items[1].currentIndex == null
   }

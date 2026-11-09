@@ -93,6 +93,7 @@ public record MigrationPlan(List<IndexPlan> items) {
       diff.put("removed", changes(item.diff().removed()));
       diff.put("typeChanged", changes(item.diff().typeChanged()));
       diff.put("paramChanged", changes(item.diff().paramChanged()));
+      diff.put("unindexedAdditions", changes(item.diff().unindexedAdditions()));
       diff.put("settingsChanged", item.diff().settingsChanged());
       entry.put("diff", diff);
       list.add(entry);
