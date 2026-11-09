@@ -12,6 +12,8 @@ import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Typed access to the aggregation results of a search compiled from {@code
@@ -34,6 +36,9 @@ import java.util.Set;
  * copy of the raw map is shallow.
  */
 public final class AggregationResults {
+
+  /** The suffix of the {@code nested} and {@code reverse_nested} wrappers the compiler adds. */
+  private static final Pattern WRAPPER_SUFFIX = Pattern.compile("__(?:nested\\d*|reverse)$");
 
   private static final AggregationResults EMPTY = new AggregationResults(Map.of());
 
@@ -87,8 +92,7 @@ public final class AggregationResults {
       if (AggregationCompiler.RESERVED_NAMES.contains(key)) {
         continue;
       }
-      int wrapper = key.indexOf(AggregationCompiler.WRAPPER);
-      names.add(wrapper < 0 ? key : key.substring(0, wrapper));
+      names.add(WRAPPER_SUFFIX.matcher(key).replaceFirst(""));
     }
     return Collections.unmodifiableSet(names);
   }
@@ -171,9 +175,10 @@ public final class AggregationResults {
     if (direct instanceof Map) {
       return map(direct);
     }
-    String prefix = name + AggregationCompiler.WRAPPER;
     for (Map.Entry<String, Object> entry : level.entrySet()) {
-      if (entry.getKey().startsWith(prefix) && entry.getValue() instanceof Map) {
+      Matcher wrapper = WRAPPER_SUFFIX.matcher(entry.getKey());
+      if (wrapper.find() && entry.getKey().substring(0, wrapper.start()).equals(name)
+          && entry.getValue() instanceof Map) {
         Map<String, Object> found = find(map(entry.getValue()), name);
         if (found != null) {
           return found;

@@ -3,42 +3,38 @@ package com.phatjam98.elasticprotos.query
 import com.phatjam98.elasticprotos.engine.SearchResult
 import com.phatjam98.elasticprotos.util.Json
 import spock.lang.Specification
-import spock.lang.Unroll
 
 /**
- * Reads the {@code aggregations} object recorded from Elasticsearch 9.5.5 and OpenSearch 3.9.0 for
- * the sample documents of the testkit (EngineIntegrationSpec), including keyed buckets, a null
- * metric and nested / reverse_nested wrappers.
+ * Reads one normalised fixture: the {@code aggregations} object of a search over the testkit sample
+ * documents (plus a terms aggregation on a small boolean index), as parsed by the engine adapter
+ * and re-serialised with sorted keys. Recorded from Elasticsearch 8.19.23 and 9.5.5 and OpenSearch
+ * 2.19.7 and 3.9.0, which produced identical normalised output; it covers keyed buckets, a null
+ * metric, boolean and date terms, and nested / reverse_nested wrappers.
  */
 class AggregationResultsSpec extends Specification {
 
-  static AggregationResults recorded(String engine) {
+  static AggregationResults sample() {
     AggregationResults.of(Json.parseObject(
-        new File("src/test/resources/responses/aggregations-${engine}.json").text))
+        new File('src/test/resources/responses/aggregations-sample.json').text))
   }
 
-  @Unroll
-  def "names unwrap the nested wrappers (#engine)"() {
+  def "names unwrap the nested wrappers"() {
     when:
-    def aggs = recorded(engine)
+    def aggs = sample()
 
     then:
-    aggs.names() == ['bands', 'by_type', 'counted', 'keyed_bands', 'keyed_months', 'latest', 'per_quarter',
-                     'quarters', 'relevances', 'roles', 'sizes', 'sizes_terms'] as Set
+    aggs.names() == ['bands', 'by_type', 'counted', 'days', 'flags', 'keyed_bands', 'keyed_months', 'latest',
+                     'per_quarter', 'quarters', 'relevances', 'roles', 'sizes', 'sizes_terms'] as Set
     aggs.has('roles')
     !aggs.has('firms')
     !aggs.has('nope')
     !aggs.isEmpty()
     aggs.raw().containsKey('roles__nested')
-
-    where:
-    engine << ['elasticsearch-9.5.5', 'opensearch-3.9.0']
   }
 
-  @Unroll
-  def "terms buckets with metric sub-aggregations, a null metric and the other count (#engine)"() {
+  def "terms buckets with metric sub-aggregations, a null metric and the other count"() {
     when:
-    def aggs = recorded(engine)
+    def aggs = sample()
     def byType = aggs.buckets('by_type')
 
     then:
@@ -58,14 +54,20 @@ class AggregationResultsSpec extends Specification {
     aggs.buckets('sizes_terms')[0].key() instanceof Long
     aggs.buckets('relevances')*.key() == [0.75d]
 
-    where:
-    engine << ['elasticsearch-9.5.5', 'opensearch-3.9.0']
+    and: 'boolean terms have Long keys 1 / 0, date terms epoch millis, both with key_as_string'
+    aggs.buckets('flags')*.key() == [1L, 0L]
+    aggs.buckets('flags').every { it.key() instanceof Long }
+    aggs.buckets('flags')*.keyAsString() == ['true', 'false']
+    aggs.buckets('flags')*.docCount() == [2L, 1L]
+    aggs.buckets('days')*.key() == [1705314600250L, 1708437600000L]
+    aggs.buckets('days').every { it.key() instanceof Long }
+    aggs.buckets('days')*.keyAsString() == ['2024-01-15T10:30:00.250Z', '2024-02-20T14:00:00.000Z']
+    aggs.sumOtherDocCount('days') == 4
   }
 
-  @Unroll
-  def "nested terms and reverse-nested metrics are unwrapped (#engine)"() {
+  def "nested terms and reverse-nested metrics are unwrapped"() {
     when:
-    def roles = recorded(engine).buckets('roles')
+    def roles = sample().buckets('roles')
 
     then:
     roles*.key() == ['DEFENDANT', 'PLAINTIFF', 'COUNSEL']
@@ -74,15 +76,11 @@ class AggregationResultsSpec extends Specification {
     roles[0].sub().names() == ['firms', 'latest'] as Set
     roles[0].sub().metric('latest').valueAsString() == '2024-06-30T08:00:00.000Z'
     roles[0].sub().metric('latest').asLong() == 1719734400000L
-
-    where:
-    engine << ['elasticsearch-9.5.5', 'opensearch-3.9.0']
   }
 
-  @Unroll
-  def "histograms, date histograms, ranges and keyed buckets (#engine)"() {
+  def "histograms, date histograms, ranges and keyed buckets"() {
     when:
-    def aggs = recorded(engine)
+    def aggs = sample()
 
     then: 'date histogram keys are epoch millis'
     aggs.buckets('per_quarter')*.key() == [1704067200000L, 1711929600000L]
@@ -114,21 +112,18 @@ class AggregationResultsSpec extends Specification {
     and: 'top-level metrics'
     aggs.metric('counted').asLong() == 6L
     aggs.metric('latest').valueAsString() == '2024-06-30T08:00:00.000Z'
-
-    where:
-    engine << ['elasticsearch-9.5.5', 'opensearch-3.9.0']
   }
 
   def "lookups fail clearly on unknown names and kind mismatches"() {
     given:
-    def aggs = recorded('elasticsearch-9.5.5')
+    def aggs = sample()
 
     when:
     aggs.buckets('nope')
 
     then:
     def missing = thrown(NoSuchElementException)
-    missing.message.startsWith("No aggregation named 'nope'; present: [bands, by_type,")
+    missing.message.startsWith("No aggregation named 'nope'; present: [bands, by_type, counted, days, flags,")
 
     when:
     aggs.buckets('counted')
@@ -178,6 +173,30 @@ class AggregationResultsSpec extends Specification {
     AggregationResults.of([doc_count: 3, x__nested: [doc_count: 1]]).names() == ['x'] as Set
     !AggregationResults.of([x__nested: [doc_count: 1]]).has('x')
     !AggregationResults.of([x__nested: 'no map']).has('x')
+  }
+
+  def "names() strips only a wrapper suffix of the outermost key"() {
+    expect:
+    AggregationResults.of(raw).names() == names as Set
+
+    where:
+    raw                                                  || names
+    [x__nested2: [doc_count: 1, x: [value: 1]]]          || ['x']
+    [x__reverse: [doc_count: 1, x: [value: 1]]]          || ['x']
+    [a_b: [value: 1], c__nested: [doc_count: 0]]         || ['a_b', 'c']
+    [a__b: [value: 1]]                                   || ['a__b']
+    [a__nestedx: [value: 1]]                             || ['a__nestedx']
+    [x__nested__reverse: [doc_count: 1]]                 || ['x__nested']
+  }
+
+  def "a wrapper is only unwrapped for the name it carries"() {
+    given:
+    def aggs = AggregationResults.of([x__nested: [doc_count: 1, x: [value: 1]], xy__nested: [doc_count: 1, xy: [value: 2]]])
+
+    expect:
+    aggs.metric('x').asLong() == 1L
+    aggs.metric('xy').asLong() == 2L
+    !aggs.has('x__')
   }
 
   def "the raw map is unmodifiable"() {
