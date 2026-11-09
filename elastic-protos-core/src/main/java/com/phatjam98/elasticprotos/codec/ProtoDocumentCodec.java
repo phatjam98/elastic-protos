@@ -297,6 +297,10 @@ public final class ProtoDocumentCodec {
             : value;
       case OBJECT:
       case NESTED:
+        FieldInfo values = schema.typedMapValues(field, info);
+        if (values != null && value instanceof Map) {
+          return forwardEntries(asMap(value), field, info, values, schema);
+        }
         if (value instanceof Map && schema.hasChildren(info.protoPath()) && !isOpaque(field)) {
           return forward(asMap(value), field.getMessageType(), info.protoPath(), schema);
         }
@@ -304,6 +308,43 @@ public final class ProtoDocumentCodec {
       default:
         return value;
     }
+  }
+
+  /**
+   * Converts the entries of a typed map: every key must be usable as a field name, and every value
+   * is converted like a field of the value type.
+   */
+  private Map<String, Object> forwardEntries(Map<String, Object> entries, FieldDescriptor field,
+      FieldInfo info, FieldInfo values, Schema schema) {
+    FieldDescriptor valueField = field.getMessageType().findFieldByName("value");
+    Map<String, Object> out = new TreeMap<>();
+    for (Map.Entry<String, Object> entry : entries.entrySet()) {
+      String key = entry.getKey();
+      if (key.isEmpty() || key.indexOf('.') >= 0) {
+        throw new CodecException("Field " + info.protoPath() + " has the key '" + key
+            + "'; keys of a map mapped as " + info.kind()
+            + " must be non-empty and contain no '.'");
+      }
+      Object converted = forwardValue(entry.getValue(), valueField, values, schema);
+      if (converted != null) {
+        out.put(key, converted);
+      }
+    }
+    return out;
+  }
+
+  private Map<String, Object> reverseEntries(Map<String, Object> entries, FieldDescriptor field,
+      FieldInfo values, Schema schema) {
+    FieldDescriptor valueField = field.getMessageType().findFieldByName("value");
+    Map<String, Object> out = new TreeMap<>();
+    for (Map.Entry<String, Object> entry : entries.entrySet()) {
+      Object converted = entry.getValue() == null ? null
+          : reverseValue(entry.getValue(), valueField, values, schema);
+      if (converted != null) {
+        out.put(entry.getKey(), converted);
+      }
+    }
+    return out;
   }
 
   private Map<String, Object> reverse(
@@ -358,6 +399,10 @@ public final class ProtoDocumentCodec {
         return value instanceof String ? value : Json.canonical(value);
       case OBJECT:
       case NESTED:
+        FieldInfo values = schema.typedMapValues(field, info);
+        if (values != null && value instanceof Map) {
+          return reverseEntries(asMap(value), field, values, schema);
+        }
         if (value instanceof Map && schema.hasChildren(info.protoPath()) && !isOpaque(field)) {
           return reverse(asMap(value), field.getMessageType(), info.protoPath(), schema);
         }
@@ -489,11 +534,13 @@ public final class ProtoDocumentCodec {
         builder.clearField(field);
         continue;
       }
-      if (field.getJavaType() != FieldDescriptor.JavaType.MESSAGE || field.isMapField()
+      if (field.getJavaType() != FieldDescriptor.JavaType.MESSAGE
           || ignored.stream().noneMatch(p -> p.startsWith(path + "."))) {
         continue;
       }
-      if (field.isRepeated()) {
+      if (field.isMapField()) {
+        pruneMapValues(builder, field, path + ".*", ignored);
+      } else if (field.isRepeated()) {
         for (int i = 0; i < builder.getRepeatedFieldCount(field); i++) {
           Message.Builder child = ((Message) builder.getRepeatedField(field, i)).toBuilder();
           prune(child, path, ignored);
@@ -504,6 +551,22 @@ public final class ProtoDocumentCodec {
         prune(child, path, ignored);
         builder.setField(field, child.build());
       }
+    }
+  }
+
+  /** Prunes the message values of a map field; {@code valuePath} is {@code <map>.*}. */
+  private static void pruneMapValues(Message.Builder builder, FieldDescriptor field,
+      String valuePath, Set<String> ignored) {
+    FieldDescriptor valueField = field.getMessageType().findFieldByName("value");
+    if (valueField.getJavaType() != FieldDescriptor.JavaType.MESSAGE) {
+      return;
+    }
+    for (int i = 0; i < builder.getRepeatedFieldCount(field); i++) {
+      Message entry = (Message) builder.getRepeatedField(field, i);
+      Message.Builder value = ((Message) entry.getField(valueField)).toBuilder();
+      prune(value, valuePath, ignored);
+      builder.setRepeatedField(field, i,
+          entry.toBuilder().setField(valueField, value.build()).build());
     }
   }
 
@@ -530,7 +593,9 @@ public final class ProtoDocumentCodec {
 
     Schema(IndexDefinition definition) {
       this.definition = definition;
-      for (FieldInfo info : definition.fields().values()) {
+      List<FieldInfo> all = new ArrayList<>(definition.fields().values());
+      all.addAll(definition.dynamicFields().values());
+      for (FieldInfo info : all) {
         byProtoPath.put(info.protoPath(), info);
         int dot = info.protoPath().lastIndexOf('.');
         if (dot > 0) {
@@ -541,6 +606,11 @@ public final class ProtoDocumentCodec {
 
     boolean hasChildren(String protoPath) {
       return parents.contains(protoPath);
+    }
+
+    /** Returns the {@code P.*} field of a typed map, or null for any other field. */
+    FieldInfo typedMapValues(FieldDescriptor field, FieldInfo info) {
+      return field.isMapField() ? byProtoPath.get(info.protoPath() + ".*") : null;
     }
   }
 }

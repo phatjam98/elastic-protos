@@ -25,6 +25,11 @@ import com.phatjam98.elasticprotos.proto.example.InboxStatus
 import com.phatjam98.elasticprotos.proto.example.Office
 import com.phatjam98.elasticprotos.proto.example.Party
 import com.phatjam98.elasticprotos.proto.example.PartyRole
+import com.phatjam98.elasticprotos.proto.example.TypedBag
+import com.phatjam98.elasticprotos.proto.example.TypedChild
+import com.phatjam98.elasticprotos.proto.example.TypedItem
+import com.phatjam98.elasticprotos.proto.example.TypedMapLevel
+import com.phatjam98.elasticprotos.proto.example.TypedMaps
 import com.phatjam98.elasticprotos.proto.test.Annotated
 import com.phatjam98.elasticprotos.proto.test.Child
 import com.phatjam98.elasticprotos.proto.test.Color
@@ -399,6 +404,95 @@ class ProtoDocumentCodecSpec extends Specification {
 
     then:
     thrown(CodecException)
+  }
+
+  static TypedMaps typedMaps() {
+    TypedMaps.newBuilder()
+        .setId('tm-1')
+        .putCounters('views', 15L)
+        .putCounters('big', 9007199254740993L)
+        .putNotes('summary', 'Quarterly reports are due')
+        .putDue('review', FILED)
+        .putLevels('east', TypedMapLevel.HIGH)
+        .putPlaces('home', LatLon.newBuilder().setLat(36.1d).setLon(-115.1d).build())
+        .putChildren('alice', TypedChild.newBuilder().setName('Alice').setCount(3L)
+            .setDisplayName('Ally').setSecret('hidden')
+            .addItems(TypedItem.newBuilder().setSku('A-1').setQuantity(2)).build())
+        .putBags('b', TypedBag.newBuilder().putTags('k', 'v').build())
+        .putLabels('env', 'prod')
+        .build()
+  }
+
+  def "typed maps convert every value by its type and read back"() {
+    given:
+    def message = typedMaps()
+
+    when:
+    def document = codec.toDocument(message)
+
+    then:
+    document.counters == [big: 9007199254740993L, views: 15L]
+    document.notes == [summary: 'Quarterly reports are due']
+    document.due == [review: '2024-03-04T05:06:07.123Z']
+    document.levels == [east: 'HIGH']
+    document.places == [home: [lat: 36.1d, lon: -115.1d]]
+    document.children == [alice: [name: 'Alice', count: 3L, label: 'Ally',
+                                  items: [[sku: 'A-1', quantity: 2]]]]
+    document.bags == [b: [tags: [k: 'v']]]
+    document.labels == [env: 'prod']
+
+    and: 'the ignored field inside a value is pruned and the renamed one restored'
+    codec.fromDocument(document, TypedMaps) == message.toBuilder()
+        .putChildren('alice', message.getChildrenOrThrow('alice').toBuilder().clearSecret().build())
+        .build()
+    codec.fromDocument(Json.parseObject(Json.canonical(document)), TypedMaps).getChildrenOrThrow('alice')
+        .displayName == 'Ally'
+  }
+
+  def "typed map values follow the codec settings"() {
+    given:
+    def strings = ProtoDocumentCodec.of(ProtoMapper.withDefaults(), CodecConfig.standard().withInt64AsNumber(false))
+    def message = TypedMaps.newBuilder().putCounters('views', 5L).putChildren('k', TypedChild.newBuilder().build()).build()
+
+    expect:
+    strings.toDocument(message).counters == [views: '5']
+    codec.toDocument(message).children == [k: [name: '', count: 0L, label: '', items: []]]
+    sparse.toDocument(message).children == [k: [:]]
+    codec.fromDocument([counters: [views: 5, other: '6'], due: [d: 1709528767123]], TypedMaps).countersMap ==
+        [views: 5L, other: 6L]
+    codec.fromDocument([due: [d: 1709528767123]], TypedMaps).getDueOrThrow('d') == FILED
+    codec.fromDocument([places: [p: 'POINT (-115.1 36.1)']], TypedMaps).getPlacesOrThrow('p').lat == 36.1d
+  }
+
+  @Unroll
+  def "a typed map key '#key' is rejected"() {
+    when:
+    codec.toDocument(TypedMaps.newBuilder().putCounters(key, 1L).build())
+
+    then:
+    def e = thrown(CodecException)
+    e.message == "Field counters has the key '${key}'; keys of a map mapped as OBJECT must be non-empty and contain no '.'"
+
+    where:
+    key << ['a.b', '']
+  }
+
+  def "keys of flattened maps stay opaque"() {
+    expect:
+    codec.toDocument(TypedMaps.newBuilder().putLabels('a.b', 'x').putLabels('', 'y').build()).labels ==
+        ['a.b': 'x', '': 'y']
+  }
+
+  def "unknown fields inside typed map values are rejected when strict"() {
+    given:
+    def strict = ProtoDocumentCodec.of(ProtoMapper.withDefaults(), CodecConfig.standard().withUnknownFields(UnknownFieldPolicy.FAIL))
+
+    when:
+    strict.fromDocument([children: [k: [name: 'n', stale: 1]]], TypedMaps)
+
+    then:
+    def e = thrown(CodecException)
+    e.message.contains('children.*.stale')
   }
 
   def "an unknown enum value is tolerated by default and rejected when strict"() {
