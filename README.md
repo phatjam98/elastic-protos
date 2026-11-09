@@ -803,6 +803,7 @@ try (BulkBuffer buffer = BulkBuffer.builder()
     .maxActions(1000)
     .flushInterval(Duration.ofSeconds(1))
     .listener(result -> result.failures().forEach(System.err::println))
+    .errorListener((batch, error) -> retryLater.addAll(batch))
     .build()) {
   for (Document doc : docs) {
     buffer.add(BulkOp.index(documents.alias(), codec.idOf(doc).orElseThrow(),
@@ -810,6 +811,12 @@ try (BulkBuffer buffer = BulkBuffer.builder()
   }
 }
 ```
+
+Failed items arrive in each `BulkResult`. When a whole bulk request fails (the engine call throws),
+the error listener receives an immutable copy of the batch and the exception; the buffer drops the
+batch from its queue and never retries it, so retry or park the operations there. The default error
+listener logs them. A failure of the final flush in `close()` goes to the error listener and is
+then thrown from `close()` as an `EngineException`.
 
 ### OpenSearch differences
 
@@ -936,7 +943,7 @@ public class DocumentRepository {
   public void saveAll(List<Document> docs) {
     try (BulkBuffer buffer = elastic.bulkBuffer(
         result -> result.failures().forEach(item -> log.warn("{}: {}", item.id(), item.error())),
-        error -> log.error("bulk request failed", error))) {
+        (batch, error) -> log.error("bulk request of {} operations failed", batch.size(), error))) {
       docs.forEach(doc -> buffer.add(elastic.indexOp(doc)));
     }
   }
@@ -950,9 +957,11 @@ for example `IndexOptions.refreshed()` to drop the document from searches before
 `delete(id, type)` does not refresh.
 
 `bulkBuffer()` logs failed items and failed requests; `bulkBuffer(listener)` sends every batch's
-`BulkResult` to a `Consumer<BulkResult>`, and `bulkBuffer(listener, errorListener)` also sends the
-exception of a failed bulk request to a `Consumer<Throwable>`. Listeners run on the thread that
-sends the batch: the caller of `add` or `close`, or the flush timer.
+`BulkResult` to a `Consumer<BulkResult>`, and `bulkBuffer(listener, errorListener)` also sends each
+failed bulk request's batch and exception to a `BiConsumer<List<BulkOp>, Throwable>` (the
+`Consumer<Throwable>` overload is deprecated). Failed batches are not retried, and `close()` throws
+when the final batch fails. Listeners run on the thread that sends the batch: the caller of `add` or
+`close`, or the flush timer.
 
 It also offers `bulkIndex`, `definition`, `pager` (a `SearchPager`), `plan`, `bootstrap`,
 `codec()` and `engine()`. `SearchPage` carries the messages, the raw hits, the total and the
