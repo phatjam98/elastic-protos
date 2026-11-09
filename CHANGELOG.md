@@ -41,3 +41,13 @@ metadata):
   longer equal a `Hit` built with the five-argument constructor.
 - The in-memory test engine copies a reindex from a snapshot of the source taken when the call
   starts, and a delete consumes a sequence number and leaves a version tombstone.
+
+The query DSL gains aggregations and highlighting ([ADR 0009](docs/adr/0009-aggregation-and-highlight-dsl.md)):
+`SearchCriteria.aggregation` (terms, date histogram, histogram, range and the min, max, avg, sum,
+value count and cardinality metrics, one sub-aggregation level, nested fields wrapped in
+`<name>__nested` / `<name>__reverse`) and `SearchCriteria.highlight`, built with `Aggs` and
+`Criteria.aggregate`, `aggregationsOnly` and `highlight`, and read with `AggregationResults`.
+Aggregation names must not contain `__` or equal a bucket key. New
+`QueryCompilerConfig.maxTermsSize` (Micronaut `elastic-protos.query.max-terms-size`, default 1000).
+The Micronaut `SearchPage` record gains a seventh component, `aggregations` (the six-argument
+constructor remains), and `ElasticProtosService` gains `aggregate(criteria, type)`.
