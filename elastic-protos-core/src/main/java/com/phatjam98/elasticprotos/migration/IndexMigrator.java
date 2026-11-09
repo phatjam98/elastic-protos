@@ -327,7 +327,7 @@ public final class IndexMigrator {
     if (!settingsDiff.staticChanges().isEmpty() && !staticReindex) {
       warnings.add(DiffClassifier.staticWarning(settingsDiff));
     }
-    String staticReason = "static settings changed: "
+    final String staticReason = "static settings changed: "
         + SettingsDiff.describe(settingsDiff.staticChanges());
     String dynamicReason = SettingsDiff.describe(settingsDiff.dynamicChanges());
     if (!diff.removed().isEmpty()) {
@@ -345,7 +345,8 @@ public final class IndexMigrator {
     }
 
     boolean upToDate = target.contentHash().equals(currentHash);
-    Action action = (upToDate || current.equals(target.name())) && !diff.hasFieldChanges()
+    boolean unchanged = (upToDate || current.equals(target.name())) && !diff.hasFieldChanges();
+    Action action = unchanged
         ? Action.NO_OP : DiffClassifier.classify(diff, options.removedFields());
     if (staticReindex) {
       action = Action.REINDEX;
@@ -371,8 +372,8 @@ public final class IndexMigrator {
       case NO_OP:
         return new IndexPlan(target, action, current, currentHash, diff,
             upToDate ? upToDate(currentHash)
-                : diff.hasFieldChanges() ? "mappings of " + current + " already match"
-                    : "index " + current + " is up to date",
+                : unchanged ? "index " + current + " is up to date"
+                    : "mappings of " + current + " already match",
             warnings);
       case PUT_MAPPING:
         return new IndexPlan(target, action, current, currentHash, diff,
