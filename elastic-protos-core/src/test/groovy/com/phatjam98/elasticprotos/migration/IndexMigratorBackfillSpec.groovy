@@ -154,7 +154,7 @@ class IndexMigratorBackfillSpec extends Specification {
 
   def "a crash during a backfill resumes on the next run"() {
     given:
-    on[Phase.BACKFILL_MARKED] = { throw new IllegalStateException('killed') }
+    on[Phase.BACKFILL_MARKED] = { throw new MigrationListener.Abort('killed') }
     def crashed = migrator().bootstrap(Document)
     on.clear()
 
