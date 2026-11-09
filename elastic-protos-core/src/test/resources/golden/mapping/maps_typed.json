@@ -1,0 +1,169 @@
+{
+  "alias" : "typed_maps",
+  "fullTextFields" : {
+    "notes.*" : 1.0
+  },
+  "idField" : "id",
+  "ignoredPaths" : [ "children.*.secret" ],
+  "mappings" : {
+    "_meta" : {
+      "elastic_protos" : {
+        "hash" : "ab8f7513",
+        "proto" : "phatjam98.elasticprotos.example.TypedMaps",
+        "schema_version" : 1
+      }
+    },
+    "dynamic" : "strict",
+    "dynamic_templates" : [ {
+      "ep:children.*.items.quantity" : {
+        "mapping" : {
+          "type" : "integer"
+        },
+        "path_match" : "children.*.items.quantity"
+      }
+    }, {
+      "ep:children.*.items.sku" : {
+        "mapping" : {
+          "ignore_above" : 256,
+          "type" : "keyword"
+        },
+        "path_match" : "children.*.items.sku"
+      }
+    }, {
+      "ep:children.*.count" : {
+        "mapping" : {
+          "type" : "long"
+        },
+        "path_match" : "children.*.count"
+      }
+    }, {
+      "ep:children.*.items" : {
+        "mapping" : {
+          "dynamic" : true,
+          "type" : "nested"
+        },
+        "match_mapping_type" : "object",
+        "path_match" : "children.*.items"
+      }
+    }, {
+      "ep:children.*.label" : {
+        "mapping" : {
+          "ignore_above" : 256,
+          "type" : "keyword"
+        },
+        "path_match" : "children.*.label"
+      }
+    }, {
+      "ep:children.*.name" : {
+        "mapping" : {
+          "ignore_above" : 256,
+          "type" : "keyword"
+        },
+        "path_match" : "children.*.name"
+      }
+    }, {
+      "ep:bags.*" : {
+        "mapping" : {
+          "dynamic" : true,
+          "type" : "object"
+        },
+        "match_mapping_type" : "object",
+        "path_match" : "bags.*"
+      }
+    }, {
+      "ep:children.*" : {
+        "mapping" : {
+          "dynamic" : true,
+          "type" : "object"
+        },
+        "match_mapping_type" : "object",
+        "path_match" : "children.*"
+      }
+    }, {
+      "ep:counters.*" : {
+        "mapping" : {
+          "type" : "long"
+        },
+        "path_match" : "counters.*"
+      }
+    }, {
+      "ep:due.*" : {
+        "mapping" : {
+          "format" : "strict_date_optional_time",
+          "type" : "date"
+        },
+        "path_match" : "due.*"
+      }
+    }, {
+      "ep:levels.*" : {
+        "mapping" : {
+          "ignore_above" : 256,
+          "type" : "keyword"
+        },
+        "path_match" : "levels.*"
+      }
+    }, {
+      "ep:notes.*" : {
+        "mapping" : {
+          "analyzer" : "english",
+          "fields" : {
+            "keyword" : {
+              "ignore_above" : 256,
+              "type" : "keyword"
+            }
+          },
+          "type" : "text"
+        },
+        "path_match" : "notes.*"
+      }
+    }, {
+      "ep:places.*" : {
+        "mapping" : {
+          "type" : "geo_point"
+        },
+        "path_match" : "places.*"
+      }
+    } ],
+    "properties" : {
+      "bags" : {
+        "dynamic" : true,
+        "type" : "object"
+      },
+      "children" : {
+        "dynamic" : true,
+        "type" : "object"
+      },
+      "counters" : {
+        "dynamic" : true,
+        "type" : "object"
+      },
+      "due" : {
+        "dynamic" : true,
+        "type" : "object"
+      },
+      "id" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "labels" : {
+        "type" : "flattened"
+      },
+      "levels" : {
+        "dynamic" : true,
+        "type" : "object"
+      },
+      "notes" : {
+        "dynamic" : true,
+        "type" : "object"
+      },
+      "places" : {
+        "dynamic" : true,
+        "type" : "object"
+      }
+    }
+  },
+  "name" : "typed_maps-vab8f7513",
+  "nestedPaths" : [ ],
+  "settings" : { },
+  "warnings" : [ "each distinct key of counters adds 1 field(s) at index time (index.mapping.total_fields.limit)", "each distinct key of notes adds 2 field(s) at index time (index.mapping.total_fields.limit)", "each distinct key of due adds 1 field(s) at index time (index.mapping.total_fields.limit)", "each distinct key of levels adds 1 field(s) at index time (index.mapping.total_fields.limit)", "each distinct key of places adds 1 field(s) at index time (index.mapping.total_fields.limit)", "each distinct key of children adds 5 field(s) at index time (index.mapping.total_fields.limit)", "values of bags are untyped: phatjam98.elasticprotos.example.TypedBag contains a map or Struct" ]
+}

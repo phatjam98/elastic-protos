@@ -50,6 +50,12 @@ public final class DiffClassifier {
    */
   public static final Set<String> UPDATABLE_PARAMS = Set.of("dynamic");
 
+  /** Root mapping parameter holding the dynamic templates of typed maps. */
+  private static final String DYNAMIC_TEMPLATES = "dynamic_templates";
+
+  /** Name prefix of the dynamic templates the mapper emits. */
+  private static final String TEMPLATE_PREFIX = "ep:";
+
   /** The dynamic mode of a mapping that does not declare one. */
   private static final String DEFAULT_DYNAMIC = "true";
 
@@ -86,7 +92,8 @@ public final class DiffClassifier {
   /**
    * Classifies a diff.
    *
-   * <p>Type changes, changes to any parameter not in {@link #UPDATABLE_PARAMS}, and {@link
+   * <p>Type changes, changes to any parameter not in {@link #UPDATABLE_PARAMS} (except root {@code
+   * dynamic_templates} that only change for typed maps the diff adds), and {@link
    * MappingDiff#unindexedAdditions() additions old documents were never indexed into} need a
    * reindex; removed fields need one only under {@link RemovedFieldPolicy#REINDEX}; other added
    * fields and {@code dynamic} changes are applied in place; anything else is a no-op. Settings
@@ -101,7 +108,8 @@ public final class DiffClassifier {
       return Action.REINDEX;
     }
     for (Change change : diff.paramChanged()) {
-      if (!UPDATABLE_PARAMS.contains(param(change.path()))) {
+      if (!UPDATABLE_PARAMS.contains(param(change.path()))
+          && !templatesOfAddedMaps(change, diff.added())) {
         return Action.REINDEX;
       }
     }
@@ -112,6 +120,53 @@ public final class DiffClassifier {
       return Action.PUT_MAPPING;
     }
     return Action.NO_OP;
+  }
+
+  /**
+   * Returns whether a change to the root {@code dynamic_templates} only adds or changes the
+   * templates of typed maps that are themselves added: every template that is not in both lists
+   * unchanged is named {@code ep:P.*...} with {@code P} in the added fields. Putting the mapping
+   * then replaces the template list, and no indexed document holds a key of the new maps.
+   */
+  private static boolean templatesOfAddedMaps(Change change, List<Change> added) {
+    if (!(ROOT + ":" + DYNAMIC_TEMPLATES).equals(change.path())) {
+      return false;
+    }
+    Map<String, Object> before = templatesByName(change.before());
+    Map<String, Object> after = templatesByName(change.after());
+    Set<String> changed = new TreeSet<>();
+    for (String name : after.keySet()) {
+      if (!Objects.equals(before.get(name), after.get(name))) {
+        changed.add(name);
+      }
+    }
+    for (String name : before.keySet()) {
+      if (!after.containsKey(name)) {
+        changed.add(name);
+      }
+    }
+    Set<String> addedPaths = new TreeSet<>();
+    for (Change addition : added) {
+      addedPaths.add(addition.path());
+    }
+    for (String name : changed) {
+      int star = name.indexOf(".*");
+      if (!name.startsWith(TEMPLATE_PREFIX) || star < 0
+          || !addedPaths.contains(name.substring(TEMPLATE_PREFIX.length(), star))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static Map<String, Object> templatesByName(Object templates) {
+    Map<String, Object> byName = new TreeMap<>();
+    if (templates instanceof List) {
+      for (Object template : (List<?>) templates) {
+        byName.putAll(map(template));
+      }
+    }
+    return byName;
   }
 
   /**

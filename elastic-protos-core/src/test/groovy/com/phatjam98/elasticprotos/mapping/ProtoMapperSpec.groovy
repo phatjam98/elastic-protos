@@ -11,7 +11,9 @@ import com.phatjam98.elasticprotos.proto.EsType
 import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
 import com.phatjam98.elasticprotos.proto.example.InboxItem
+import com.phatjam98.elasticprotos.proto.example.TypedMaps
 import com.phatjam98.elasticprotos.proto.test.Annotated
+import com.phatjam98.elasticprotos.proto.test.Child
 import com.phatjam98.elasticprotos.proto.test.Composite
 import com.phatjam98.elasticprotos.proto.test.Geo
 import com.phatjam98.elasticprotos.proto.test.IdByOption
@@ -61,6 +63,7 @@ class ProtoMapperSpec extends Specification {
     'firm'         | Firm
     'document'     | Document
     'inbox_item'   | InboxItem
+    'maps_typed'   | TypedMaps
   }
 
   def "scalars follow the default rules"() {
@@ -285,6 +288,256 @@ class ProtoMapperSpec extends Specification {
     props.message_map == [type: 'nested', dynamic: true]
     props.int_map == [type: 'flattened']
     definition.contentHash() != mapper.map(Composite).contentHash()
+  }
+
+  def "typed map templates are ordered deeper first, then by name"() {
+    when:
+    def definition = mapper.map(TypedMaps)
+    List<String> names = definition.mappings().dynamic_templates.collect { (it as Map).keySet().first() }
+
+    then:
+    names == ['ep:children.*.items.quantity', 'ep:children.*.items.sku', 'ep:children.*.count',
+              'ep:children.*.items', 'ep:children.*.label', 'ep:children.*.name', 'ep:bags.*',
+              'ep:children.*', 'ep:counters.*', 'ep:due.*', 'ep:levels.*', 'ep:notes.*', 'ep:places.*']
+    definition.fields().keySet().every { !it.contains('*') }
+    definition.dynamicFields().keySet() == ['children.*', 'children.*.count', 'children.*.items',
+        'children.*.items.quantity', 'children.*.items.sku', 'children.*.label', 'children.*.name',
+        'counters.*', 'due.*', 'levels.*', 'notes.*', 'places.*'] as Set
+    definition.dynamicFields().values().every { it.isDynamic() && it.pattern() == it.path() }
+    definition.dynamicFields()['children.*.label'].protoPath() == 'children.*.display_name'
+    definition.dynamicFields()['notes.*'].kind() == FieldKind.TEXT
+    definition.dynamicFields()['notes.*'].keywordSubfield()
+    definition.nestedPaths().isEmpty()
+  }
+
+  def "typed maps resolve keys and instantiate nested paths"() {
+    given:
+    def definition = mapper.map(TypedMaps)
+
+    expect:
+    definition.resolve('counters.views').get() == new FieldInfo('counters.views', 'counters.views',
+        FieldKind.LONG, false, false, 1f, TypedMaps.descriptor.findFieldByName('counters').messageType
+        .findFieldByName('value'), 'counters.*')
+    definition.resolve('children.k.label').get().protoPath() == 'children.k.display_name'
+    definition.resolve('children.k').get().kind() == FieldKind.OBJECT
+    definition.resolve('id').get().isDynamic() == false
+    ['counters', 'labels'].every { !definition.resolve(it).get().isDynamic() }
+    ['counters.', 'counters..x', 'counters.a.', 'counters.a.b', 'children.k.nope', 'nope.x', 'labels.env']
+        .every { definition.resolve(it).isEmpty() }
+    definition.typedMapValues('children.k.nope').get().path() == 'children.*'
+    definition.typedMapValues('labels.env').isEmpty()
+    definition.nestedAncestors('children.k.items.sku') == ['children.k.items']
+    definition.nestedAncestors('children.k.count') == []
+    definition.nestedAncestors('counters.views') == []
+    mapper.map(Firm).typedMapValues('labels.env').isEmpty()
+  }
+
+  def "typed maps warn about the fields every key adds and about untyped values"() {
+    expect:
+    mapper.map(TypedMaps).warnings() == [
+        'each distinct key of counters adds 1 field(s) at index time (index.mapping.total_fields.limit)',
+        'each distinct key of notes adds 2 field(s) at index time (index.mapping.total_fields.limit)',
+        'each distinct key of due adds 1 field(s) at index time (index.mapping.total_fields.limit)',
+        'each distinct key of levels adds 1 field(s) at index time (index.mapping.total_fields.limit)',
+        'each distinct key of places adds 1 field(s) at index time (index.mapping.total_fields.limit)',
+        'each distinct key of children adds 5 field(s) at index time (index.mapping.total_fields.limit)',
+        'values of bags are untyped: phatjam98.elasticprotos.example.TypedBag contains a map or Struct',
+    ]
+  }
+
+  def "value_type and the value options shape the template"() {
+    given:
+    def overrides = MappingOverrides.builder()
+        .forField(Composite.descriptor, 'string_map') {
+          it.type = EsType.OBJECT
+          it.valueType = EsType.KEYWORD
+          it.normalizer = 'lowercase'
+          it.ignoreAbove = 32
+          it.index = com.phatjam98.elasticprotos.proto.Bool3.FALSE
+          it.addCopyTo('all')
+          it.fullText = com.phatjam98.elasticprotos.proto.Bool3.TRUE
+          it.boost = 3f
+        }
+        .forField(Composite.descriptor, 'int_map') {
+          it.type = EsType.OBJECT
+          it.valueType = EsType.LONG
+          it.coerce = com.phatjam98.elasticprotos.proto.Bool3.FALSE
+        }
+        .forField(Composite.descriptor, 'message_map') {
+          it.type = EsType.OBJECT
+          it.valueType = EsType.NESTED
+        }
+        .build()
+
+    when:
+    def definition = ProtoMapper.builder().overrides(overrides).build().map(Composite)
+    Map templates = definition.mappings().dynamic_templates.collectEntries { it }
+
+    then:
+    definition.mappings().properties.string_map == [type: 'object', dynamic: true]
+    templates['ep:string_map.*'] == [path_match: 'string_map.*', mapping: [type: 'keyword', ignore_above: 32,
+                                                                            normalizer: 'lowercase', index: false]]
+    templates['ep:int_map.*'].mapping == [type: 'long', coerce: false]
+    templates['ep:message_map.*'] == [path_match: 'message_map.*', match_mapping_type: 'object',
+                                      mapping: [type: 'nested', dynamic: true]]
+    templates['ep:message_map.*.grandchild'].mapping == [type: 'object', dynamic: true]
+    templates['ep:message_map.*.grandchild.note'].mapping == [type: 'keyword', ignore_above: 256]
+    definition.fullTextFields() == ['string_map.*': 3f]
+    definition.nestedAncestors('message_map.k.rank') == ['message_map.k']
+    definition.resolve('message_map.k').get().kind() == FieldKind.NESTED
+  }
+
+  def "full_text on a message-valued map adds its text leaves outside nested values"() {
+    given:
+    def textChild = { b -> b.type = EsType.OBJECT; b.fullText = com.phatjam98.elasticprotos.proto.Bool3.TRUE }
+    def overrides = MappingOverrides.builder()
+        .forField(Composite.descriptor, 'message_map', textChild)
+        .forField(Child.descriptor, 'name') { it.type = EsType.TEXT }
+        .build()
+    def nestedValues = MappingOverrides.builder()
+        .forField(Composite.descriptor, 'message_map') {
+          it.type = EsType.OBJECT
+          it.valueType = EsType.NESTED
+          it.fullText = com.phatjam98.elasticprotos.proto.Bool3.TRUE
+        }
+        .forField(Child.descriptor, 'name') { it.type = EsType.TEXT }
+        .build()
+
+    expect:
+    ProtoMapper.builder().overrides(overrides).build().map(Composite).fullTextFields() ==
+        ['message_map.*.name': 1f, 'single_child.name': 1f, 'children.name': 1f, 'choice_child.name': 1f]
+    ProtoMapper.builder().overrides(nestedValues).build().map(Composite).fullTextFields() ==
+        ['single_child.name': 1f, 'children.name': 1f, 'choice_child.name': 1f]
+  }
+
+  def "a value cut off by maxDepth is a disabled object"() {
+    given:
+    def overrides = MappingOverrides.builder()
+        .forField(Composite.descriptor, 'message_map') { it.type = EsType.OBJECT }.build()
+    def shallow = ProtoMapper.builder().overrides(overrides)
+        .defaults(MappingDefaults.standard().withMaxDepth(0)).build()
+
+    when:
+    def definition = shallow.map(Composite)
+
+    then:
+    definition.mappings().dynamic_templates.collectEntries { it }['ep:message_map.*'] ==
+        [path_match: 'message_map.*', mapping: DISABLED]
+    definition.warnings().contains(
+        'each distinct key of message_map adds 1 field(s) at index time (index.mapping.total_fields.limit)')
+    definition.dynamicFields().keySet() == ['message_map.*'] as Set
+  }
+
+  def "Struct, Timestamp and wrapper values are single values; Any values are untyped"() {
+    given:
+    def file = FileDescriptorProto.newBuilder().setName('values.proto').setPackage('values')
+        .setSyntax('proto3')
+        .addDependency('google/protobuf/struct.proto')
+        .addDependency('google/protobuf/any.proto')
+        .addDependency('google/protobuf/wrappers.proto')
+        .addMessageType(DescriptorProto.newBuilder().setName('Values')
+            .addField(mapField('structs', 1, '.values.Values.StructsEntry'))
+            .addField(mapField('anys', 2, '.values.Values.AnysEntry'))
+            .addField(mapField('wrapped', 3, '.values.Values.WrappedEntry'))
+            .addNestedType(entry('StructsEntry', '.google.protobuf.Struct'))
+            .addNestedType(entry('AnysEntry', '.google.protobuf.Any'))
+            .addNestedType(entry('WrappedEntry', '.google.protobuf.Int32Value')))
+        .build()
+    Descriptor values = FileDescriptor.buildFrom(file, [com.google.protobuf.Struct.descriptor.file,
+        com.google.protobuf.Any.descriptor.file, com.google.protobuf.Int32Value.descriptor.file] as FileDescriptor[])
+        .findMessageTypeByName('Values')
+    def overrides = MappingOverrides.builder()
+    ['structs', 'anys', 'wrapped'].each { name ->
+      overrides.forField(values, name) { it.type = EsType.OBJECT }
+    }
+
+    when:
+    def definition = ProtoMapper.builder().overrides(overrides.build()).build().map(values)
+    Map templates = definition.mappings().dynamic_templates.collectEntries { it }
+
+    then:
+    templates['ep:structs.*'].mapping == [type: 'flattened']
+    templates['ep:wrapped.*'].mapping == [type: 'integer']
+    templates['ep:anys.*'] == [path_match: 'anys.*', match_mapping_type: 'object',
+                               mapping: [type: 'object', dynamic: true]]
+    definition.warnings().contains('values of anys are untyped: google.protobuf.Any contains a map or Struct')
+  }
+
+  static FieldDescriptorProto mapField(String name, int number, String entryType) {
+    FieldDescriptorProto.newBuilder().setName(name).setNumber(number)
+        .setType(FieldDescriptorProto.Type.TYPE_MESSAGE).setTypeName(entryType)
+        .setLabel(FieldDescriptorProto.Label.LABEL_REPEATED).build()
+  }
+
+  static DescriptorProto entry(String name, String valueType) {
+    DescriptorProto.newBuilder().setName(name)
+        .setOptions(com.google.protobuf.DescriptorProtos.MessageOptions.newBuilder().setMapEntry(true))
+        .addField(field('key', 1, FieldDescriptorProto.Type.TYPE_STRING))
+        .addField(field('value', 2, FieldDescriptorProto.Type.TYPE_MESSAGE).toBuilder().setTypeName(valueType))
+        .build()
+  }
+
+  @Unroll
+  def "value_type #valueType on #field is rejected: #message"() {
+    given:
+    def overrides = MappingOverrides.builder()
+        .forField(Composite.descriptor, field) {
+          it.type = EsType.OBJECT
+          it.valueType = valueType
+        }.build()
+
+    when:
+    ProtoMapper.builder().overrides(overrides).build().map(Composite)
+
+    then:
+    MappingException e = thrown()
+    e.path == field
+    e.message == "${field}: ${message}".toString()
+
+    where:
+    field         | valueType        || message
+    'string_map'  | EsType.OBJECT    || 'value_type OBJECT requires a message or map field'
+    'int_map'     | EsType.GEO_SHAPE || 'value_type GEO_SHAPE requires a string field (WKT or GeoJSON) or phatjam98.elasticprotos.v1.GeoShape, not DOUBLE'
+    'message_map' | EsType.LONG      || 'value_type LONG cannot be applied to message phatjam98.elasticprotos.test.Child'
+    'message_map' | EsType.GEO_POINT || 'value_type GEO_POINT requires a string field (WKT or "lat,lon") or a message with lat/lon fields, not phatjam98.elasticprotos.test.Child'
+    'string_map'  | EsType.IGNORE    || 'value_type IGNORE is not supported; set type: IGNORE to leave the map out'
+  }
+
+  def "value_type is ignored with a warning where it does not apply"() {
+    given:
+    def overrides = MappingOverrides.builder()
+        .forField(Composite.descriptor, 'string_map') { it.valueType = EsType.TEXT }
+        .forField(Composite.descriptor, 'single_child') { it.valueType = EsType.TEXT }
+        .build()
+
+    when:
+    def definition = ProtoMapper.builder().overrides(overrides).build().map(Composite)
+
+    then:
+    definition.mappings().properties.string_map == [type: 'flattened']
+    !definition.mappings().containsKey('dynamic_templates')
+    definition.warnings() == [
+        'single_child: value_type applies only to map fields mapped as OBJECT or NESTED and is ignored',
+        'string_map: value_type applies only to map fields mapped as OBJECT or NESTED and is ignored']
+  }
+
+  def "flattened maps keep their mapping and content hash"() {
+    expect: 'the hashes recorded before typed maps existed'
+    mapper.map(Firm).contentHash() == 'e891e500'
+    mapper.map(Composite).contentHash() == '5e01d47d'
+    !mapper.map(Firm).mappings().containsKey('dynamic_templates')
+    mapper.map(Firm).dynamicFields().isEmpty()
+
+    and: 'TypedMaps with every map flattened has no templates'
+    def flattened = MappingOverrides.builder()
+    TypedMaps.descriptor.fields.findAll { it.mapField }.each { f ->
+      flattened.forField(TypedMaps.descriptor, f.name) { it.type = EsType.FLATTENED }
+    }
+    def definition = ProtoMapper.builder().overrides(flattened.build()).build().map(TypedMaps)
+    !definition.mappings().containsKey('dynamic_templates')
+    definition.dynamicFields().isEmpty()
+    definition.warnings() ==
+        ['notes: value_type applies only to map fields mapped as OBJECT or NESTED and is ignored']
   }
 
   def "the example Firm maps as documented"() {

@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package phatjam98.elasticprotos.example;
+
+import "google/protobuf/timestamp.proto";
+import "phatjam98/elasticprotos/v1/elastic_options.proto";
+import "phatjam98/elasticprotos/v1/geo.proto";
+
+option java_package = "com.phatjam98.elasticprotos.proto.example";
+option java_multiple_files = true;
+option java_outer_classname = "TypedMapsProtos";
+
+// Maps whose keys take the value type: type OBJECT turns each map into a dynamic object with
+// dynamic templates, so counters.views is a long, notes.summary analyzed text and so on.
+message TypedMaps {
+  option (phatjam98.elasticprotos.v1.elastic) = { alias: "typed_maps" };
+
+  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = TRUE];
+  // counters.<key> => long
+  map<string, int64> counters = 2 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+  // notes.<key> => text (english) with a .keyword sub-field, searched by FULL_TEXT as notes.*
+  map<string, string> notes = 3 [(phatjam98.elasticprotos.v1.elastic_field) = {
+    type: OBJECT
+    value_type: TEXT
+    analyzer: "english"
+    full_text: TRUE
+  }];
+  // due.<key> => date
+  map<string, google.protobuf.Timestamp> due = 4 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+  // levels.<key> => keyword holding the enum name
+  map<string, TypedMapLevel> levels = 5 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+  // places.<key> => geo_point
+  map<string, phatjam98.elasticprotos.v1.LatLon> places = 6 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+  // children.<key> => object with name, count, label and nested items
+  map<string, TypedChild> children = 7 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+  // bags.<key> => untyped object: TypedBag holds a map
+  map<string, TypedBag> bags = 8 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+  // the default: flattened
+  map<string, string> labels = 9;
+}
+
+enum TypedMapLevel {
+  TYPED_MAP_LEVEL_UNSPECIFIED = 0;
+  LOW = 1;
+  HIGH = 2;
+}
+
+message TypedChild {
+  string name = 1;
+  int64 count = 2;
+  repeated TypedItem items = 3;
+  string display_name = 4 [(phatjam98.elasticprotos.v1.elastic_field).name = "label"];
+  string secret = 5 [(phatjam98.elasticprotos.v1.elastic_field).type = IGNORE];
+}
+
+message TypedItem {
+  string sku = 1;
+  int32 quantity = 2;
+}
+
+message TypedBag {
+  map<string, string> tags = 1;
+}
