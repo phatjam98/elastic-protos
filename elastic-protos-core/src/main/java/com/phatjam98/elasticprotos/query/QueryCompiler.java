@@ -76,7 +76,7 @@ public final class QueryCompiler {
       body.put("sort", sort);
     }
     if (config.trackTotalHits() != null) {
-      body.put("track_total_hits", config.trackTotalHits());
+      body.put("track_total_hits", config.trackTotalHits().toJson());
     }
     return new CompiledSearch(body, warnings, pit);
   }

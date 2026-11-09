@@ -6,6 +6,7 @@ import com.phatjam98.elasticprotos.mapping.MappingDefaults;
 import com.phatjam98.elasticprotos.migration.FailurePolicy;
 import com.phatjam98.elasticprotos.migration.RemovedFieldPolicy;
 import com.phatjam98.elasticprotos.query.QueryCompilerConfig;
+import com.phatjam98.elasticprotos.query.TrackTotalHits;
 import io.micronaut.context.annotation.ConfigurationProperties;
 import io.micronaut.core.annotation.Nullable;
 import io.micronaut.core.convert.format.ReadableBytes;
@@ -536,7 +537,8 @@ public class ElasticProtosConfiguration {
    *       default 10000
    *   <li>{@code default-size}: page size when the criteria set none; default 10
    *   <li>{@code default-keep-alive}: point-in-time keep-alive; default {@code 1m}
-   *   <li>{@code track-total-hits}: count hits exactly; default true
+   *   <li>{@code track-total-hits}: {@code true} counts hits exactly, {@code false} counts none,
+   *       a number counts up to that bound; default true
    *   <li>{@code allow-script-sort}: accept script sorts, which run a caller-supplied Painless
    *       script on the cluster; default false
    *   <li>{@code allow-regex}: accept {@code TEXT_REGEX}; default false
@@ -554,7 +556,7 @@ public class ElasticProtosConfiguration {
     private int maxResultWindow = STANDARD.maxResultWindow();
     private int defaultSize = STANDARD.defaultSize();
     private Duration defaultKeepAlive = STANDARD.defaultKeepAlive();
-    private boolean trackTotalHits = Boolean.TRUE.equals(STANDARD.trackTotalHits());
+    private TrackTotalHits trackTotalHits = STANDARD.trackTotalHits();
     private ShardDocTiebreaker shardDocTiebreaker = ShardDocTiebreaker.AUTO;
     private boolean allowScriptSort = STANDARD.allowScriptSort();
     private boolean allowRegex = STANDARD.allowRegex();
@@ -623,14 +625,24 @@ public class ElasticProtosConfiguration {
       this.defaultKeepAlive = defaultKeepAlive;
     }
 
-    /** Returns {@code track-total-hits}. */
-    public boolean isTrackTotalHits() {
-      return trackTotalHits;
+    /** Returns {@code track-total-hits}: {@code true}, {@code false} or a number. */
+    public String getTrackTotalHits() {
+      return trackTotalHits.toString();
     }
 
-    /** Sets {@code track-total-hits}. */
-    public void setTrackTotalHits(boolean trackTotalHits) {
-      this.trackTotalHits = trackTotalHits;
+    /**
+     * Sets {@code track-total-hits}.
+     *
+     * @param trackTotalHits {@code true}, {@code false} or a non-negative number
+     * @throws IllegalArgumentException when the value is none of these
+     */
+    public void setTrackTotalHits(String trackTotalHits) {
+      this.trackTotalHits = TrackTotalHits.parse(trackTotalHits);
+    }
+
+    /** Returns {@code track-total-hits} as the compiler setting. */
+    public TrackTotalHits trackTotalHits() {
+      return trackTotalHits;
     }
 
     /** Returns {@code shard-doc-tiebreaker}. */

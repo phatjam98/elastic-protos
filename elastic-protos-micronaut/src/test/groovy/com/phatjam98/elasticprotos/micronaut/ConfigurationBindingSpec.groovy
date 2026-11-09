@@ -12,6 +12,7 @@ import com.phatjam98.elasticprotos.migration.ReplicaPolicy
 import com.phatjam98.elasticprotos.proto.example.Firm
 import com.phatjam98.elasticprotos.query.QueryCompiler
 import com.phatjam98.elasticprotos.query.QueryCompilerConfig
+import com.phatjam98.elasticprotos.query.TrackTotalHits
 import io.micronaut.context.annotation.Property
 import io.micronaut.test.extensions.spock.annotation.MicronautTest
 import jakarta.inject.Inject
@@ -134,7 +135,8 @@ class ConfigurationBindingSpec extends Specification {
       maxResultWindow == 50000
       defaultSize == 25
       defaultKeepAlive == Duration.ofMinutes(5)
-      !trackTotalHits
+      trackTotalHits == 'false'
+      trackTotalHits() == TrackTotalHits.none()
       allowScriptSort
       allowRegex
       maxPageSize == 500
@@ -156,10 +158,12 @@ class ConfigurationBindingSpec extends Specification {
     codec.config().unknownFields() == UnknownFieldPolicy.FAIL
     queryConfig == QueryCompilerConfig.standard().withAllowLeadingWildcards(true).withLenient(true)
         .withMaxResultWindow(50000).withDefaultSize(25).withDefaultKeepAlive(Duration.ofMinutes(5))
-        .withTrackTotalHits(false).withAllowScriptSort(true).withAllowRegex(true).withMaxPageSize(500)
+        .withTrackTotalHits(TrackTotalHits.none()).withAllowScriptSort(true).withAllowRegex(true).withMaxPageSize(500)
     compiler.config() == queryConfig
-    migrationOptions == new MigrationOptions(FailurePolicy.CONTINUE, false, true,
-        RemovedFieldPolicy.REINDEX, 3, ReplicaPolicy.fixed(2), Duration.ofSeconds(90), true, false)
+    migrationOptions == MigrationOptions.builder().failure(FailurePolicy.CONTINUE).allowReindex(false)
+        .deleteOldAfter(true).removedFields(RemovedFieldPolicy.REINDEX).defaultShards(3)
+        .replicas(ReplicaPolicy.fixed(2)).reindexTimeout(Duration.ofSeconds(90)).dryRun(true)
+        .clearStaleWriteBlock(false).build()
     migrator.options() == migrationOptions
   }
 }
