@@ -7,7 +7,9 @@ description = 'Micronaut integration for elastic-protos: configuration, bean fac
 dependencies {
     api project(':elastic-protos-core')
 
-    implementation platform(libs.micronaut.platform)
+    // Explicit versions (micronaut-core in the catalog), not the platform: an implementation/api
+    // platform is published in the module metadata and would force the whole Micronaut platform
+    // onto every consumer. The platform only aligns our annotation processor and tests.
     implementation libs.micronaut.inject
     implementation libs.micronaut.context
     annotationProcessor platform(libs.micronaut.platform)
