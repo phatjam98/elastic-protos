@@ -93,7 +93,7 @@ public final class DiffClassifier {
    * Classifies a diff.
    *
    * <p>Type changes, changes to any parameter not in {@link #UPDATABLE_PARAMS} (except root {@code
-   * dynamic_templates} that only change for typed maps the diff adds), and {@link
+   * dynamic_templates} changes described at {@code templateChange}), and {@link
    * MappingDiff#unindexedAdditions() additions old documents were never indexed into} need a
    * reindex; removed fields need one only under {@link RemovedFieldPolicy#REINDEX}; other added
    * fields and {@code dynamic} changes are applied in place; anything else is a no-op. Settings
@@ -107,56 +107,124 @@ public final class DiffClassifier {
     if (!diff.typeChanged().isEmpty() || !diff.unindexedAdditions().isEmpty()) {
       return Action.REINDEX;
     }
+    boolean putParams = false;
     for (Change change : diff.paramChanged()) {
-      if (!UPDATABLE_PARAMS.contains(param(change.path()))
-          && !templatesOfAddedMaps(change, diff.added())) {
+      if (UPDATABLE_PARAMS.contains(param(change.path()))) {
+        putParams = true;
+        continue;
+      }
+      TemplateChange templates = templateChange(change, diff, removedFields);
+      if (templates == TemplateChange.REINDEX) {
         return Action.REINDEX;
       }
+      putParams |= templates == TemplateChange.PUT;
     }
     if (!diff.removed().isEmpty() && removedFields == RemovedFieldPolicy.REINDEX) {
       return Action.REINDEX;
     }
-    if (!diff.added().isEmpty() || !diff.paramChanged().isEmpty()) {
+    if (!diff.added().isEmpty() || putParams) {
       return Action.PUT_MAPPING;
     }
     return Action.NO_OP;
   }
 
+  /** How a change to the root {@code dynamic_templates} is applied. */
+  private enum TemplateChange {
+    /** Only templates of removed typed maps went away: nothing to apply. */
+    NONE,
+    /** Putting the mapping, which replaces the whole template list, is enough. */
+    PUT,
+    /** Documents already indexed would not follow the new templates. */
+    REINDEX
+  }
+
   /**
-   * Returns whether a change to the root {@code dynamic_templates} only adds or changes the
-   * templates of typed maps that are themselves added: every template that is not in both lists
-   * unchanged is named {@code ep:P.*...} with {@code P} in the added fields. Putting the mapping
-   * then replaces the template list, and no indexed document holds a key of the new maps.
+   * Classifies a change to the root {@code dynamic_templates}; any other parameter change is a
+   * reindex. Templates are compared by name ({@code ep:P.*...}, where {@code P} is the typed map):
+   *
+   * <ul>
+   *   <li>an added template is applied in place when its map is added, or when the map's values
+   *       were already typed: documents of such a map were written without the new value field. An
+   *       untyped map (root object template only) that becomes typed is a reindex, since its keys
+   *       hold types the engine guessed;
+   *   <li>a changed template is applied in place only when its map {@code P}, or an object
+   *       enclosing it, is itself added by the diff;
+   *   <li>a removed template is ignored when its map, or an object enclosing it, is removed and
+   *       removed fields are kept ({@link RemovedFieldPolicy#KEEP}), like any removed field.
+   * </ul>
    */
-  private static boolean templatesOfAddedMaps(Change change, List<Change> added) {
+  private static TemplateChange templateChange(Change change, MappingDiff diff,
+      RemovedFieldPolicy removedFields) {
     if (!(ROOT + ":" + DYNAMIC_TEMPLATES).equals(change.path())) {
-      return false;
+      return TemplateChange.REINDEX;
     }
     Map<String, Object> before = templatesByName(change.before());
     Map<String, Object> after = templatesByName(change.after());
-    Set<String> changed = new TreeSet<>();
-    for (String name : after.keySet()) {
-      if (!Objects.equals(before.get(name), after.get(name))) {
-        changed.add(name);
+    boolean put = false;
+    for (Map.Entry<String, Object> entry : after.entrySet()) {
+      String map = mapOf(entry.getKey());
+      if (map == null) {
+        return TemplateChange.REINDEX;
+      }
+      if (!before.containsKey(entry.getKey())) {
+        if (!covers(diff.added(), map) && !typedBefore(before, map)) {
+          // an untyped map (root template only) turning typed: its keys hold guessed types
+          return TemplateChange.REINDEX;
+        }
+        put = true;
+      } else if (!Objects.equals(before.get(entry.getKey()), entry.getValue())) {
+        if (!covers(diff.added(), map)) {
+          return TemplateChange.REINDEX;
+        }
+        put = true;
       }
     }
     for (String name : before.keySet()) {
-      if (!after.containsKey(name)) {
-        changed.add(name);
+      if (after.containsKey(name)) {
+        continue;
+      }
+      String map = mapOf(name);
+      if (map == null || removedFields == RemovedFieldPolicy.REINDEX
+          || !covers(diff.removed(), map)) {
+        return TemplateChange.REINDEX;
       }
     }
-    Set<String> addedPaths = new TreeSet<>();
-    for (Change addition : added) {
-      addedPaths.add(addition.path());
-    }
-    for (String name : changed) {
-      int star = name.indexOf(".*");
-      if (!name.startsWith(TEMPLATE_PREFIX) || star < 0
-          || !addedPaths.contains(name.substring(TEMPLATE_PREFIX.length(), star))) {
-        return false;
+    return put ? TemplateChange.PUT : TemplateChange.NONE;
+  }
+
+  /**
+   * Returns whether the current templates typed the values of a map: they hold a template below
+   * the root {@code ep:P.*} or a root template for single values (one not limited to objects).
+   */
+  private static boolean typedBefore(Map<String, Object> before, String map) {
+    String root = TEMPLATE_PREFIX + map + ".*";
+    for (Map.Entry<String, Object> entry : before.entrySet()) {
+      if (entry.getKey().startsWith(root + ".")) {
+        return true;
+      }
+      if (entry.getKey().equals(root) && !map(entry.getValue()).containsKey("match_mapping_type")) {
+        return true;
       }
     }
-    return true;
+    return false;
+  }
+
+  /** Returns the typed map path {@code P} of a template named {@code ep:P.*...}, or null. */
+  private static String mapOf(String templateName) {
+    int star = templateName.indexOf(".*");
+    return templateName.startsWith(TEMPLATE_PREFIX) && star > TEMPLATE_PREFIX.length()
+        ? templateName.substring(TEMPLATE_PREFIX.length(), star)
+        : null;
+  }
+
+  /** Returns whether one of the changes is the map path itself or an object enclosing it. */
+  private static boolean covers(List<Change> changes, String map) {
+    for (Change change : changes) {
+      if (change.path().equals(map) || map.startsWith(change.path() + ".")) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private static Map<String, Object> templatesByName(Object templates) {
