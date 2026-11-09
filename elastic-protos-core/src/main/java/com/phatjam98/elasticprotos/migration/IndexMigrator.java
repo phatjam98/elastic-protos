@@ -40,17 +40,20 @@ import org.slf4j.LoggerFactory;
  *
  * <ol>
  *   <li>the new index is created (or a leftover reused) and marked {@code
- *       _meta.elastic_protos.pending = {action: reindex, from, phase: copying}};
+ *       _meta.elastic_protos.pending = {action: reindex, from, phase: copying, checkpoint}}, the
+ *       checkpoint being the old index's {@link SearchEngine#seqNoCheckpoint};
  *   <li>a {@code _reindex} pass with external versioning copies the old index, and
- *   <li>a second, identical pass catches up with the writes made during the first;
+ *   <li>a second, identical pass catches up with the writes made during the first, and a
+ *       migration script is probed for {@code _id} changes;
  *   <li>a point in time over the new index is opened as its snapshot and recorded in the marker
  *       ({@code phase: swapping});
  *   <li>the alias is swapped atomically;
  *   <li>after {@link MigrationOptions#swapGrace()} the old index is write-blocked ({@code phase:
  *       reconciling});
  *   <li>every document of the frozen old index that the snapshot lacks is created in the new
- *       index, and every one whose version differs is overwritten on the snapshot's sequence
- *       number and primary term, so a write through the alias after the swap always wins (409);
+ *       index, and every one that differs is overwritten on the snapshot's sequence number and
+ *       primary term, so a write through the alias after the swap always wins (409); documents
+ *       written after the checkpoint go first and are compared regardless of version;
  *   <li>documents of the snapshot that the old index no longer has are deleted the same way;
  *   <li>the marker is removed and the old index retained write-blocked, or deleted with {@link
  *       MigrationOptions#deleteOldAfter()}.
@@ -59,8 +62,9 @@ import org.slf4j.LoggerFactory;
  * <p>A crash before the swap restarts from the copy on the next run, reusing the new index; a
  * crash after it resumes at the freeze, never copying with {@code _reindex} again, because
  * external versioning compares version numbers and the new index takes live writes. When the
- * snapshot's point in time is gone, the reconcile only creates missing documents and reports what
- * it could not decide as warnings. A migration script also runs on the reconciled documents,
+ * snapshot's point in time is gone, the reconcile only reports what differs and the item is
+ * {@link Status#INCOMPLETE}, unless {@link MigrationOptions#degradedReconcile()} asks it to create
+ * missing documents. A migration script also runs on the reconciled documents,
  * through a staging index {@code <new index>-reconcile}; it must not change {@code _id}.
  *
  * <p>With {@link ReindexMode#BLOCKING} the old index is write-blocked from the moment the copy
@@ -107,12 +111,16 @@ public final class IndexMigrator {
   /** The shortest keep-alive of the snapshot point in time of a zero-downtime reindex. */
   private static final Duration MIN_PIT_KEEP_ALIVE = Duration.ofHours(1);
 
+  /** The longest keep-alive of the snapshot point in time. */
+  private static final Duration MAX_PIT_KEEP_ALIVE = Duration.ofHours(24);
+
   /** The suffix of the staging index a migration script reconciles through. */
   static final String STAGING_SUFFIX = "-reconcile";
 
   private static final String PENDING = "pending";
   private static final String ACTION_REINDEX = "reindex";
   private static final String ACTION_BACKFILL = "backfill";
+  private static final String ACTION_ROLLBACK = "rollback";
   private static final String PHASE_COPYING = "copying";
   private static final String PHASE_SWAPPING = "swapping";
   private static final String PHASE_RECONCILING = "reconciling";
@@ -249,6 +257,16 @@ public final class IndexMigrator {
     }
     Map<String, Object> settings = engine.getSettings(current);
     IndexPlan plan = planExisting(target, current, mappings, settings);
+    if (ACTION_ROLLBACK.equals(pending.get("action"))) {
+      List<String> warnings = new ArrayList<>(plan.warnings());
+      warnings.add("a rollback of " + alias + " to " + pending.get("to") + " stopped before its"
+          + " alias swap: " + pending.get("to") + " carries its pending marker and may be partly"
+          + " updated; roll back again, or remove the markers from " + current + " and "
+          + pending.get("to"));
+      plan = new IndexPlan(plan.target(), plan.action(), plan.currentIndex(),
+          plan.currentHash(), plan.diff(), plan.reason(), warnings, plan.writeBlocked(),
+          plan.resume());
+    }
     if (ACTION_BACKFILL.equals(pending.get("action")) && (plan.action() == Action.NO_OP
         || plan.action() == Action.PUT_MAPPING || plan.action() == Action.BACKFILL)) {
       plan = new IndexPlan(plan.target(), Action.BACKFILL, current, plan.currentHash(),
@@ -373,7 +391,8 @@ public final class IndexMigrator {
     }
     Map<String, Object> pending = pendingOf(engine.getMappings(next));
     if (!ACTION_REINDEX.equals(pending.get("action"))
-        || !current.equals(string(pending.get("from")))) {
+        || !current.equals(string(pending.get("from")))
+        || !List.of(PHASE_COPYING, PHASE_SWAPPING).contains(string(pending.get("phase")))) {
       return null;
     }
     return new ReindexResume(current, string(pending.get("pit")),
@@ -522,9 +541,12 @@ public final class IndexMigrator {
    * (without a migration script), swaps the alias and retains the new index write-blocked. Any
    * failure before the swap aborts the rollback: the alias stays on the new index, the previous
    * index is write-blocked again and the outcome is {@link MigrationResult.Status#FAILED}; {@link
-   * RollbackMode#ALIAS_ONLY} then points the alias back without copying. {@link
-   * RollbackMode#ALIAS_ONLY} unblocks the previous index, swaps the alias, waits {@link
-   * MigrationOptions#swapGrace()} and write-blocks the new index.
+   * RollbackMode#ALIAS_ONLY} then points the alias back without copying. An aborted reverse delta
+   * can leave the previous index partly updated. {@link RollbackMode#REVERSE_DELTA} is refused when
+   * a migration script exists for the reindex (its transformed documents would be copied back);
+   * {@link RollbackMode#REVERSE_DELTA_FORCE} does it anyway. {@link RollbackMode#ALIAS_ONLY}
+   * unblocks the previous index, swaps the alias, waits {@link MigrationOptions#swapGrace()} and
+   * write-blocks the new index.
    *
    * @param plan the reindex item that was applied
    * @param previousIndex the index to restore, usually {@link IndexPlan#currentIndex()}
@@ -553,6 +575,16 @@ public final class IndexMigrator {
         engine.setWriteBlock(next, true);
         return new Outcome(plan, Status.APPLIED, previousIndex, List.of(next), null);
       }
+      if (mode == RollbackMode.REVERSE_DELTA) {
+        String fromHash = recordedHash(engine.getMappings(previousIndex));
+        String toHash = recordedHash(engine.getMappings(next));
+        if (scripts.script(alias, fromHash, toHash).isPresent()) {
+          throw new MigrationException("a migration script exists for " + fromHash + " -> "
+              + toHash + ", so a reverse delta would copy the documents it transformed back into "
+              + previousIndex + "; nothing was rolled back. Use RollbackMode.ALIAS_ONLY, or"
+              + " RollbackMode.REVERSE_DELTA_FORCE to copy them anyway");
+        }
+      }
       return reverseDelta(plan, previousIndex, next);
     } catch (Interrupted e) {
       return interrupted(plan, e);
@@ -563,23 +595,34 @@ public final class IndexMigrator {
   }
 
   /**
-   * Rolls back a reindex to {@code previousIndex} with {@link RollbackMode#REVERSE_DELTA}.
+   * Rolls back a reindex to {@code previousIndex} with {@link RollbackMode#REVERSE_DELTA}, throwing
+   * when it fails.
    *
    * @param plan the reindex item that was applied
    * @param previousIndex the index to restore, usually {@link IndexPlan#currentIndex()}
    * @return the outcome
+   * @throws MigrationException when the rollback did not apply; the three-argument overload
+   *     returns that outcome instead
    */
   public Outcome rollback(IndexPlan plan, String previousIndex) {
-    return rollback(plan, previousIndex, RollbackMode.REVERSE_DELTA);
+    Outcome outcome = rollback(plan, previousIndex, RollbackMode.REVERSE_DELTA);
+    if (outcome.status() != Status.APPLIED) {
+      Throwable error = outcome.error();
+      throw error instanceof MigrationException
+          ? (MigrationException) error
+          : new MigrationException("rollback of " + plan.alias() + " ended " + outcome.status()
+              + (error == null ? "" : ": " + error.getMessage()), error);
+    }
+    return outcome;
   }
 
   /**
    * Rolls back a reindex to the index the plan found, {@link IndexPlan#currentIndex()}, with
-   * {@link RollbackMode#REVERSE_DELTA}.
+   * {@link RollbackMode#REVERSE_DELTA}, throwing when it fails.
    *
    * @param plan the reindex item that was applied
    * @return the outcome
-   * @throws MigrationException when the plan has no previous index
+   * @throws MigrationException when the plan has no previous index, or the rollback did not apply
    */
   public Outcome rollback(IndexPlan plan) {
     if (plan.currentIndex() == null) {
@@ -591,30 +634,44 @@ public final class IndexMigrator {
   private Outcome reverseDelta(IndexPlan plan, String previous, String next) {
     String alias = plan.alias();
     Map<String, Object> meta = metaOf(engine.getMappings(previous));
+    Map<String, Object> nextMeta = metaOf(engine.getMappings(next));
+    // a marker on the live index, so that planning can tell about a rollback that dies here
+    Map<String, Object> note = new LinkedHashMap<>();
+    note.put("action", ACTION_ROLLBACK);
+    note.put("to", previous);
+    writePending(next, nextMeta, note);
     engine.setWriteBlock(previous, false);
-    Pit pit;
+    Snapshot snapshot;
     try {
-      pit = copyAndSnapshot(alias, next, previous, meta, true, null);
+      snapshot = copyAndSnapshot(alias, next, previous, meta, true, null, null);
     } catch (Interrupted e) {
       throw e;
     } catch (RuntimeException e) {
-      abortRollback(alias, previous, meta, null);
+      abortRollback(alias, previous, meta, null, next, nextMeta);
       return new Outcome(plan, Status.FAILED, next, List.of(), rollbackAborted(alias, next, e));
     }
+    Pit pit = snapshot.pit();
     try {
       engine.updateAliases(List.of(AliasAction.remove(next, alias),
           AliasAction.add(previous, alias)));
     } catch (RuntimeException e) {
       if (!Set.of(previous).equals(aliasHolders(alias))) {
-        abortRollback(alias, previous, meta, pit);
+        abortRollback(alias, previous, meta, pit, next, nextMeta);
         return new Outcome(plan, Status.FAILED, next, List.of(), rollbackAborted(alias, next, e));
       }
       LOG.warn("{}: the alias swap reported a failure ({}) but the alias now points at {} only",
           alias, e.getMessage(), previous);
     }
+    try {
+      writePending(next, nextMeta, null);
+    } catch (Interrupted e) {
+      throw e;
+    } catch (RuntimeException e) {
+      LOG.warn("{}: could not remove the rollback note from {}: {}", alias, next, e.getMessage());
+    }
     phase(alias, Phase.SWAPPED);
     return afterSwap(plan, new Move(alias, next, previous, meta, pit.id(), null, true, null,
-        false));
+        false, snapshot.checkpoint()));
   }
 
   private static MigrationException rollbackAborted(String alias, String next, Exception e) {
@@ -624,8 +681,14 @@ public final class IndexMigrator {
   }
 
   /** Undoes the preparation of a reverse-delta rollback that stopped before the swap. */
-  private void abortRollback(String alias, String previous, Map<String, Object> meta, Pit pit) {
+  private void abortRollback(String alias, String previous, Map<String, Object> meta, Pit pit,
+      String next, Map<String, Object> nextMeta) {
     closeQuietly(alias, pit);
+    try {
+      writePending(next, nextMeta, null);
+    } catch (RuntimeException e) {
+      LOG.warn("{}: could not remove the rollback note from {}: {}", alias, next, e.getMessage());
+    }
     try {
       writePending(previous, meta, null);
     } catch (RuntimeException e) {
@@ -736,15 +799,7 @@ public final class IndexMigrator {
     String current = item.currentIndex();
     String next = target.name();
 
-    final boolean createdNext = prepareTarget(target, current);
-    if (!createdNext) {
-      Map<String, Object> leftover = engine.getMappings(next);
-      if (!pendingOf(leftover).isEmpty()) {
-        LOG.info("{}: removing the marker of an interrupted zero-downtime reindex from {}",
-            alias, next);
-        writePending(next, metaOf(leftover), null);
-      }
-    }
+    final boolean createdNext = prepareTarget(target, current, false);
     LOG.info("{}: blocking writes to {}", alias, current);
     engine.setWriteBlock(current, true);
     long before;
@@ -837,10 +892,13 @@ public final class IndexMigrator {
     Reconciler.Staging staging = staging(target, next, fromHash, target.contentHash());
     Map<String, Object> meta = metaOf(target.mappings());
 
-    final boolean createdNext = prepareTarget(target, current);
-    Pit pit;
+    if (item.resume() != null && item.resume().pitId() != null) {
+      closeQuietly(alias, new Pit(item.resume().pitId(), pitKeepAlive()));
+    }
+    final boolean createdNext = prepareTarget(target, current, true);
+    Snapshot snapshot;
     try {
-      pit = copyAndSnapshot(alias, current, next, meta, false, staging);
+      snapshot = copyAndSnapshot(alias, current, next, meta, false, staging, target);
     } catch (Interrupted e) {
       throw e;
     } catch (RuntimeException e) {
@@ -861,24 +919,31 @@ public final class IndexMigrator {
         LOG.warn("{}: the alias swap reported a failure ({}) but {} now points at {} only;"
             + " treating the swap as done", alias, e.getMessage(), alias, next);
       } else {
-        closeQuietly(alias, pit);
+        closeQuietly(alias, snapshot.pit());
         undo(alias, current, next, createdNext, false);
         throw new MigrationException("alias swap " + current + " -> " + next + " failed: "
             + e.getMessage(), e);
       }
     }
     phase(alias, Phase.SWAPPED);
-    return afterSwap(item, new Move(alias, current, next, meta, pit.id(), staging, false, null,
-        options.deleteOldAfter()));
+    return afterSwap(item, new Move(alias, current, next, meta, snapshot.pit().id(), staging,
+        false, null, options.deleteOldAfter(), snapshot.checkpoint()));
   }
 
+  /** The point in time over the new index, and the checkpoint of the old index. */
+  private record Snapshot(Pit pit, long checkpoint) {}
+
   /**
-   * Marks {@code to}, copies {@code from} into it twice with external versioning (copy, then
-   * catch-up) and opens the point in time over {@code to} that serves as the snapshot.
+   * Records the sequence number checkpoint of {@code from} in the marker on {@code to}, copies
+   * {@code from} into it twice with external versioning (copy, then catch-up), probes the migration
+   * script, and opens the point in time over {@code to} that serves as the snapshot.
+   *
+   * @param target the target definition, for the staging index of the probe; null without script
    */
-  private Pit copyAndSnapshot(String alias, String from, String to, Map<String, Object> meta,
-      boolean rollback, Reconciler.Staging staging) {
-    writePending(to, meta, pending(from, PHASE_COPYING, null, rollback));
+  private Snapshot copyAndSnapshot(String alias, String from, String to, Map<String, Object> meta,
+      boolean rollback, Reconciler.Staging staging, IndexDefinition target) {
+    long checkpoint = engine.seqNoCheckpoint(from);
+    writePending(to, meta, pending(from, PHASE_COPYING, null, rollback, checkpoint));
     phase(alias, Phase.PREPARED);
     ReindexRequest copy = ReindexRequest.of(from, to)
         .withVersionType(ReindexRequest.VersionType.EXTERNAL)
@@ -897,16 +962,35 @@ public final class IndexMigrator {
     engine.refresh(from);
     requireComplete("catch-up", from, to, engine.reindex(copy));
     phase(alias, Phase.CAUGHT_UP);
+    if (staging != null) {
+      // a script that changes _id is caught here, before the alias moves
+      createStaging(staging, to);
+      try {
+        new Reconciler(engine, pitKeepAlive(), options.reindexTimeout()).probe(from, staging);
+      } finally {
+        deleteQuietly(alias, staging.index());
+      }
+    }
     engine.refresh(to);
     Pit pit = engine.openPit(List.of(to), pitKeepAlive());
     try {
-      writePending(to, meta, pending(from, PHASE_SWAPPING, pit.id(), rollback));
+      writePending(to, meta, pending(from, PHASE_SWAPPING, pit.id(), rollback, checkpoint));
+      phase(alias, Phase.SNAPSHOT);
     } catch (RuntimeException e) {
       closeQuietly(alias, pit);
       throw e;
     }
-    phase(alias, Phase.SNAPSHOT);
-    return pit;
+    return new Snapshot(pit, checkpoint);
+  }
+
+  /** Creates the staging index of a migration script afresh, with the mappings of {@code to}. */
+  private void createStaging(Reconciler.Staging staging, String to) {
+    if (engine.indexExists(staging.index())) {
+      engine.deleteIndex(staging.index());
+    }
+    Map<String, Object> mappings = new TreeMap<>(engine.getMappings(to));
+    mappings.remove("_meta");
+    engine.createIndex(staging.index(), staging.settings(), mappings, Set.of());
   }
 
   private void requireComplete(String pass, String from, String to, ReindexResult result) {
@@ -931,7 +1015,7 @@ public final class IndexMigrator {
   /** The state of a reindex or rollback after its alias swap. */
   private record Move(String alias, String from, String to, Map<String, Object> meta,
       String pitId, Reconciler.Staging staging, boolean rollback, String phase,
-      boolean deleteOld) {}
+      boolean deleteOld, long checkpoint) {}
 
   /** Continues a zero-downtime reindex or rollback whose alias swap is done. */
   private Outcome resumeAfterSwap(IndexPlan item) {
@@ -947,8 +1031,10 @@ public final class IndexMigrator {
       staging = staging(item.target(), to, recordedHash(engine.getMappings(from)),
           recordedHash(mappings));
     }
+    Object checkpoint = pendingOf(mappings).get("checkpoint");
     return afterSwap(item, new Move(alias, from, to, metaOf(mappings), resume.pitId(), staging,
-        resume.rollback(), resume.phase(), !resume.rollback() && options.deleteOldAfter()));
+        resume.rollback(), resume.phase(), !resume.rollback() && options.deleteOldAfter(),
+        checkpoint instanceof Number ? ((Number) checkpoint).longValue() : -1));
   }
 
   /**
@@ -974,8 +1060,16 @@ public final class IndexMigrator {
       String pitId = move.pitId();
       if (!PHASE_FINISHING.equals(move.phase())) {
         freeze(move);
-        reconcile(move, counts);
-        writePending(to, move.meta(), pending(from, PHASE_FINISHING, pitId, move.rollback()));
+        if (!reconcile(move, counts)) {
+          if (move.staging() != null) {
+            deleteQuietly(alias, move.staging().index());
+          }
+          LOG.warn("{}: {}", alias, counts.warnings);
+          return new Outcome(item, Status.INCOMPLETE, to, List.of(from), null, null, null,
+              counts.warnings, counts.stats());
+        }
+        writePending(to, move.meta(),
+            pending(from, PHASE_FINISHING, pitId, move.rollback(), move.checkpoint()));
       }
       if (pitId != null) {
         closeQuietly(alias, new Pit(pitId, pitKeepAlive()));
@@ -1028,29 +1122,28 @@ public final class IndexMigrator {
     }
     engine.refresh(from);
     writePending(move.to(), move.meta(),
-        pending(from, PHASE_RECONCILING, move.pitId(), move.rollback()));
+        pending(from, PHASE_RECONCILING, move.pitId(), move.rollback(), move.checkpoint()));
     phase(move.alias(), Phase.FROZEN);
   }
 
-  /** Reconciles and sweeps against the snapshot, or reconciles without it when it is gone. */
-  private void reconcile(Move move, Reconciler.Counts counts) {
+  /**
+   * Reconciles and sweeps against the snapshot, or compares without it when it is gone.
+   *
+   * @return false when the snapshot was lost and {@link DegradedReconcile#REPORT} left the
+   *     differences in place
+   */
+  private boolean reconcile(Move move, Reconciler.Counts counts) {
     String alias = move.alias();
     Reconciler reconciler = new Reconciler(engine, pitKeepAlive(), options.reindexTimeout());
     if (move.staging() != null) {
-      String staging = move.staging().index();
-      if (engine.indexExists(staging)) {
-        engine.deleteIndex(staging);
-      }
-      Map<String, Object> mappings = new TreeMap<>(engine.getMappings(move.to()));
-      mappings.remove("_meta");
-      engine.createIndex(staging, move.staging().settings(), mappings, Set.of());
+      createStaging(move.staging(), move.to());
     }
     boolean lost = move.pitId() == null;
     if (!lost) {
       try {
         LOG.info("{}: reconciling {} into {}", alias, move.from(), move.to());
-        reconciler.reconcile(move.from(), move.to(), move.pitId(), move.staging(),
-            move.rollback(), counts);
+        reconciler.reconcile(move.from(), move.to(), move.pitId(), move.checkpoint(),
+            move.staging(), move.rollback(), counts);
         phase(alias, Phase.RECONCILED);
         reconciler.sweep(move.from(), move.to(), move.pitId(), counts);
         phase(alias, Phase.SWEPT);
@@ -1060,10 +1153,16 @@ public final class IndexMigrator {
       }
     }
     if (lost) {
-      reconciler.degraded(move.from(), move.to(), move.staging(), move.rollback(), counts);
+      boolean create = options.degradedReconcile() == DegradedReconcile.CREATE_MISSING;
+      reconciler.degraded(move.from(), move.to(), move.staging(), move.rollback(), create,
+          counts);
+      if (!create) {
+        return false;
+      }
       phase(alias, Phase.RECONCILED);
     }
     LOG.info("{}: reconciled {} -> {}: {}", alias, move.from(), move.to(), counts.stats());
+    return true;
   }
 
   /**
@@ -1085,16 +1184,18 @@ public final class IndexMigrator {
   }
 
   private Duration pitKeepAlive() {
-    return options.reindexTimeout().compareTo(MIN_PIT_KEEP_ALIVE) > 0
+    Duration wanted = options.reindexTimeout().compareTo(MIN_PIT_KEEP_ALIVE) > 0
         ? options.reindexTimeout() : MIN_PIT_KEEP_ALIVE;
+    return wanted.compareTo(MAX_PIT_KEEP_ALIVE) > 0 ? MAX_PIT_KEEP_ALIVE : wanted;
   }
 
   private static Map<String, Object> pending(String from, String phase, String pitId,
-      boolean rollback) {
+      boolean rollback, long checkpoint) {
     Map<String, Object> pending = new LinkedHashMap<>();
     pending.put("action", ACTION_REINDEX);
     pending.put("from", from);
     pending.put("phase", phase);
+    pending.put("checkpoint", checkpoint);
     if (pitId != null) {
       pending.put("pit", pitId);
     }
@@ -1162,8 +1263,11 @@ public final class IndexMigrator {
   private void phase(String alias, Phase phase) {
     try {
       listener.onPhase(alias, phase);
-    } catch (RuntimeException e) {
+    } catch (MigrationListener.Abort e) {
       throw new Interrupted(phase, e);
+    } catch (RuntimeException e) {
+      LOG.warn("{}: the migration listener failed after {} (ignored): {}", alias, phase,
+          e.toString());
     }
   }
 
@@ -1221,7 +1325,7 @@ public final class IndexMigrator {
    *
    * @return whether this run created the index, and so may delete it if the migration fails
    */
-  private boolean prepareTarget(IndexDefinition target, String current) {
+  private boolean prepareTarget(IndexDefinition target, String current, boolean reusePending) {
     String alias = target.alias();
     String next = target.name();
     if (engine.indexExists(next)) {
@@ -1237,8 +1341,14 @@ public final class IndexMigrator {
             + " earlier reindex) while migrating from " + current + "; it is neither reused nor"
             + " deleted. Plan again to pick the next generation");
       }
-      String hash = recordedHash(engine.getMappings(next));
-      if (hash.equals(target.contentHash())) {
+      Map<String, Object> leftover = engine.getMappings(next);
+      String hash = recordedHash(leftover);
+      if (!reusePending && !pendingOf(leftover).isEmpty()) {
+        LOG.warn("{}: {} carries the marker of an interrupted zero-downtime reindex; deleting and"
+            + " recreating it for the blocking reindex", alias, next);
+        hash = null;
+      }
+      if (target.contentHash().equals(hash)) {
         LOG.info("{}: reusing {}, left over from an earlier attempt with the target hash {}",
             alias, next, hash);
         return false;

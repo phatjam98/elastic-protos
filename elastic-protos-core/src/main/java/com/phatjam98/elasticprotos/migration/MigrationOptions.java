@@ -49,6 +49,8 @@ import java.util.Objects;
  *   <li>{@code backfill}: whether additions that existing documents were never indexed into are
  *       applied in place with an update by query ({@link Action#BACKFILL}); when false they are
  *       reindexed; default true
+ *   <li>{@code degradedReconcile}: what a zero-downtime reindex does after the swap when the
+ *       snapshot of the new index is lost; default {@link DegradedReconcile#REPORT}
  * </ul>
  *
  * <p>Null settings throw {@link NullPointerException}; a shard count below 1 or a timeout that is
@@ -68,6 +70,7 @@ public final class MigrationOptions {
   private final ReindexMode reindexMode;
   private final Duration swapGrace;
   private final boolean backfill;
+  private final DegradedReconcile degradedReconcile;
 
   private MigrationOptions(Builder builder) {
     Objects.requireNonNull(builder.failure, "failure");
@@ -76,6 +79,7 @@ public final class MigrationOptions {
     Objects.requireNonNull(builder.reindexTimeout, "reindexTimeout");
     Objects.requireNonNull(builder.reindexMode, "reindexMode");
     Objects.requireNonNull(builder.swapGrace, "swapGrace");
+    Objects.requireNonNull(builder.degradedReconcile, "degradedReconcile");
     if (builder.swapGrace.isNegative()) {
       throw new IllegalArgumentException("swapGrace must not be negative: " + builder.swapGrace);
     }
@@ -99,6 +103,7 @@ public final class MigrationOptions {
     this.reindexMode = builder.reindexMode;
     this.swapGrace = builder.swapGrace;
     this.backfill = builder.backfill;
+    this.degradedReconcile = builder.degradedReconcile;
   }
 
   /**
@@ -181,6 +186,11 @@ public final class MigrationOptions {
     return backfill;
   }
 
+  /** Returns what a zero-downtime reindex does when the snapshot of the new index is lost. */
+  public DegradedReconcile degradedReconcile() {
+    return degradedReconcile;
+  }
+
   /** Returns a copy with another failure policy. */
   public MigrationOptions withFailure(FailurePolicy value) {
     return toBuilder().failure(value).build();
@@ -241,6 +251,11 @@ public final class MigrationOptions {
     return toBuilder().backfill(value).build();
   }
 
+  /** Returns a copy with another degraded-reconcile behaviour. */
+  public MigrationOptions withDegradedReconcile(DegradedReconcile value) {
+    return toBuilder().degradedReconcile(value).build();
+  }
+
   @Override
   public boolean equals(Object other) {
     return other instanceof MigrationOptions that
@@ -255,13 +270,15 @@ public final class MigrationOptions {
         && clearStaleWriteBlock == that.clearStaleWriteBlock
         && reindexMode == that.reindexMode
         && swapGrace.equals(that.swapGrace)
-        && backfill == that.backfill;
+        && backfill == that.backfill
+        && degradedReconcile == that.degradedReconcile;
   }
 
   @Override
   public int hashCode() {
     return Objects.hash(failure, allowReindex, deleteOldAfter, removedFields, defaultShards,
-        replicas, reindexTimeout, dryRun, clearStaleWriteBlock, reindexMode, swapGrace, backfill);
+        replicas, reindexTimeout, dryRun, clearStaleWriteBlock, reindexMode, swapGrace, backfill,
+        degradedReconcile);
   }
 
   @Override
@@ -277,7 +294,8 @@ public final class MigrationOptions {
         + ", clearStaleWriteBlock=" + clearStaleWriteBlock
         + ", reindexMode=" + reindexMode
         + ", swapGrace=" + swapGrace
-        + ", backfill=" + backfill + "]";
+        + ", backfill=" + backfill
+        + ", degradedReconcile=" + degradedReconcile + "]";
   }
 
   /** Builds {@link MigrationOptions}; starts from the {@link #standard()} options. */
@@ -295,6 +313,7 @@ public final class MigrationOptions {
     private ReindexMode reindexMode = ReindexMode.ZERO_DOWNTIME;
     private Duration swapGrace = Duration.ofSeconds(5);
     private boolean backfill = true;
+    private DegradedReconcile degradedReconcile = DegradedReconcile.REPORT;
 
     private Builder() {}
 
@@ -311,6 +330,7 @@ public final class MigrationOptions {
       this.reindexMode = options.reindexMode;
       this.swapGrace = options.swapGrace;
       this.backfill = options.backfill;
+      this.degradedReconcile = options.degradedReconcile;
     }
 
     /** Sets what to do after an index fails to migrate; default FAIL_FAST. */
@@ -385,6 +405,12 @@ public final class MigrationOptions {
     /** Sets whether unindexed additions are backfilled in place; default true. */
     public Builder backfill(boolean value) {
       this.backfill = value;
+      return this;
+    }
+
+    /** Sets what a reindex does when the snapshot of the new index is lost; default REPORT. */
+    public Builder degradedReconcile(DegradedReconcile value) {
+      this.degradedReconcile = value;
       return this;
     }
 

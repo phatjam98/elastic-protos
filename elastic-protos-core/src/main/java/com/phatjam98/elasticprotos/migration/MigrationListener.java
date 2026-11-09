@@ -4,11 +4,11 @@ package com.phatjam98.elasticprotos.migration;
  * Hears about the progress of a reindex, a reverse-delta rollback or a backfill, for metrics, logs
  * and tests.
  *
- * <p>{@link #onPhase} runs on the migrating thread right after a phase completed. An exception it
- * throws stops the migration where it stands, without any cleanup, as if the process had been
- * killed there: the item is {@link MigrationResult.Status#FAILED}, and the {@code
- * _meta.elastic_protos.pending} marker lets the next {@link IndexMigrator#plan} pick up the
- * interrupted work. Tests use this to simulate crashes.
+ * <p>{@link #onPhase} runs on the migrating thread right after a phase completed. Exceptions it
+ * throws are logged and ignored, except {@link Abort}: that stops the migration where it stands,
+ * without any cleanup, as if the process had been killed there. The item is then {@link
+ * MigrationResult.Status#FAILED}, and the {@code _meta.elastic_protos.pending} marker lets the next
+ * {@link IndexMigrator#plan} pick up the interrupted work. Tests use this to simulate crashes.
  *
  * <p>A {@link ReindexMode#BLOCKING} reindex reports only {@link Phase#COPIED} and {@link
  * Phase#SWAPPED}.
@@ -51,6 +51,23 @@ public interface MigrationListener {
    * @param phase the phase
    */
   void onPhase(String alias, Phase phase);
+
+  /**
+   * Thrown by a listener to stop the migration where it stands, without cleanup, as a crash
+   * would.
+   */
+  class Abort extends RuntimeException {
+    private static final long serialVersionUID = 1L;
+
+    /**
+     * Creates an abort.
+     *
+     * @param message why
+     */
+    public Abort(String message) {
+      super(message);
+    }
+  }
 
   /** Returns a listener that does nothing. */
   static MigrationListener noop() {

@@ -26,6 +26,13 @@ public record MigrationResult(List<Outcome> outcomes) {
     BLOCKED,
     /** The change failed; see {@link Outcome#error()}. */
     FAILED,
+    /**
+     * A zero-downtime reindex moved the alias but could not finish its reconcile, because the
+     * snapshot of the new index was lost and {@link MigrationOptions#degradedReconcile()} is
+     * {@link DegradedReconcile#REPORT}: nothing was written, the warnings count what differs, and
+     * the new index keeps its pending marker for the operator to decide.
+     */
+    INCOMPLETE,
     /** Nothing was done because the options ask for a dry run. */
     DRY_RUN
   }
@@ -94,7 +101,7 @@ public record MigrationResult(List<Outcome> outcomes) {
 
     /** Returns whether this item neither failed nor was blocked. */
     public boolean ok() {
-      return status != Status.FAILED && status != Status.BLOCKED
+      return status != Status.FAILED && status != Status.BLOCKED && status != Status.INCOMPLETE
           && plan.action() != Action.BLOCKED;
     }
   }
