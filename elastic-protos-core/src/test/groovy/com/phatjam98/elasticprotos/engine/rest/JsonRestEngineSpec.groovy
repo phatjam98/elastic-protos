@@ -609,6 +609,19 @@ class JsonRestEngineSpec extends Specification {
     result.hits()*.id() == ['1']
   }
 
+  def "null sort values, as returned for a missing sort field, are kept"() {
+    given:
+    http.enqueue(200, [took: 1, hits: [total: [value: 1, relation: 'eq'],
+        hits: [[_index: 'i', _id: '1', _source: [a: 1], sort: [null, 'doc-1', 7]]]]])
+
+    when:
+    def result = engine.search(['a'], [:])
+
+    then:
+    result.hits()[0].sort() == [null, 'doc-1', 7]
+    result.lastSort() == [null, 'doc-1', 7]
+  }
+
   def "a numeric hits.total is exact"() {
     given: 'the response shape of rest_total_hits_as_int=true'
     http.enqueue(200, [hits: [total: 7, hits: []]])

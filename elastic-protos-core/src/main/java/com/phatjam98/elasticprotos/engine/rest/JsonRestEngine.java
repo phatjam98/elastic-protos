@@ -451,7 +451,7 @@ public final class JsonRestEngine implements SearchEngine {
           string(hit.get("_id")),
           score instanceof Number ? ((Number) score).doubleValue() : null,
           map(hit.get("_source")),
-          hit.get("sort") instanceof List ? List.copyOf((List<?>) hit.get("sort")) : List.of()));
+          hit.get("sort") instanceof List<?> sort ? new ArrayList<Object>(sort) : List.of()));
     }
     return new SearchResult(
         total,
