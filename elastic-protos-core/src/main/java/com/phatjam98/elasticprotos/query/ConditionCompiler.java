@@ -2,6 +2,7 @@ package com.phatjam98.elasticprotos.query;
 
 import static com.phatjam98.elasticprotos.query.NestedPathResolver.object;
 
+import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.phatjam98.elasticprotos.mapping.FieldInfo;
 import com.phatjam98.elasticprotos.mapping.FieldKind;
 import com.phatjam98.elasticprotos.mapping.IndexDefinition;
@@ -74,7 +75,7 @@ final class ConditionCompiler {
           "A field name is required for " + operation + "; only FULL_TEXT may leave it empty",
           name);
     }
-    FieldInfo field = index.fields().get(name);
+    FieldInfo field = index.resolve(name).orElse(null);
     if (field == null) {
       field = flattenedKey(name, operation);
     }
@@ -155,12 +156,28 @@ final class ConditionCompiler {
 
   private void unknown(String name, String what) {
     if (!config.lenient()) {
+      FieldInfo values = index.typedMapValues(name).orElse(null);
+      if (values != null) {
+        String map = values.path().substring(0, values.path().length() - 2);
+        throw new QueryCompileException(
+            "Unknown field '" + name + "' in " + what + "; the values of map '" + map
+                + "' in index " + index.alias() + " are " + valueType(values)
+                + ", which does not map it",
+            name);
+      }
       throw new QueryCompileException(
           "Unknown field '" + name + "' in " + what + "; index " + index.alias()
               + " does not map it",
           name);
     }
     warnings.add("Skipped " + what + " on unknown field '" + name + "'");
+  }
+
+  /** Names the value type of a typed map: its message, or its mapped kind for other values. */
+  private static String valueType(FieldInfo values) {
+    return values.field().getJavaType() == FieldDescriptor.JavaType.MESSAGE
+        ? values.field().getMessageType().getFullName()
+        : values.kind().name();
   }
 
   private Clause clause(FieldCondition condition, FieldInfo field, Occur occur,
@@ -195,7 +212,7 @@ final class ConditionCompiler {
    */
   private Map<String, Object> exists(FieldInfo field) {
     if (field.kind() == FieldKind.NESTED) {
-      return NestedPathResolver.wrap(List.of(field.path()), object("match_all", new TreeMap<>()));
+      return resolver.wrapPaths(List.of(field.path()), object("match_all", new TreeMap<>()));
     }
     return object("exists", object("field", field.path()));
   }
@@ -571,7 +588,7 @@ final class ConditionCompiler {
     }
     List<Object> should = new ArrayList<>();
     for (Map.Entry<String, List<String>> group : groups.entrySet()) {
-      should.add(NestedPathResolver.wrap(groupAncestors.get(group.getKey()),
+      should.add(resolver.wrapPaths(groupAncestors.get(group.getKey()),
           multiMatch(value.getStringValue(), group.getValue(), options)));
     }
     Map<String, Object> bool = new TreeMap<>();
@@ -580,8 +597,16 @@ final class ConditionCompiler {
     return new Clause(occur, List.of(), object("bool", bool));
   }
 
+  /**
+   * Checks a {@code FULL_TEXT} field: a declared field, a key of a typed map such as {@code
+   * notes.summary}, or a typed map pattern such as {@code notes.*}, which the engine expands to the
+   * keys it has mapped.
+   */
   private boolean fullTextField(String name) {
-    FieldInfo field = index.fields().get(name);
+    FieldInfo field = index.dynamicFields().get(name);
+    if (field == null) {
+      field = index.resolve(name).orElse(null);
+    }
     if (field == null) {
       unknown(name, "FULL_TEXT");
       return false;

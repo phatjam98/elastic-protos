@@ -27,6 +27,7 @@ import com.phatjam98.elasticprotos.proto.SortingCriteria
 import com.phatjam98.elasticprotos.proto.SortingOrder
 import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
+import com.phatjam98.elasticprotos.proto.example.TypedMaps
 import com.phatjam98.elasticprotos.proto.test.Annotated
 import com.phatjam98.elasticprotos.proto.test.Composite
 import com.phatjam98.elasticprotos.proto.test.Geo
@@ -46,6 +47,7 @@ class QueryCompilerSpec extends Specification {
   @Shared IndexDefinition wellKnown = mapper.map(WellKnown)
   @Shared IndexDefinition geo = mapper.map(Geo)
   @Shared IndexDefinition annotated = mapper.map(Annotated)
+  @Shared IndexDefinition typedMaps = mapper.map(TypedMaps)
   @Shared QueryCompiler compiler = QueryCompiler.withDefaults()
   @Shared QueryCompiler regexAllowed = QueryCompiler.of(QueryCompilerConfig.standard().withAllowRegex(true))
   @Shared QueryCompiler scriptsAllowed =
@@ -322,9 +324,11 @@ class QueryCompilerSpec extends Specification {
     def objectLabels = ProtoMapper.builder().overrides(MappingOverrides.builder()
         .forField(Firm.descriptor, 'labels') { it.type = EsType.OBJECT }.build()).build().map(Firm)
 
-    expect: 'a key of a map opted in to a dynamic object'
-    failure { compiler.compile(where(fc('labels.env', EQUALS, str('x'))), objectLabels) }.message ==
-        "Unknown field 'labels.env' in EQUALS; index firms does not map it"
+    expect: 'a key of a map opted in to a typed object is a keyword, and a path below it is unknown'
+    compiler.compile(where(fc('labels.env', EQUALS, str('x'))), objectLabels).body().query ==
+        [bool: [filter: [[term: ['labels.env': 'x']]]]]
+    failure { compiler.compile(where(fc('labels.env.x', EQUALS, str('x'))), objectLabels) }.message ==
+        "Unknown field 'labels.env.x' in EQUALS; the values of map 'labels' in index firms are KEYWORD, which does not map it"
 
     and: 'a trailing dot and a key under a non-flattened field'
     failure { compiler.compile(where(fc('labels.', EQUALS, str('x'))), firm) }.field == 'labels.'
@@ -570,6 +574,96 @@ class QueryCompilerSpec extends Specification {
       scriptsAllowed.compile(sorted(scriptSort(ScriptSort.newBuilder().setId(''))), firm)
     }.message.contains('empty stored script id')
     failure { compiler.compile(sorted(SortingCriteria.defaultInstance), firm) }.message.contains('no sort type')
+  }
+
+  // ---- typed maps --------------------------------------------------------------------------
+
+  def "keys of typed maps take the value type"() {
+    expect:
+    term(typedMaps, 'counters.views', str('7')) == 7L
+    term(typedMaps, 'notes.summary', str('Q3')) == 'Q3'
+    filter(typedMaps, fc('notes.summary', EQUALS, str('Q3'))) == [term: ['notes.summary.keyword': 'Q3']]
+    term(typedMaps, 'levels.east', str('HIGH')) == 'HIGH'
+    filter(typedMaps, fc('due.review', NUM_RANGE, range(1.7e12, 1.8e12))).range['due.review'].format == 'epoch_millis'
+    filter(typedMaps, fc('places.home', GEO_DISTANCE, FlatValue.newBuilder().setGeoDistanceValue(
+        GeoDistanceValue.newBuilder().setPoint(ll(1, 2)).setDistance('5km')).build())).geo_distance.distance == '5km'
+    filter(typedMaps, fc('children.alice', EXISTS)) == [exists: [field: 'children.alice']]
+    filter(typedMaps, fc('children.alice.items', EXISTS)) ==
+        [nested: [path: 'children.alice.items', ignore_unmapped: true, query: [match_all: [:]]]]
+  }
+
+  def "#op is rejected on a key of a typed map mapped as #kind"() {
+    when:
+    compiler.compile(where(fc(field, op, value)), typedMaps)
+
+    then:
+    QueryCompileException e = thrown()
+    e.message.contains(kind)
+
+    where:
+    field          | op           | value       || kind
+    'counters.a'   | TEXT_MATCHES | str('x')    || 'LONG'
+    'notes.a'      | NUM_RANGE    | range(1, 2) || 'TEXT'
+    'places.a'     | EQUALS       | str('x')    || 'GEO_POINT'
+  }
+
+  def "an unknown path below a typed map names the value type, or warns in lenient mode"() {
+    given:
+    def lenient = QueryCompiler.of(QueryCompilerConfig.standard().withLenient(true))
+
+    expect:
+    failure { compiler.compile(where(fc('counters.a.b', EQUALS, str('x'))), typedMaps) }.message ==
+        "Unknown field 'counters.a.b' in EQUALS; the values of map 'counters' in index typed_maps are LONG, which does not map it"
+    failure { compiler.compile(where(fc('counters..b', EQUALS, str('x'))), typedMaps) }.message ==
+        "Unknown field 'counters..b' in EQUALS; index typed_maps does not map it"
+    lenient.compile(where(fc('children.k.nope', EQUALS, str('x'))), typedMaps).warnings() ==
+        ["Skipped EQUALS on unknown field 'children.k.nope'"]
+  }
+
+  def "FULL_TEXT searches typed map keys by pattern or by key"() {
+    given:
+    def options = FullTextOptions.newBuilder()
+        .addFields(FieldBoost.newBuilder().setField('notes.*').setBoost(2f))
+        .addFields(FieldBoost.newBuilder().setField('notes.summary'))
+        .addFields(FieldBoost.newBuilder().setField('children.k.items.sku'))
+        .build()
+
+    when:
+    Map query = compiler.compileQuery(where(fullText('report', options)), typedMaps)
+
+    then:
+    typedMaps.fullTextFields() == ['notes.*': 1f]
+    query.bool.must[0].bool.should.contains(
+        [nested: [path: 'children.k.items', ignore_unmapped: true, query: [multi_match: [
+            query: 'report', fields: ['children.k.items.sku'], type: 'best_fields']]]])
+    query.bool.must[0].bool.should.contains(
+        [multi_match: [query: 'report', fields: ['notes.*^2', 'notes.summary'], type: 'best_fields']])
+  }
+
+  def "sorting on a typed map key names the unmapped type"() {
+    when:
+    List sort = compiler.compile(sorted(fieldSort('counters.views'), fieldSort('notes.summary'),
+        fieldSort('due.review'), SortingCriteria.newBuilder().setGeoDistanceSort(GeoDistanceSort
+        .newBuilder().setFieldName('places.home')).build(), fieldSort('children.k.count')),
+        typedMaps).body().sort
+
+    then:
+    sort[0] == ['counters.views': [order: 'asc', unmapped_type: 'long']]
+    sort[1] == ['notes.summary.keyword': [order: 'asc', unmapped_type: 'keyword']]
+    sort[2] == ['due.review': [order: 'asc', unmapped_type: 'date']]
+    sort[3]._geo_distance.ignore_unmapped == true
+    sort[4] == ['children.k.count': [order: 'asc', unmapped_type: 'long']]
+  }
+
+  def "sorting under a typed nested map is rejected"() {
+    expect:
+    failure { compiler.compile(sorted(fieldSort('children.k.items.quantity')), typedMaps) }.message ==
+        "Cannot sort on 'children.k.items.quantity': sorting under a typed nested map is not supported"
+    failure {
+      compiler.compile(sorted(SortingCriteria.newBuilder().setGeoDistanceSort(GeoDistanceSort
+          .newBuilder().setFieldName('children.k.items.quantity')).build()), typedMaps)
+    }.message.contains('typed nested map')
+    failure { compiler.compile(sorted(fieldSort('children.k')), typedMaps) }.message.contains('OBJECT')
   }
 
   // ---- paging ------------------------------------------------------------------------------

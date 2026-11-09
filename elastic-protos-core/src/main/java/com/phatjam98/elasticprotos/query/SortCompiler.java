@@ -63,10 +63,11 @@ final class SortCompiler {
       // metadata fields such as _id, _doc or _shard_doc pass through unchanged
       return object(name, order(sort.getOrder()));
     }
-    FieldInfo field = index.fields().get(name);
+    FieldInfo field = index.resolve(name).orElse(null);
     if (field == null) {
       return unknown(name);
     }
+    rejectDynamicNested(field);
     if (!field.supportsExactMatch()) {
       throw new QueryCompileException(
           "Cannot sort on '" + name + "': it is analyzed text without a keyword sub-field; add "
@@ -82,15 +83,21 @@ final class SortCompiler {
     }
     Map<String, Object> spec = order(sort.getOrder());
     nested(spec, name);
+    if (field.isDynamic()) {
+      // a key no document has used yet is not mapped, and sorting on an unmapped field fails
+      spec.put("unmapped_type", field.exactMatchPath().equals(field.path())
+          ? kind.esType() : FieldKind.KEYWORD.esType());
+    }
     return object(field.exactMatchPath(), spec);
   }
 
   private Map<String, Object> geoDistance(GeoDistanceSort sort) {
     String name = sort.getFieldName();
-    FieldInfo field = index.fields().get(name);
+    FieldInfo field = index.resolve(name).orElse(null);
     if (field == null) {
       return unknown(name);
     }
+    rejectDynamicNested(field);
     if (field.kind() != FieldKind.GEO_POINT) {
       throw new QueryCompileException(
           "Geo distance sort needs a GEO_POINT field but '" + name + "' is mapped as "
@@ -104,6 +111,9 @@ final class SortCompiler {
     spec.put(field.path(), point);
     spec.put("unit", unit(sort.getDistanceUnit()));
     spec.put("distance_type", sort.getDistanceType().name().toLowerCase(Locale.ROOT));
+    if (field.isDynamic()) {
+      spec.put("ignore_unmapped", true);
+    }
     nested(spec, name);
     return object("_geo_distance", spec);
   }
@@ -143,6 +153,22 @@ final class SortCompiler {
     spec.put("type", sort.getSortType() == ScriptSortType.STRING ? "string" : "number");
     spec.put("script", script);
     return object("_script", spec);
+  }
+
+  /**
+   * Rejects a sort on a field inside the values of a typed map below a nested path: the engines
+   * need the nested path mapped to sort, and it is mapped only once a document uses the key.
+   */
+  private void rejectDynamicNested(FieldInfo field) {
+    if (!field.isDynamic()) {
+      return;
+    }
+    for (String nested : index.nestedAncestors(field.path())) {
+      if (index.resolve(nested).map(FieldInfo::isDynamic).orElse(false)) {
+        throw new QueryCompileException("Cannot sort on '" + field.path()
+            + "': sorting under a typed nested map is not supported", field.path());
+      }
+    }
   }
 
   private Map<String, Object> unknown(String name) {
