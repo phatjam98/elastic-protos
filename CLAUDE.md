@@ -73,9 +73,19 @@ Checkstyle, JaCoCo and Javadoc.
 ## CI (.github/workflows)
 
 - `ci.yml` (push/PR to main, reusable via `workflow_call`): `static` (checkstyle main/test/integrationTest +
-  javadoc), `unit` (`build` on JDK 17 and with `-PtestJavaVersion=21`), `integration` (ES 8.19.23, ES 9.5.5,
-  OpenSearch 2.19.7, OpenSearch 3.9.0), `coverage` (jacoco report + gates), `stage` (`stageAll`, uploads the
-  staged repo). Keep the integration matrix in step with the verified tags in the adapter build files.
+  javadoc), `unit` (`build` on JDK 17 and with `-PtestJavaVersion=21`), `unit-protobuf4` (unit tests of core,
+  both adapters and testkit with `-PprotobufRuntimeVersion=<4.x>`, which forces protobuf-java/-util to that
+  version on their `testRuntimeClasspath` only; compilation stays on 3.25, Micronaut is excluded), `integration`
+  (ES 8.19.23, ES 9.5.5, OpenSearch 2.19.7, OpenSearch 3.9.0, with `-PrequireDocker=true` so a missing Docker
+  fails instead of skipping), `coverage` (jacoco report + gates), `stage` (`stageAll verifyPublishedMetadata`,
+  uploads the staged repo). Keep the integration matrix in step with the verified tags in the adapter build files.
+- `stageAll` deletes `build/staging-deploy` first. `verifyPublishedMetadata` (root, part of `check`, so `build`
+  stages) fails when a staged `.module` has a `platform` dependency in `apiElements`/`runtimeElements`, a POM
+  imports a BOM other than our own, or a POM dependency has no version. Published modules therefore never use
+  `implementation`/`api platform(...)`: give exported dependencies explicit catalog versions (`jackson`,
+  `micronaut-core`, which must equal the micronaut-core version that `micronaut-platform` manages).
+- Every published jar carries `Automatic-Module-Name: com.phatjam98.elasticprotos.<module>` (library-conventions).
+  `util`, `engine.rest` and `query.NestedPathResolver` are internal (not public API, may change in minors).
 - `snapshot.yml` (push to main): reuses ci.yml, then `stageAll` + `jreleaserDeploy` when the version is a SNAPSHOT.
 - `release.yml` (tag `v*`, or manual dispatch with `version` and `dryrun`, default dry run): tag must match
   `vX.Y.Z` or `vX.Y.Z-rc.N` and be on `origin/main`; runs `build` and `jreleaserFullRelease` with `-Pversion`.
