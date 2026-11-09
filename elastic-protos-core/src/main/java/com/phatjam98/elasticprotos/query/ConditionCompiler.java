@@ -263,18 +263,38 @@ final class ConditionCompiler {
 
   /**
    * Returns whether every top-level alternative of a Lucene regular expression starts with a
-   * literal character, so that the engine can seek to a prefix instead of scanning every term.
-   * An escaped character counts as literal; an operator such as {@code .}, {@code [}, {@code (},
-   * {@code ~}, {@code <}, {@code #}, a quantifier or the any-string operator does not.
+   * literal character that must be present, so that the engine can seek to a prefix instead of
+   * scanning every term.
+   *
+   * <p>The first atom of each alternative must be a plain or an escaped character, not followed by
+   * {@code ?}, {@code *} or <code>{</code>, which would make it optional. An operator such as
+   * {@code .}, {@code [}, {@code (}, {@code ~}, {@code <}, {@code #}, a quantifier, the any-string
+   * operator or a predefined class ({@code \d}, {@code \s}, {@code \w} and their negations) is not
+   * a literal. A pattern with a quoted string ({@code "}) is always refused, since quotes change
+   * how the rest of the pattern is read.
    */
   static boolean startsWithLiteral(String pattern) {
+    if (pattern.indexOf('"') >= 0) {
+      return false;
+    }
     int depth = 0;
     boolean inClass = false;
     boolean branchStart = true;
     for (int i = 0; i < pattern.length(); i++) {
       char c = pattern.charAt(i);
       if (branchStart) {
-        if (c != '\\' && ".[(~@<#\"*+?{|}])&".indexOf(c) >= 0) {
+        int atomEnd;
+        if (c == '\\') {
+          if (i + 1 >= pattern.length() || "dDsSwW".indexOf(pattern.charAt(i + 1)) >= 0) {
+            return false;
+          }
+          atomEnd = i + 1;
+        } else if (".[(~@<#*+?{|}])&".indexOf(c) >= 0) {
+          return false;
+        } else {
+          atomEnd = i;
+        }
+        if (atomEnd + 1 < pattern.length() && "?*{".indexOf(pattern.charAt(atomEnd + 1)) >= 0) {
           return false;
         }
         branchStart = false;

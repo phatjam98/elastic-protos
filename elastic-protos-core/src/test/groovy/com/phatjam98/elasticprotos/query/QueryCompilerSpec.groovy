@@ -716,7 +716,8 @@ class QueryCompilerSpec extends Specification {
         .bool.filter[0] == [regexp: [firm_id: [value: pattern]]]
 
     where:
-    pattern << ['.*foo', '.+foo', '.?foo', '[a-z]+', '(a|b)c', '~a', 'f.*|.*g']
+    pattern << ['.*foo', '.+foo', '.?foo', '[a-z]+', '(a|b)c', '~a', 'f.*|.*g', 'a?.*', 'a*.*',
+                'a{0,1}.*', '\\.?.*', '\\w.*']
   }
 
   @Unroll
@@ -741,6 +742,20 @@ class QueryCompilerSpec extends Specification {
     '"quoted"'    || false
     'a|[bc]'      || false
     'a\\|b|(c)'   || false
+    'a?.*'        || false
+    'a*.*'        || false
+    'a{0,1}.*'    || false
+    '\\.?.*'      || false
+    'a"("|.*'     || false
+    'a"["|.*'     || false
+    'a"x"'        || false
+    '\\w.*'       || false
+    '\\d+'        || false
+    '\\S'         || false
+    '\\'          || false
+    '\\\\w'       || true
+    'a+.*'        || true
+    'ab?.*'       || true
   }
 
   // ---- page size ---------------------------------------------------------------------------
