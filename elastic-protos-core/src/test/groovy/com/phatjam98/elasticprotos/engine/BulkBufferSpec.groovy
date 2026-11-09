@@ -244,6 +244,25 @@ class BulkBufferSpec extends Specification {
     new IllegalStateException('boom')                               | { thrownE, f -> thrownE.cause.is(f) && thrownE.kind == EngineException.Kind.OTHER && thrownE.message.contains('1 operations failed: boom') }
   }
 
+  def "a throwing error listener does not replace the close() failure"() {
+    given:
+    def failure = new EngineException(EngineException.Kind.TRANSIENT, 429, 'busy')
+    def listenerFailure = new IllegalStateException('listener')
+    def buffer = BulkBuffer.builder().engine(engine)
+        .errorListener({ batch, error -> throw listenerFailure } as BiConsumer)
+        .build()
+    buffer.add(BulkOp.index('a', '1', [n: 1]))
+
+    when:
+    buffer.close()
+
+    then:
+    1 * engine.bulk(_) >> { throw failure }
+    def e = thrown(EngineException)
+    e.is(failure)
+    e.suppressed.toList() == [listenerFailure]
+  }
+
   def "close with a successful final flush does not throw"() {
     given:
     def buffer = BulkBuffer.builder().engine(engine).build()

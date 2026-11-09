@@ -48,6 +48,7 @@ message GeoDistanceSort {
 // Sort by a Painless script, inline or stored. Rejected unless the query compiler allows script
 // sorts (QueryCompilerConfig.allowScriptSort).
 message ScriptSort {
+  reserved "script_or_id";
   oneof script {
     // Inline Painless source, sent as _script.script.source.
     string source = 1;

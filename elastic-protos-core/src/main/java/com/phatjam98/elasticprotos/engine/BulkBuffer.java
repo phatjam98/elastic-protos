@@ -177,14 +177,21 @@ public final class BulkBuffer implements AutoCloseable {
     try {
       result = engine.bulk(batch);
     } catch (RuntimeException e) {
-      errorListener.accept(batch, e);
-      if (rethrow) {
-        throw e instanceof EngineException
-            ? (EngineException) e
-            : new EngineException(EngineException.Kind.OTHER, 0,
-                "Bulk request of " + batch.size() + " operations failed: " + e.getMessage(), e);
+      if (!rethrow) {
+        errorListener.accept(batch, e);
+        return null;
       }
-      return null;
+      EngineException failure = e instanceof EngineException
+          ? (EngineException) e
+          : new EngineException(EngineException.Kind.OTHER, 0,
+              "Bulk request of " + batch.size() + " operations failed: " + e.getMessage(), e);
+      try {
+        errorListener.accept(batch, e);
+      } catch (RuntimeException listenerFailure) {
+        // the bulk failure is what close() reports; keep the listener's own failure with it
+        failure.addSuppressed(listenerFailure);
+      }
+      throw failure;
     }
     listener.accept(result);
     return result;
