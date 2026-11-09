@@ -152,7 +152,7 @@ public final class IndexMigrator {
     this.listener = builder.listener;
     this.lock = options.lock()
         ? new AliasLock(engine, mapper.naming().lockIndex(), options.lockTtl(),
-            () -> replicasFor(options.replicas()))
+            () -> replicasFor(options.replicas()), builder.clock)
         : null;
   }
 
@@ -546,8 +546,8 @@ public final class IndexMigrator {
       }
       Outcome outcome = needsLock(item) ? applyLocked(item) : applyOne(item);
       outcomes.add(outcome);
-      if ((outcome.status() == Status.FAILED || outcome.status() == Status.LOCKED)
-          && options.failure() == FailurePolicy.FAIL_FAST) {
+      // a LOCKED item is another process's work in progress; the run goes on with the others
+      if (outcome.status() == Status.FAILED && options.failure() == FailurePolicy.FAIL_FAST) {
         LOG.info("stopping after the failure of {} (FAIL_FAST)", item.alias());
         break;
       }
@@ -595,6 +595,12 @@ public final class IndexMigrator {
       } catch (RuntimeException e) {
         return new Outcome(item, Status.FAILED, item.currentIndex(), List.of(), e);
       }
+      if (!fresh.target().contentHash().equals(item.target().contentHash())) {
+        return new Outcome(item, Status.FAILED, item.currentIndex(), List.of(),
+            new MigrationException("plan is stale: it targets hash " + item.target().contentHash()
+                + " but the mapper now maps " + item.alias() + " to "
+                + fresh.target().contentHash() + "; plan again"));
+      }
       if (fresh.action() != item.action()) {
         LOG.info("{}: planned again under the lock: {} instead of {} ({})", item.alias(),
             fresh.action(), item.action(), fresh.reason());
@@ -619,6 +625,11 @@ public final class IndexMigrator {
     } catch (LockException e) {
       throw new Interrupted(null, e);
     }
+  }
+
+  /** Returns the lease this thread holds while applying an item, or null; for tests. */
+  AliasLock.Lease currentLease() {
+    return lease.get();
   }
 
   private int replicasFor(ReplicaPolicy policy) {
@@ -735,6 +746,7 @@ public final class IndexMigrator {
         engine.updateAliases(List.of(AliasAction.remove(next, alias),
             AliasAction.add(previousIndex, alias)));
         pause(options.swapGrace());
+        guard();
         engine.setWriteBlock(next, true);
         return new Outcome(plan, Status.APPLIED, previousIndex, List.of(next), null);
       }
@@ -812,13 +824,18 @@ public final class IndexMigrator {
   private void abortRollback(String alias, String previous, Map<String, Object> meta, Pit pit,
       String next, Map<String, Object> nextMeta) {
     closeQuietly(alias, pit);
+    guard();
     try {
       writePending(next, nextMeta, null);
+    } catch (Interrupted e) {
+      throw e;
     } catch (RuntimeException e) {
       LOG.warn("{}: could not remove the rollback note from {}: {}", alias, next, e.getMessage());
     }
     try {
       writePending(previous, meta, null);
+    } catch (Interrupted e) {
+      throw e;
     } catch (RuntimeException e) {
       LOG.warn("{}: could not remove the marker from {}: {}", alias, previous, e.getMessage());
     }
@@ -1124,7 +1141,8 @@ public final class IndexMigrator {
       // a script that changes _id is caught here, before the alias moves
       createStaging(staging, to);
       try {
-        new Reconciler(engine, pitKeepAlive(), options.reindexTimeout()).probe(from, staging);
+        new Reconciler(engine, pitKeepAlive(), options.reindexTimeout(), this::guard)
+            .probe(from, staging);
       } finally {
         deleteQuietly(alias, staging.index());
       }
@@ -1143,6 +1161,7 @@ public final class IndexMigrator {
 
   /** Creates the staging index of a migration script afresh, with the mappings of {@code to}. */
   private void createStaging(Reconciler.Staging staging, String to) {
+    guard();
     if (engine.indexExists(staging.index())) {
       engine.deleteIndex(staging.index());
     }
@@ -1294,7 +1313,8 @@ public final class IndexMigrator {
    */
   private boolean reconcile(Move move, Reconciler.Counts counts) {
     String alias = move.alias();
-    Reconciler reconciler = new Reconciler(engine, pitKeepAlive(), options.reindexTimeout());
+    Reconciler reconciler = new Reconciler(engine, pitKeepAlive(), options.reindexTimeout(),
+        this::guard);
     if (move.staging() != null) {
       createStaging(move.staging(), move.to());
     }
@@ -1399,6 +1419,7 @@ public final class IndexMigrator {
   }
 
   private void deleteQuietly(String alias, String index) {
+    guard();
     try {
       if (engine.indexExists(index)) {
         engine.deleteIndex(index);
@@ -1422,6 +1443,7 @@ public final class IndexMigrator {
 
   /** Tells the listener a phase completed; its exception stops the run without cleanup. */
   private void phase(String alias, Phase phase) {
+    guard();
     try {
       listener.onPhase(alias, phase);
     } catch (MigrationListener.Abort e) {
@@ -1528,6 +1550,7 @@ public final class IndexMigrator {
       }
       LOG.warn("{}: {} is left over from an earlier attempt with hash {} instead of {};"
           + " deleting and recreating it", alias, next, hash, target.contentHash());
+      guard();
       engine.deleteIndex(next);
     }
     LOG.info("{}: creating {} for the reindex from {}", alias, next, current);
@@ -1561,6 +1584,8 @@ public final class IndexMigrator {
 
   private void undo(String alias, String current, String next, boolean createdNext,
       boolean unblock) {
+    // with the lease lost another process may be working on these indices: leave them
+    guard();
     if (unblock) {
       try {
         engine.setWriteBlock(current, false);
@@ -1599,6 +1624,7 @@ public final class IndexMigrator {
     private MigrationOptions options = MigrationOptions.standard();
     private MigrationScriptProvider scripts = MigrationScriptProvider.classpath();
     private MigrationListener listener = MigrationListener.noop();
+    private java.time.Clock clock = java.time.Clock.systemUTC();
 
     private Builder() {}
 
@@ -1632,6 +1658,12 @@ public final class IndexMigrator {
      */
     public Builder listener(MigrationListener value) {
       this.listener = Objects.requireNonNull(value);
+      return this;
+    }
+
+    /** Sets the clock the alias lock expires by; for tests. */
+    Builder clock(java.time.Clock value) {
+      this.clock = Objects.requireNonNull(value);
       return this;
     }
 

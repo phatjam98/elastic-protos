@@ -30,8 +30,11 @@ class IndexMigratorLockSpec extends Specification {
   InMemorySearchEngine engine = new InMemorySearchEngine()
   Map<Phase, Closure> on = [:]
 
+  /** The migrator built last, whose lease the listener can renew. */
+  IndexMigrator current
+
   IndexMigrator migrator(ProtoMapper mapper = DEFAULT, MigrationOptions options = LOCKED) {
-    IndexMigrator.builder().engine(engine).mapper(mapper).options(options)
+    current = IndexMigrator.builder().engine(engine).mapper(mapper).options(options)
         .listener({ alias, phase -> on[phase]?.call() } as MigrationListener).build()
   }
 
@@ -111,6 +114,30 @@ class IndexMigratorLockSpec extends Specification {
     !engine.indexExists(LOCKS)
   }
 
+  /** A clock tests move by hand. */
+  static class MutableClock extends java.time.Clock {
+    Instant now = Instant.now()
+
+    void advance(Duration by) {
+      now = now.plus(by)
+    }
+
+    @Override
+    java.time.ZoneId getZone() {
+      java.time.ZoneOffset.UTC
+    }
+
+    @Override
+    java.time.Clock withZone(java.time.ZoneId zone) {
+      this
+    }
+
+    @Override
+    Instant instant() {
+      now
+    }
+  }
+
   def "the item is planned again under the lock, so work another process finished is a NO_OP"() {
     given: 'a plan made before another process created the index'
     def plan = migrator().plan(Document)
@@ -144,7 +171,7 @@ class IndexMigratorLockSpec extends Specification {
     result.outcomes()[0].plan().action() == Action.NO_OP
   }
 
-  def "a lock held past lockWait makes the item LOCKED and stops FAIL_FAST"() {
+  def "a lock held past lockWait makes the item LOCKED, and the run goes on with the other aliases"() {
     given:
     new AliasLock(engine, LOCKS, Duration.ofMinutes(2), { 0 }).acquire('documents', 'REINDEX', 'h', Duration.ZERO)
 
@@ -153,11 +180,68 @@ class IndexMigratorLockSpec extends Specification {
 
     then:
     !result.ok()
-    result.outcomes().size() == 1
-    result.outcomes()[0].status() == MigrationResult.Status.LOCKED
+    result.outcomes()*.status() == [MigrationResult.Status.LOCKED, MigrationResult.Status.APPLIED]
     result.outcomes()[0].error() instanceof LockException
+    result.outcomes()[0].plan().action() == Action.CREATE
     result.problems().size() == 1
     !engine.indexExists('documents')
+    engine.indexExists('firms')
+  }
+
+  def "a plan made with another mapping is stale under the lock and is not applied"() {
+    given:
+    seed()
+    def plan = migrator(TITLE_KEYWORD).plan(Document)
+
+    when: 'the migrator applying it maps the message differently'
+    def result = migrator(BODY_KEYWORD).apply(plan)
+
+    then:
+    result.outcomes()[0].status() == MigrationResult.Status.FAILED
+    result.outcomes()[0].error().message.startsWith('plan is stale')
+    result.outcomes()[0].error().message.endsWith('plan again')
+    engine.indices().keySet() == [DEFAULT.map(Document).name(), LOCKS] as Set
+  }
+
+  def "a lease that could not be renewed for two thirds of the TTL stops the item before the swap"() {
+    given:
+    seed()
+    def clock = new MutableClock()
+    on[Phase.CAUGHT_UP] = { clock.advance(Duration.ofSeconds(81)) }
+    def migrator = IndexMigrator.builder().engine(engine).mapper(TITLE_KEYWORD).options(LOCKED)
+        .listener({ alias, phase -> on[phase]?.call() } as MigrationListener).clock(clock).build()
+
+    when:
+    def result = migrator.bootstrap(Document)
+
+    then: 'nothing was renewed, the lock document is still there, and still the run stops'
+    result.outcomes()[0].status() == MigrationResult.Status.FAILED
+    (result.outcomes()[0].error() as LockException).lost()
+    result.outcomes()[0].error().message.contains('no renewal succeeded since')
+    engine.indices()[DEFAULT.map(Document).name()] == ['documents'] as Set
+    !engine.documents(LOCKS).isEmpty()
+  }
+
+  def "a lost lease leaves the new index for the resume instead of cleaning it up"() {
+    given:
+    seed()
+    String v2 = TITLE_KEYWORD.map(Document).name()
+    engine.duringReindex { r ->
+      if (r.dest() == v2 && !engine.documents(v2).isEmpty()) {
+        engine.delete(LOCKS, 'documents')
+        current.currentLease().heartbeat()
+        throw new com.phatjam98.elasticprotos.engine.EngineException(
+            com.phatjam98.elasticprotos.engine.EngineException.Kind.TRANSIENT, 503, 'busy')
+      }
+    }
+
+    when: 'the catch-up fails after the lease was lost'
+    def result = migrator(TITLE_KEYWORD).bootstrap(Document)
+
+    then: 'undo is skipped: the new index stays for the next run'
+    result.outcomes()[0].status() == MigrationResult.Status.FAILED
+    result.outcomes()[0].error() instanceof LockException
+    engine.indexExists(v2)
   }
 
   def "with CONTINUE a locked alias does not stop the others"() {
@@ -176,7 +260,7 @@ class IndexMigratorLockSpec extends Specification {
     given:
     engine.createIndex(LOCKS, [:], [:], [] as Set)
     engine.index(LOCKS, 'documents', [alias: 'documents', holder: 'dead/1/deadbeef', action: 'REINDEX', hash: 'h',
-                                      acquired_at: '2026-01-01T00:00:00Z', expires_at: Instant.now().minusSeconds(1).toString()],
+                                      acquired_at: '2026-01-01T00:00:00Z', expires_at: Instant.now().minusSeconds(120).toString()],
         IndexOptions.refreshed())
 
     expect:
@@ -214,13 +298,13 @@ class IndexMigratorLockSpec extends Specification {
     on[Phase.SNAPSHOT] = {
       // the lock is taken over while the copy ran; the next heartbeat notices
       engine.index(LOCKS, 'documents', [alias: 'documents', holder: 'other/2/cafebabe', action: 'REINDEX', hash: 'h',
-                                        acquired_at: Instant.now().toString(), expires_at: Instant.now().minusSeconds(1).toString()],
+                                        acquired_at: Instant.now().toString(), expires_at: Instant.now().minusSeconds(120).toString()],
           IndexOptions.refreshed())
-      sleep(800)
+      current.currentLease().heartbeat()
     }
 
     when:
-    def result = migrator(TITLE_KEYWORD, LOCKED.withLockTtl(Duration.ofSeconds(1))).bootstrap(Document)
+    def result = migrator(TITLE_KEYWORD, LOCKED).bootstrap(Document)
 
     then:
     result.outcomes()[0].status() == MigrationResult.Status.FAILED
@@ -249,11 +333,11 @@ class IndexMigratorLockSpec extends Specification {
     String v2 = TITLE_KEYWORD.map(Document).name()
     on[Phase.SWAPPED] = {
       engine.delete(LOCKS, 'documents')
-      sleep(800)
+      current.currentLease().heartbeat()
     }
 
     when:
-    def result = migrator(TITLE_KEYWORD, LOCKED.withLockTtl(Duration.ofSeconds(1))).bootstrap(Document)
+    def result = migrator(TITLE_KEYWORD, LOCKED).bootstrap(Document)
 
     then:
     result.outcomes()[0].status() == MigrationResult.Status.FAILED
@@ -298,10 +382,10 @@ class IndexMigratorLockSpec extends Specification {
     seed()
     def plan = migrator(TITLE_KEYWORD).plan(Document)
     migrator(TITLE_KEYWORD).apply(plan)
-    on[Phase.COPIED] = { engine.delete(LOCKS, 'documents'); sleep(800) }
+    on[Phase.COPIED] = { engine.delete(LOCKS, 'documents'); current.currentLease().heartbeat() }
 
     when:
-    def outcome = migrator(TITLE_KEYWORD, LOCKED.withLockTtl(Duration.ofSeconds(1))).rollback(plan.items()[0], plan.items()[0].currentIndex(), RollbackMode.REVERSE_DELTA)
+    def outcome = migrator(TITLE_KEYWORD, LOCKED).rollback(plan.items()[0], plan.items()[0].currentIndex(), RollbackMode.REVERSE_DELTA)
 
     then:
     outcome.status() == MigrationResult.Status.FAILED

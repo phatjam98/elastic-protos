@@ -734,13 +734,30 @@ changes anything, so one instance does the work and the others wait and then fin
   sees the alias already migrated (`NO_OP`, `SKIPPED`), or picks up what a crashed holder left
   (the `pending` marker of a [zero-downtime reindex](#zero-downtime-reindex) or a backfill).
 - An instance waits up to `lockWait` (default 10 minutes; `Duration.ZERO` fails at once); after
-  that the item is `LOCKED` (not ok) with a `LockException` naming the holder. `NO_OP` and
-  `BLOCKED` items take no lock.
+  that the item is `LOCKED` (not ok) with a `LockException` naming the holder, and the run goes on
+  with the other aliases even under `FAIL_FAST`. `NO_OP` and `BLOCKED` items take no lock. A plan
+  whose target hash differs from the plan made under the lock (the mapper changed in between) is
+  `FAILED` with "plan is stale: plan again". `Outcome.plan()` is the fresh plan when it was
+  applied, and the original item otherwise.
+- An expired lock is taken over only a third of `lockTtl` after its `expires_at`, as an allowance
+  for clock skew.
 - Before every step that cannot be taken back (alias swaps, write blocks, mapping and `_meta`
   updates, deleting the old index) the lease is checked. A lease found lost (taken over, or the
   document deleted, typically after the holder could not reach the cluster for longer than
   `lockTtl`) stops the item without cleanup (`FAILED` with a `LockException`), and the next run
-  resumes from the marker. `rollback` takes the same lock.
+  resumes from the marker. A lease is also treated as lost once two thirds of `lockTtl` have
+  passed since its last successful write was sent, whatever the renewals report, so a holder cut
+  off from the cluster stops before anyone can take over. Failed cleanups, the staging index and
+  long copies check the lease too. `rollback` takes the same lock.
+- The check is check-then-act, without fencing tokens: a lease can be lost between a check and the
+  engine call that follows it (request latency plus up to a third of `lockTtl`).
+- The lock coordinates migrators only. It does not protect against application writers going
+  through the alias (the zero-downtime reindex handles those), external tools changing the
+  indices, or migrators running with `lock(false)`.
+- The lock index takes its replica count from `replicas` (possibly 0); while it is red, every item
+  fails. Deleting it while instances run can let a lock write auto-create it with dynamic
+  mappings; the migrator then logs a warning, and the index should be deleted again when nothing
+  migrates.
 - Clocks of the instances must agree to well within `lockTtl`: expiry compares the holder's
   `expires_at` with the reader's clock.
 - Make `lockWait` fit your startup budget: an instance waiting for another one's reindex is not

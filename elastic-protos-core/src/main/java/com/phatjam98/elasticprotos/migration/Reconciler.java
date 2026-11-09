@@ -48,8 +48,15 @@ final class Reconciler {
   private final Duration keepAlive;
   private final Duration timeout;
   private final List<Object> sort;
+  private final Runnable guard;
 
-  Reconciler(SearchEngine engine, Duration keepAlive, Duration timeout) {
+  /**
+   * Creates a reconciler.
+   *
+   * @param guard run before every page is written; throws to stop, for a lost alias lock
+   */
+  Reconciler(SearchEngine engine, Duration keepAlive, Duration timeout, Runnable guard) {
+    this.guard = guard;
     this.engine = engine;
     this.keepAlive = keepAlive;
     this.timeout = timeout;
@@ -353,6 +360,7 @@ final class Reconciler {
     if (ops.isEmpty()) {
       return;
     }
+    guard.run();
     BulkResult result = engine.bulk(ops);
     List<BulkResult.Item> failed = new ArrayList<>();
     for (BulkResult.Item item : result.items()) {

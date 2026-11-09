@@ -899,31 +899,43 @@ abstract class EngineIntegrationSpec extends Specification {
 
   // ------------------------------------------------------------------ concurrent bootstrap
 
-  def "two processes bootstrapping a new alias at once: one creates it, the other finds it done"() {
-    given:
-    def lkMapper = ProtoMapper.builder().naming(IndexNamingStrategy.prefixed(prefix + '-lk')).build()
-    String locks = lkMapper.naming().lockIndex()
-    def start = new java.util.concurrent.CountDownLatch(1)
-    def results = Collections.synchronizedList([])
-    def threads = (1..2).collect {
-      Thread.start {
-        def migrator = IndexMigrator.builder().engine(engine).mapper(lkMapper).build()
-        start.await()
-        results << migrator.bootstrap(Document)
+  def "a second process waits for the lock while the first migrates, then re-plans to NO_OP"() {
+    given: 'an alias under -lk with the sample set, and a mapper that backfills a keyword sub-field'
+    def plain = ProtoMapper.builder().naming(IndexNamingStrategy.prefixed(prefix + '-lk')).build()
+    def withKeyword = ProtoMapper.builder().naming(IndexNamingStrategy.prefixed(prefix + '-lk'))
+        .overrides(MappingOverrides.builder().forField(Document.descriptor, 'body') { it.setKeywordSubfield(Bool3.TRUE) }.build())
+        .build()
+    indexSampleDocuments(plain)
+    String locks = plain.naming().lockIndex()
+    def leaderHolds = new java.util.concurrent.CountDownLatch(1)
+    def release = new java.util.concurrent.CountDownLatch(1)
+    def leader = IndexMigrator.builder().engine(engine).mapper(withKeyword).listener({ a, phase ->
+      if (phase == Phase.BACKFILL_MARKED) {
+        leaderHolds.countDown()
+        release.await()
       }
-    }
+    } as MigrationListener).build()
+    def follower = IndexMigrator.builder().engine(engine).mapper(withKeyword).build()
+    def results = [:].asSynchronized()
 
-    when:
-    start.countDown()
-    threads*.join(120_000)
+    when: 'the leader takes the lock and stops inside its backfill'
+    def leaderThread = Thread.start { results.leader = leader.bootstrap(Document) }
+    assert leaderHolds.await(60, java.util.concurrent.TimeUnit.SECONDS)
+    def followerThread = Thread.start { results.follower = follower.bootstrap(Document) }
+    followerThread.join(3000)
+    boolean followerWaited = followerThread.isAlive()
+    release.countDown()
+    leaderThread.join(120_000)
+    followerThread.join(120_000)
     engine.refresh(locks)
 
-    then:
-    results.size() == 2
-    results.every { it.ok() }
-    results.collect { it.outcomes()[0].plan().action() }.sort() == [Action.CREATE, Action.NO_OP]
-    results.collect { it.outcomes()[0].status() }.sort() == [MigrationResult.Status.APPLIED, MigrationResult.Status.SKIPPED]
-    engine.getAliases(lkMapper.map(Document).alias()).keySet() == [lkMapper.map(Document).name()] as Set
+    then: 'the follower planned the backfill too, waited, and found it done under the lock'
+    followerWaited
+    results.leader.ok()
+    results.leader.outcomes()[0].plan().action() == Action.BACKFILL
+    results.follower.ok()
+    results.follower.outcomes()[0].plan().action() == Action.NO_OP
+    results.follower.outcomes()[0].status() == MigrationResult.Status.SKIPPED
     count(locks) == 0
     engine.getMappings(locks).dynamic == 'strict'
   }
@@ -934,7 +946,7 @@ abstract class EngineIntegrationSpec extends Specification {
     String locks = lkMapper.naming().lockIndex()
     String alias = lkMapper.map(Firm).alias()
     engine.index(locks, alias, [alias: alias, holder: 'dead-host/1/deadbeef', action: 'CREATE', hash: 'x',
-                                acquired_at: '2026-01-01T00:00:00Z', expires_at: Instant.now().minusSeconds(60).toString()],
+                                acquired_at: '2026-01-01T00:00:00Z', expires_at: Instant.now().minusSeconds(300).toString()],
         IndexOptions.refreshed())
 
     when:

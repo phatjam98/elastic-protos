@@ -45,7 +45,9 @@ public record MigrationResult(List<Outcome> outcomes) {
   /**
    * The outcome of one item.
    *
-   * @param plan the item
+   * @param plan the item: with the alias lock, the plan made again under the lock when it was
+   *     applied, and the original item when the lock could not be taken or the fresh plan was
+   *     stale
    * @param status how it ended
    * @param index the concrete index behind the alias afterwards (or that would be, for a dry run)
    * @param retainedIndices old indices kept write-blocked after a reindex
