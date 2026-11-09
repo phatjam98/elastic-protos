@@ -13,11 +13,12 @@ import java.util.List;
  * @param removed fields present only in the current mappings
  * @param typeChanged fields whose type differs, including object versus nested
  * @param paramChanged mapping parameters that differ on fields present in both
- * @param settingsChanged whether a desired setting other than shard and replica counts differs
+ * @param settingsChanged whether a setting the proto declares differs (dynamic or static)
  * @param unindexedAdditions the subset of {@code added} that existing documents were never indexed
  *     into: a multi-field added under an existing field, or a typed property added under an object
  *     whose current mapping is dynamic. Putting the mapping would leave them empty for every old
  *     document, so they are backfilled with an update by query, or reindexed
+ * @param settings the differing index settings, split into dynamic and static ones
  */
 public record MappingDiff(
     List<Change> added,
@@ -25,15 +26,38 @@ public record MappingDiff(
     List<Change> typeChanged,
     List<Change> paramChanged,
     boolean settingsChanged,
-    List<Change> unindexedAdditions) {
+    List<Change> unindexedAdditions,
+    SettingsDiff settings) {
 
   /** Copies the lists. */
   public MappingDiff {
+    settings = settings == null ? SettingsDiff.empty() : settings;
     added = List.copyOf(added);
     removed = List.copyOf(removed);
     typeChanged = List.copyOf(typeChanged);
     paramChanged = List.copyOf(paramChanged);
     unindexedAdditions = List.copyOf(unindexedAdditions);
+  }
+
+  /**
+   * Creates a diff without a settings breakdown.
+   *
+   * @param added fields present only in the desired mappings
+   * @param removed fields present only in the current mappings
+   * @param typeChanged fields whose type differs
+   * @param paramChanged mapping parameters that differ
+   * @param settingsChanged whether a compared setting differs
+   * @param unindexedAdditions additions existing documents were never indexed into
+   */
+  public MappingDiff(
+      List<Change> added,
+      List<Change> removed,
+      List<Change> typeChanged,
+      List<Change> paramChanged,
+      boolean settingsChanged,
+      List<Change> unindexedAdditions) {
+    this(added, removed, typeChanged, paramChanged, settingsChanged, unindexedAdditions,
+        SettingsDiff.empty());
   }
 
   /**
@@ -51,7 +75,8 @@ public record MappingDiff(
       List<Change> typeChanged,
       List<Change> paramChanged,
       boolean settingsChanged) {
-    this(added, removed, typeChanged, paramChanged, settingsChanged, List.of());
+    this(added, removed, typeChanged, paramChanged, settingsChanged, List.of(),
+        SettingsDiff.empty());
   }
 
   /**

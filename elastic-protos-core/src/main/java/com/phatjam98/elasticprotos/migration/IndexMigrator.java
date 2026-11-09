@@ -210,6 +210,7 @@ public final class IndexMigrator {
     switch (plan.action()) {
       case NO_OP:
       case PUT_MAPPING:
+      case UPDATE_SETTINGS:
       case BACKFILL:
       case REINDEX:
         if (plan.action() == Action.REINDEX && !copiedLive) {
@@ -318,12 +319,17 @@ public final class IndexMigrator {
       Map<String, Object> mappings, Map<String, Object> settings) {
     final String currentHash = recordedHash(mappings);
     MappingDiff diff = DiffClassifier.diff(mappings, target.mappings(), settings,
-        target.settings());
-    List<String> warnings = new ArrayList<>(
-        DiffClassifier.settingsWarnings(settings, target.settings()));
-    if (diff.settingsChanged()) {
-      warnings.add("settings differ; not applied");
+        target.settings(), options.extraDynamicSettings());
+    SettingsDiff settingsDiff = diff.settings();
+    List<String> warnings = new ArrayList<>(DiffClassifier.managedWarnings(settingsDiff));
+    boolean staticReindex = !settingsDiff.staticChanges().isEmpty()
+        && options.staticSettings() == StaticSettingsPolicy.REINDEX;
+    if (!settingsDiff.staticChanges().isEmpty() && !staticReindex) {
+      warnings.add(DiffClassifier.staticWarning(settingsDiff));
     }
+    String staticReason = "static settings changed: "
+        + SettingsDiff.describe(settingsDiff.staticChanges());
+    String dynamicReason = SettingsDiff.describe(settingsDiff.dynamicChanges());
     if (!diff.removed().isEmpty()) {
       warnings.add("fields no longer in the proto: " + paths(diff.removed())
           + (options.removedFields() == RemovedFieldPolicy.KEEP ? " (kept in the mapping)" : ""));
@@ -339,11 +345,16 @@ public final class IndexMigrator {
     }
 
     boolean upToDate = target.contentHash().equals(currentHash);
-    if ((upToDate || current.equals(target.name())) && !diff.hasFieldChanges()) {
-      return new IndexPlan(target, Action.NO_OP, current, currentHash, diff,
-          upToDate ? upToDate(currentHash) : "index " + current + " is up to date", warnings);
+    Action action = (upToDate || current.equals(target.name())) && !diff.hasFieldChanges()
+        ? Action.NO_OP : DiffClassifier.classify(diff, options.removedFields());
+    if (staticReindex) {
+      action = Action.REINDEX;
+    } else if (action == Action.NO_OP && !settingsDiff.dynamicChanges().isEmpty()) {
+      return new IndexPlan(target, Action.UPDATE_SETTINGS, current, currentHash, diff,
+          "dynamic settings changed: " + dynamicReason, warnings);
     }
-    Action action = DiffClassifier.classify(diff, options.removedFields());
+    String settingsFirst = settingsDiff.dynamicChanges().isEmpty() ? ""
+        : "; dynamic settings are updated first: " + dynamicReason;
     String instead = "";
     if (action == Action.BACKFILL) {
       String fromHash = currentHash == null ? LEGACY_HASH : currentHash;
@@ -359,18 +370,24 @@ public final class IndexMigrator {
     switch (action) {
       case NO_OP:
         return new IndexPlan(target, action, current, currentHash, diff,
-            upToDate ? upToDate(currentHash) : "mappings of " + current + " already match",
+            upToDate ? upToDate(currentHash)
+                : diff.hasFieldChanges() ? "mappings of " + current + " already match"
+                    : "index " + current + " is up to date",
             warnings);
       case PUT_MAPPING:
         return new IndexPlan(target, action, current, currentHash, diff,
-            "compatible change: added " + paths(diff.added()), warnings);
+            "compatible change: added " + paths(diff.added()) + settingsFirst, warnings);
       case BACKFILL:
         return new IndexPlan(target, action, current, currentHash, diff,
             "added " + paths(diff.unindexedAdditions()) + ", which existing documents were never"
-                + " indexed into: the mapping is extended in place and the documents re-indexed",
+                + " indexed into: the mapping is extended in place and the documents re-indexed"
+                + settingsFirst,
             warnings);
       default:
         String breaking = describeBreaking(diff) + instead;
+        if (!settingsDiff.staticChanges().isEmpty() && staticReindex) {
+          breaking = breaking.isEmpty() ? staticReason : breaking + "; " + staticReason;
+        }
         if (!options.allowReindex()) {
           return new IndexPlan(target, Action.BLOCKED, current, currentHash, diff,
               "breaking change needs a reindex but allowReindex is false: " + breaking,
@@ -383,7 +400,7 @@ public final class IndexMigrator {
               String.join("; ", skipped) + ", and no free generation of " + target.name()
                   + " was found: " + breaking, warnings);
         }
-        String reason = "breaking change: " + breaking;
+        String reason = (diff.hasFieldChanges() ? "breaking change: " : "") + breaking;
         if (!skipped.isEmpty()) {
           reason += "; " + String.join("; ", skipped) + ", so the new index is " + next;
         }
@@ -830,12 +847,17 @@ public final class IndexMigrator {
         case PUT_MAPPING:
           LOG.info("{}: adding fields {} to {}", item.alias(), paths(item.diff().added()),
               item.currentIndex());
+          updateSettings(item);
           guard();
           engine.putMappings(item.currentIndex(), item.target().mappings());
           clearStaleWriteBlock(item);
           return new Outcome(item, Status.APPLIED, item.currentIndex(), List.of(), null);
         case BACKFILL:
           return backfill(item);
+        case UPDATE_SETTINGS:
+          clearStaleWriteBlock(item);
+          updateSettings(item);
+          return new Outcome(item, Status.APPLIED, item.currentIndex(), List.of(), null);
         case REINDEX:
           return reindex(item);
         case BLOCKED:
@@ -871,6 +893,18 @@ public final class IndexMigrator {
     return new Outcome(item, Status.FAILED, index, List.of(), new MigrationException(
         item.alias() + ": stopped by the listener after " + e.phase + ": "
             + e.getCause().getMessage(), e.getCause()));
+  }
+
+  /** Applies the dynamic settings of an item to its current index, when there are any. */
+  private void updateSettings(IndexPlan item) {
+    SettingsDiff settings = item.diff().settings();
+    if (settings.dynamicChanges().isEmpty()) {
+      return;
+    }
+    LOG.info("{}: updating settings of {}: {}", item.alias(), item.currentIndex(),
+        SettingsDiff.describe(settings.dynamicChanges()));
+    guard();
+    engine.putSettings(item.currentIndex(), settings.dynamicValues());
   }
 
   private boolean clearStaleWriteBlock(IndexPlan item) {
@@ -1425,6 +1459,7 @@ public final class IndexMigrator {
     pending.put("to_hash", target.contentHash());
     Map<String, Object> mappings = new TreeMap<>(target.mappings());
     mappings.put("_meta", withPending(meta, pending));
+    updateSettings(item);
     LOG.info("{}: adding {} to {} and backfilling its documents", alias,
         paths(item.diff().unindexedAdditions()), current);
     guard();
@@ -1477,6 +1512,13 @@ public final class IndexMigrator {
       if (!reusePending && !pendingOf(leftover).isEmpty()) {
         LOG.warn("{}: {} carries the marker of an interrupted zero-downtime reindex; deleting and"
             + " recreating it for the blocking reindex", alias, next);
+        hash = null;
+      }
+      if (target.contentHash().equals(hash) && !DiffClassifier.settingsDiff(
+          engine.getSettings(next), target.settings(), options.extraDynamicSettings())
+          .staticChanges().isEmpty()) {
+        LOG.warn("{}: {} is left over with other static settings; deleting and recreating it",
+            alias, next);
         hash = null;
       }
       if (target.contentHash().equals(hash)) {

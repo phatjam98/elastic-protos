@@ -2,6 +2,8 @@ package com.phatjam98.elasticprotos.migration;
 
 import java.time.Duration;
 import java.util.Objects;
+import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * Settings for {@link IndexMigrator}.
@@ -62,6 +64,11 @@ import java.util.Objects;
  *   <li>{@code lockTtl}: how long a lock lives without a heartbeat (the holder renews it every
  *       third of it); a lock older than that is taken over; default two minutes, at least one
  *       second
+ *   <li>{@code staticSettings}: what to do when static index settings the proto declares differ
+ *       ({@code number_of_shards}, {@code analysis.*}, ...); default {@link
+ *       StaticSettingsPolicy#WARN}. Dynamic settings are always applied in place
+ *   <li>{@code extraDynamicSettings}: setting keys (without {@code index.}) to treat as dynamic in
+ *       addition to {@link DiffClassifier#DYNAMIC_SETTINGS}; default none
  * </ul>
  *
  * <p>Null settings throw {@link NullPointerException}; a shard count below 1 or a timeout that is
@@ -88,6 +95,8 @@ public final class MigrationOptions {
   private final boolean lock;
   private final Duration lockWait;
   private final Duration lockTtl;
+  private final StaticSettingsPolicy staticSettings;
+  private final Set<String> extraDynamicSettings;
   private final DegradedReconcile degradedReconcile;
 
   private MigrationOptions(Builder builder) {
@@ -103,6 +112,8 @@ public final class MigrationOptions {
     }
     Objects.requireNonNull(builder.lockWait, "lockWait");
     Objects.requireNonNull(builder.lockTtl, "lockTtl");
+    Objects.requireNonNull(builder.staticSettings, "staticSettings");
+    Objects.requireNonNull(builder.extraDynamicSettings, "extraDynamicSettings");
     if (builder.lockWait.isNegative()) {
       throw new IllegalArgumentException("lockWait must not be negative: " + builder.lockWait);
     }
@@ -134,6 +145,8 @@ public final class MigrationOptions {
     this.lock = builder.lock;
     this.lockWait = builder.lockWait;
     this.lockTtl = builder.lockTtl;
+    this.staticSettings = builder.staticSettings;
+    this.extraDynamicSettings = Set.copyOf(new TreeSet<>(builder.extraDynamicSettings));
   }
 
   /**
@@ -236,6 +249,16 @@ public final class MigrationOptions {
     return lockTtl;
   }
 
+  /** Returns what to do when static index settings differ. */
+  public StaticSettingsPolicy staticSettings() {
+    return staticSettings;
+  }
+
+  /** Returns the setting keys treated as dynamic in addition to the built-in list. */
+  public Set<String> extraDynamicSettings() {
+    return extraDynamicSettings;
+  }
+
   /** Returns a copy with another failure policy. */
   public MigrationOptions withFailure(FailurePolicy value) {
     return toBuilder().failure(value).build();
@@ -316,6 +339,16 @@ public final class MigrationOptions {
     return toBuilder().lockTtl(value).build();
   }
 
+  /** Returns a copy with another static settings policy. */
+  public MigrationOptions withStaticSettings(StaticSettingsPolicy value) {
+    return toBuilder().staticSettings(value).build();
+  }
+
+  /** Returns a copy with other extra dynamic setting keys. */
+  public MigrationOptions withExtraDynamicSettings(Set<String> value) {
+    return toBuilder().extraDynamicSettings(value).build();
+  }
+
   @Override
   public boolean equals(Object other) {
     return other instanceof MigrationOptions that
@@ -334,14 +367,16 @@ public final class MigrationOptions {
         && degradedReconcile == that.degradedReconcile
         && lock == that.lock
         && lockWait.equals(that.lockWait)
-        && lockTtl.equals(that.lockTtl);
+        && lockTtl.equals(that.lockTtl)
+        && staticSettings == that.staticSettings
+        && extraDynamicSettings.equals(that.extraDynamicSettings);
   }
 
   @Override
   public int hashCode() {
     return Objects.hash(failure, allowReindex, deleteOldAfter, removedFields, defaultShards,
         replicas, reindexTimeout, dryRun, clearStaleWriteBlock, reindexMode, swapGrace, backfill,
-        degradedReconcile, lock, lockWait, lockTtl);
+        degradedReconcile, lock, lockWait, lockTtl, staticSettings, extraDynamicSettings);
   }
 
   @Override
@@ -361,7 +396,9 @@ public final class MigrationOptions {
         + ", degradedReconcile=" + degradedReconcile
         + ", lock=" + lock
         + ", lockWait=" + lockWait
-        + ", lockTtl=" + lockTtl + "]";
+        + ", lockTtl=" + lockTtl
+        + ", staticSettings=" + staticSettings
+        + ", extraDynamicSettings=" + new TreeSet<>(extraDynamicSettings) + "]";
   }
 
   /** Builds {@link MigrationOptions}; starts from the {@link #standard()} options. */
@@ -382,6 +419,8 @@ public final class MigrationOptions {
     private boolean lock = true;
     private Duration lockWait = Duration.ofMinutes(10);
     private Duration lockTtl = Duration.ofMinutes(2);
+    private StaticSettingsPolicy staticSettings = StaticSettingsPolicy.WARN;
+    private Set<String> extraDynamicSettings = Set.of();
     private DegradedReconcile degradedReconcile = DegradedReconcile.REPORT;
 
     private Builder() {}
@@ -403,6 +442,8 @@ public final class MigrationOptions {
       this.lock = options.lock;
       this.lockWait = options.lockWait;
       this.lockTtl = options.lockTtl;
+      this.staticSettings = options.staticSettings;
+      this.extraDynamicSettings = options.extraDynamicSettings;
     }
 
     /** Sets what to do after an index fails to migrate; default FAIL_FAST. */
@@ -501,6 +542,18 @@ public final class MigrationOptions {
     /** Sets how long a lock lives without a heartbeat; default two minutes. */
     public Builder lockTtl(Duration value) {
       this.lockTtl = value;
+      return this;
+    }
+
+    /** Sets what to do when static index settings differ; default WARN. */
+    public Builder staticSettings(StaticSettingsPolicy value) {
+      this.staticSettings = value;
+      return this;
+    }
+
+    /** Sets setting keys (without {@code index.}) to treat as dynamic; default none. */
+    public Builder extraDynamicSettings(Set<String> value) {
+      this.extraDynamicSettings = value;
       return this;
     }
 

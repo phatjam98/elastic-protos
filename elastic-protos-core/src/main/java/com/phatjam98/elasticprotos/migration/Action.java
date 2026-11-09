@@ -9,6 +9,11 @@ public enum Action {
   /** Only fields were added: extend the mapping of the current index in place. */
   PUT_MAPPING,
   /**
+   * Only dynamic index settings the proto declares differ: update them in place with {@code PUT
+   * /<index>/_settings}.
+   */
+  UPDATE_SETTINGS,
+  /**
    * Fields were added that existing documents were never indexed into (a multi-field under an
    * existing field, or a typed property under a dynamic object): extend the mapping in place, then
    * re-index every document of the current index into it with an update by query.
