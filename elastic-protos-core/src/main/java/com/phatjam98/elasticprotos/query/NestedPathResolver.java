@@ -26,6 +26,9 @@ import java.util.TreeMap;
  * group made only of negated clauses is not combined: each stays a {@code must_not} of its own
  * {@code nested} query, meaning "no element matches". Groups with different innermost paths are
  * wrapped independently, even when one path is inside the other.
+ *
+ * <p>Internal: this class is an implementation detail of {@link QueryCompiler}, is not part of the
+ * public API and may change in a minor release.
  */
 public final class NestedPathResolver {
 
