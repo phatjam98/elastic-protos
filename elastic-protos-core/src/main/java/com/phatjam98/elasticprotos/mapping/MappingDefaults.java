@@ -17,6 +17,11 @@ import com.phatjam98.elasticprotos.proto.DynamicMode;
  * @param repeatedMessage how a repeated message field is mapped ({@code OBJECT} or {@code NESTED})
  * @param structKind how {@code google.protobuf.Struct} and friends are mapped ({@code FLATTENED} or
  *     {@code OBJECT})
+ * @param maxNestedFields the most {@code nested} fields a mapping may have, as the engines'
+ *     {@code index.mapping.nested_fields.limit} (default 50); 0 disables the check
+ * @param maxTotalFields the most fields a mapping may have, counted like the engines' {@code
+ *     index.mapping.total_fields.limit} (default 1000): every mapped field, including object and
+ *     nested containers and multi-fields; 0 disables the check
  */
 public record MappingDefaults(
     boolean stringsAsText,
@@ -27,9 +32,20 @@ public record MappingDefaults(
     DynamicMode dynamic,
     FieldKind singularMessage,
     FieldKind repeatedMessage,
-    FieldKind structKind) {
+    FieldKind structKind,
+    int maxNestedFields,
+    int maxTotalFields) {
 
-  /** The standard defaults: keyword strings, object singulars, nested repeateds, strict dynamic. */
+  /** The engines' default {@code index.mapping.nested_fields.limit}. */
+  public static final int DEFAULT_MAX_NESTED_FIELDS = 50;
+
+  /** The engines' default {@code index.mapping.total_fields.limit}. */
+  public static final int DEFAULT_MAX_TOTAL_FIELDS = 1000;
+
+  /**
+   * The standard defaults: keyword strings, object singulars, nested repeateds, strict dynamic,
+   * and the engines' default field limits.
+   */
   public static MappingDefaults standard() {
     return new MappingDefaults(
         false,
@@ -40,60 +56,74 @@ public record MappingDefaults(
         DynamicMode.DYNAMIC_STRICT,
         FieldKind.OBJECT,
         FieldKind.NESTED,
-        FieldKind.FLATTENED);
+        FieldKind.FLATTENED,
+        DEFAULT_MAX_NESTED_FIELDS,
+        DEFAULT_MAX_TOTAL_FIELDS);
   }
 
   /** Returns a copy with {@code stringsAsText} changed. */
   public MappingDefaults withStringsAsText(boolean value) {
     return new MappingDefaults(value, keywordSubfield, ignoreAbove, dateFormat, maxDepth,
-        dynamic, singularMessage, repeatedMessage, structKind);
+        dynamic, singularMessage, repeatedMessage, structKind, maxNestedFields, maxTotalFields);
   }
 
   /** Returns a copy with {@code keywordSubfield} changed. */
   public MappingDefaults withKeywordSubfield(boolean value) {
     return new MappingDefaults(stringsAsText, value, ignoreAbove, dateFormat, maxDepth,
-        dynamic, singularMessage, repeatedMessage, structKind);
+        dynamic, singularMessage, repeatedMessage, structKind, maxNestedFields, maxTotalFields);
   }
 
   /** Returns a copy with {@code ignoreAbove} changed. */
   public MappingDefaults withIgnoreAbove(int value) {
     return new MappingDefaults(stringsAsText, keywordSubfield, value, dateFormat, maxDepth,
-        dynamic, singularMessage, repeatedMessage, structKind);
+        dynamic, singularMessage, repeatedMessage, structKind, maxNestedFields, maxTotalFields);
   }
 
   /** Returns a copy with {@code dateFormat} changed. */
   public MappingDefaults withDateFormat(String value) {
     return new MappingDefaults(stringsAsText, keywordSubfield, ignoreAbove, value, maxDepth,
-        dynamic, singularMessage, repeatedMessage, structKind);
+        dynamic, singularMessage, repeatedMessage, structKind, maxNestedFields, maxTotalFields);
   }
 
   /** Returns a copy with {@code maxDepth} changed. */
   public MappingDefaults withMaxDepth(int value) {
     return new MappingDefaults(stringsAsText, keywordSubfield, ignoreAbove, dateFormat, value,
-        dynamic, singularMessage, repeatedMessage, structKind);
+        dynamic, singularMessage, repeatedMessage, structKind, maxNestedFields, maxTotalFields);
   }
 
   /** Returns a copy with {@code dynamic} changed. */
   public MappingDefaults withDynamic(DynamicMode value) {
     return new MappingDefaults(stringsAsText, keywordSubfield, ignoreAbove, dateFormat, maxDepth,
-        value, singularMessage, repeatedMessage, structKind);
+        value, singularMessage, repeatedMessage, structKind, maxNestedFields, maxTotalFields);
   }
 
   /** Returns a copy with {@code singularMessage} changed. */
   public MappingDefaults withSingularMessage(FieldKind value) {
     return new MappingDefaults(stringsAsText, keywordSubfield, ignoreAbove, dateFormat, maxDepth,
-        dynamic, value, repeatedMessage, structKind);
+        dynamic, value, repeatedMessage, structKind, maxNestedFields, maxTotalFields);
   }
 
   /** Returns a copy with {@code repeatedMessage} changed. */
   public MappingDefaults withRepeatedMessage(FieldKind value) {
     return new MappingDefaults(stringsAsText, keywordSubfield, ignoreAbove, dateFormat, maxDepth,
-        dynamic, singularMessage, value, structKind);
+        dynamic, singularMessage, value, structKind, maxNestedFields, maxTotalFields);
   }
 
   /** Returns a copy with {@code structKind} changed. */
   public MappingDefaults withStructKind(FieldKind value) {
     return new MappingDefaults(stringsAsText, keywordSubfield, ignoreAbove, dateFormat, maxDepth,
-        dynamic, singularMessage, repeatedMessage, value);
+        dynamic, singularMessage, repeatedMessage, value, maxNestedFields, maxTotalFields);
+  }
+
+  /** Returns a copy with {@code maxNestedFields} changed; 0 disables the check. */
+  public MappingDefaults withMaxNestedFields(int value) {
+    return new MappingDefaults(stringsAsText, keywordSubfield, ignoreAbove, dateFormat, maxDepth,
+        dynamic, singularMessage, repeatedMessage, structKind, value, maxTotalFields);
+  }
+
+  /** Returns a copy with {@code maxTotalFields} changed; 0 disables the check. */
+  public MappingDefaults withMaxTotalFields(int value) {
+    return new MappingDefaults(stringsAsText, keywordSubfield, ignoreAbove, dateFormat, maxDepth,
+        dynamic, singularMessage, repeatedMessage, structKind, maxNestedFields, value);
   }
 }

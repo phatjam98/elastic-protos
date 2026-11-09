@@ -1,5 +1,10 @@
 package com.phatjam98.elasticprotos.mapping
 
+import com.google.protobuf.DescriptorProtos.DescriptorProto
+import com.google.protobuf.DescriptorProtos.FieldDescriptorProto
+import com.google.protobuf.DescriptorProtos.FileDescriptorProto
+import com.google.protobuf.Descriptors.Descriptor
+import com.google.protobuf.Descriptors.FileDescriptor
 import com.phatjam98.elasticprotos.Golden
 import com.phatjam98.elasticprotos.proto.DynamicMode
 import com.phatjam98.elasticprotos.proto.EsType
@@ -525,5 +530,151 @@ class ProtoMapperSpec extends Specification {
 
     then:
     thrown(IllegalArgumentException)
+  }
+
+  // ------------------------------------------------------------------ field limits
+
+  /**
+   * Builds, at runtime, a message {@code Wide} with {@code scalars} string fields and {@code nested}
+   * repeated {@code Item} fields, each Item holding one string.
+   */
+  static Descriptor wide(int scalars, int nested) {
+    def item = DescriptorProto.newBuilder().setName('Item')
+        .addField(field('label', 1, FieldDescriptorProto.Type.TYPE_STRING))
+    def wide = DescriptorProto.newBuilder().setName('Wide')
+    int number = 1
+    scalars.times { wide.addField(field("s${it}", number++, FieldDescriptorProto.Type.TYPE_STRING)) }
+    nested.times {
+      wide.addField(field("n${it}", number++, FieldDescriptorProto.Type.TYPE_MESSAGE).toBuilder()
+          .setTypeName('.limits.Item').setLabel(FieldDescriptorProto.Label.LABEL_REPEATED).build())
+    }
+    def file = FileDescriptorProto.newBuilder().setName('limits.proto').setPackage('limits')
+        .setSyntax('proto3').addMessageType(item).addMessageType(wide).build()
+    FileDescriptor.buildFrom(file, [] as FileDescriptor[]).findMessageTypeByName('Wide')
+  }
+
+  static FieldDescriptorProto field(String name, int number, FieldDescriptorProto.Type type) {
+    FieldDescriptorProto.newBuilder().setName(name).setNumber(number).setType(type)
+        .setLabel(FieldDescriptorProto.Label.LABEL_OPTIONAL).build()
+  }
+
+  static ProtoMapper limited(int nested, int total) {
+    ProtoMapper.builder().defaults(MappingDefaults.standard().withMaxNestedFields(nested).withMaxTotalFields(total)).build()
+  }
+
+  def "the standard limits are the engines' defaults"() {
+    expect:
+    MappingDefaults.standard().maxNestedFields() == 50
+    MappingDefaults.standard().maxTotalFields() == 1000
+  }
+
+  def "fields are counted like the engine counts them: containers and multi-fields included"() {
+    expect: 'Document: 12 top-level fields, title.keyword, and parties with name, name.keyword, role and email'
+    limited(1, 17).map(Document).nestedPaths() == ['parties'] as Set
+  }
+
+  def "a mapping one field over the total limit is rejected"() {
+    when:
+    limited(1, 16).map(Document)
+
+    then:
+    def e = thrown(MappingException)
+    e.path == 'phatjam98.elasticprotos.example.Document'
+    e.message.contains('maps 17 fields, more than maxTotalFields 16')
+  }
+
+  def "a generated message exactly at the limits maps; one more of either is rejected: #label"() {
+    when:
+    def definition = limited(nestedLimit, totalLimit).map(wide(scalars, nested))
+
+    then:
+    definition.nestedPaths().size() == nested
+
+    where: 'each nested Item counts twice: the container and its label'
+    label         | scalars | nested | nestedLimit | totalLimit
+    'at both'     | 10      | 3      | 3           | 16
+    'disabled'    | 2000    | 60     | 0           | 0
+    'defaults'    | 990     | 5      | 50          | 1000
+  }
+
+  def "a generated message over a limit is rejected: #label"() {
+    when:
+    limited(nestedLimit, totalLimit).map(wide(scalars, nested))
+
+    then:
+    def e = thrown(MappingException)
+    e.path == 'limits.Wide'
+    e.message.contains(message)
+
+    where:
+    label           | scalars | nested | nestedLimit | totalLimit | message
+    'nested'        | 0       | 4      | 3           | 0          | 'maps 4 nested fields, more than maxNestedFields 3 (index.mapping.nested_fields.limit)'
+    'total'         | 17      | 0      | 0           | 16         | 'maps 17 fields, more than maxTotalFields 16 (index.mapping.total_fields.limit)'
+    'default total' | 1001    | 0      | 50          | 1000       | 'more than maxTotalFields 1000'
+    'default nested'| 0       | 51     | 50          | 1000       | 'maps 51 nested fields, more than maxNestedFields 50'
+  }
+
+  // ------------------------------------------------------------------ name validation
+
+  def "a mapped-name override is validated: #label"() {
+    given:
+    def overrides = MappingOverrides.builder().forField(Scalars.descriptor, 'string_value') { it.name = name }.build()
+
+    when:
+    mapper.map(Scalars.descriptor, overrides)
+
+    then:
+    def e = thrown(MappingException)
+    e.path == 'string_value'
+    e.message.contains("elastic_field.name '${name}' must be non-empty and contain no '.' or whitespace")
+
+    where:
+    label        | name
+    'a dot'      | 'a.b'
+    'a space'    | 'a b'
+    'blank'      | ' '
+    'a tab'      | 'x\ty'
+  }
+
+  def "a valid mapped-name override renames the field"() {
+    given:
+    def overrides = MappingOverrides.builder().forField(Scalars.descriptor, 'string_value') { it.name = 'str-value_2' }.build()
+
+    expect:
+    mapper.map(Scalars.descriptor, overrides).mappings().properties['str-value_2'].type == 'keyword'
+  }
+
+  def "a naming prefix is lower-cased"() {
+    expect:
+    IndexNamingStrategy.prefixed('Dev').alias('documents') == 'dev-documents'
+    IndexNamingStrategy.prefixed('QA1').indexName('documents', 'abc') == 'qa1-documents-vabc'
+  }
+
+  def "a naming prefix that cannot start an index name is rejected: #label"() {
+    when:
+    IndexNamingStrategy.prefixed(prefix)
+
+    then:
+    thrown(exception)
+
+    where:
+    label            | prefix   | exception
+    'empty'          | ''       | IllegalArgumentException
+    'null'           | null     | NullPointerException
+    'leading -'      | '-dev'   | IllegalArgumentException
+    'leading _'      | '_dev'   | IllegalArgumentException
+    'leading +'      | '+dev'   | IllegalArgumentException
+    'space'          | 'my env' | IllegalArgumentException
+    'backslash'      | 'a\\b'   | IllegalArgumentException
+    'slash'          | 'a/b'    | IllegalArgumentException
+    'star'           | 'a*'     | IllegalArgumentException
+    'question mark'  | 'a?'     | IllegalArgumentException
+    'quote'          | 'a"'     | IllegalArgumentException
+    'less than'      | 'a<'     | IllegalArgumentException
+    'greater than'   | 'a>'     | IllegalArgumentException
+    'pipe'           | 'a|b'    | IllegalArgumentException
+    'comma'          | 'a,b'    | IllegalArgumentException
+    'hash'           | 'a#b'    | IllegalArgumentException
+    'colon'          | 'a:b'    | IllegalArgumentException
   }
 }
