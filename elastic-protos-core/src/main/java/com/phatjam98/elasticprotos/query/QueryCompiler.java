@@ -127,9 +127,8 @@ public final class QueryCompiler {
     if (size > config.maxPageSize()) {
       throw new QueryCompileException(
           "pagination.size = " + size + " exceeds the maximum page size of "
-              + config.maxPageSize() + " (QueryCompilerConfig.maxPageSize); fetch more hits page"
-              + " by page with a point in time (pagination.cursor and search_after, see"
-              + " SearchPager)",
+              + config.maxPageSize() + " (QueryCompilerConfig.maxPageSize); request smaller"
+              + " pages",
           null);
     }
     body.put("size", size);

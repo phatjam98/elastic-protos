@@ -143,4 +143,18 @@ class SearchPagerSpec extends Specification {
     then:
     thrown(IllegalArgumentException)
   }
+
+  def "a page size above maxPageSize is refused before a point in time is opened"() {
+    given:
+    def engine = Mock(SearchEngine)
+    def small = QueryCompiler.of(QueryCompilerConfig.standard().withDefaultSize(5).withMaxPageSize(5))
+
+    when:
+    SearchPager.open(engine, small, ['documents'], criteria, document, 6)
+
+    then:
+    def e = thrown(IllegalArgumentException)
+    e.message == 'pageSize 6 exceeds the maximum page size of 5 (QueryCompilerConfig.maxPageSize)'
+    0 * engine.openPit(_, _)
+  }
 }

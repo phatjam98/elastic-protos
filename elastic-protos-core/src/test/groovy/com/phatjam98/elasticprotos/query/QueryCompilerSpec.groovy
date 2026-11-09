@@ -809,13 +809,13 @@ class QueryCompilerSpec extends Specification {
         .body().size == 10_000
   }
 
-  def "a default size above maxPageSize is rejected at compile time"() {
+  def "a default size above maxPageSize is rejected when the config is built"() {
     when:
-    QueryCompiler.of(QueryCompilerConfig.standard().withDefaultSize(50).withMaxPageSize(20))
-        .compile(SearchCriteria.defaultInstance, document)
+    QueryCompilerConfig.standard().withDefaultSize(50).withMaxPageSize(20)
 
     then:
-    thrown(QueryCompileException)
+    def e = thrown(IllegalArgumentException)
+    e.message == 'defaultSize 50 must not exceed maxPageSize 20'
   }
 
   // ---- config ------------------------------------------------------------------------------
@@ -833,7 +833,7 @@ class QueryCompilerSpec extends Specification {
     config.maxPageSize() == QueryCompilerConfig.DEFAULT_MAX_PAGE_SIZE
     config.withAllowScriptSort(true).allowScriptSort()
     config.withAllowRegex(true).allowRegex()
-    config.withMaxPageSize(7).maxPageSize() == 7
+    config.withMaxPageSize(70).maxPageSize() == 70
     config.withLenient(true).lenient()
     config.withAllowLeadingWildcards(true).allowLeadingWildcards()
     !config.withGroupNested(false).groupNested()
@@ -857,6 +857,8 @@ class QueryCompilerSpec extends Specification {
     'string totals'       | { it.withTrackTotalHits('yes') }                  || IllegalArgumentException
     'zero window'         | { it.withMaxResultWindow(0) }                     || IllegalArgumentException
     'zero max page size'  | { it.withMaxPageSize(0) }                         || IllegalArgumentException
+    'negative page cap'   | { it.withMaxPageSize(-1) }                        || IllegalArgumentException
+    'default above cap'   | { it.withMaxPageSize(9) }                         || IllegalArgumentException
     'negative size'       | { it.withDefaultSize(-1) }                        || IllegalArgumentException
     'null keep-alive'     | { it.withDefaultKeepAlive(null) }                 || NullPointerException
     'zero keep-alive'     | { it.withDefaultKeepAlive(Duration.ZERO) }        || IllegalArgumentException

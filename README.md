@@ -708,7 +708,7 @@ Notes:
 | Case | Behaviour |
 |---|---|
 | `size` 0 / negative | `defaultSize` (10) / 0 |
-| `size` above `maxPageSize` (10 000) | `QueryCompileException`, with or without a point in time |
+| `size` above `maxPageSize` (10 000) | `QueryCompileException`, with or without a point in time; `defaultSize` above it fails when the config is built and a `SearchPager` page size above it fails before the point in time is opened |
 | `from` + `size` within `maxResultWindow` (10 000) | `from`/`size` paging |
 | `from` + `size` beyond the window | `QueryCompileException` that points at point-in-time paging |
 | `cursor` set (a point-in-time id) | `pit` + `search_after`, with a `_shard_doc` tiebreaker appended |

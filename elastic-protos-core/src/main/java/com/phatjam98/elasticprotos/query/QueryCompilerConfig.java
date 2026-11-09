@@ -20,7 +20,7 @@ import java.util.Objects;
  *     it out of the body
  * @param maxResultWindow the largest {@code from + size} allowed without a point in time; match it
  *     to the index setting {@code index.max_result_window}
- * @param defaultSize page size when the criteria do not set one
+ * @param defaultSize page size when the criteria do not set one; at most {@code maxPageSize}
  * @param defaultKeepAlive point-in-time keep-alive when the pagination does not set one
  * @param groupNested whether predicates of one condition on the same nested path are combined so
  *     that they must match the same nested element
@@ -66,6 +66,10 @@ public record QueryCompilerConfig(
     }
     if (maxPageSize <= 0) {
       throw new IllegalArgumentException("maxPageSize must be positive: " + maxPageSize);
+    }
+    if (defaultSize > maxPageSize) {
+      throw new IllegalArgumentException("defaultSize " + defaultSize
+          + " must not exceed maxPageSize " + maxPageSize);
     }
     Objects.requireNonNull(defaultKeepAlive, "defaultKeepAlive");
     if (defaultKeepAlive.isNegative() || defaultKeepAlive.isZero()) {
