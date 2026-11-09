@@ -8,11 +8,14 @@ import com.phatjam98.elasticprotos.migration.RemovedFieldPolicy;
 import com.phatjam98.elasticprotos.query.QueryCompilerConfig;
 import com.phatjam98.elasticprotos.query.TrackTotalHits;
 import io.micronaut.context.annotation.ConfigurationProperties;
+import io.micronaut.context.annotation.Context;
 import io.micronaut.core.annotation.Nullable;
 import io.micronaut.core.convert.format.ReadableBytes;
+import jakarta.annotation.PostConstruct;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Configuration of the elastic-protos Micronaut integration, bound from {@code elastic-protos.*}.
@@ -31,7 +34,12 @@ import java.util.List;
  * <p>The nested groups {@link Bootstrap bootstrap}, {@link Defaults defaults}, {@link Naming
  * naming}, {@link Mapping mapping}, {@link Codec codec}, {@link Query query} and {@link Bulk bulk}
  * document their own keys.
+ *
+ * <p>The configuration is a {@code @Context} bean: it is bound and {@linkplain #validate()
+ * validated} while the application context starts, so an invalid value aborts startup even when
+ * no elastic-protos bean is ever requested.
  */
+@Context
 @ConfigurationProperties(ElasticProtosConfiguration.PREFIX)
 public class ElasticProtosConfiguration {
 
@@ -57,6 +65,23 @@ public class ElasticProtosConfiguration {
   private Codec codec = new Codec();
   private Query query = new Query();
   private Bulk bulk = new Bulk();
+
+  /**
+   * Checks at startup that the settings make valid mapping, codec, query and migration settings,
+   * for example that {@code query.default-size} does not exceed {@code query.max-page-size}. The
+   * configuration is a {@code @Context} bean, so an invalid value stops {@code
+   * ApplicationContext.start()} even when no bean that uses it is ever requested.
+   *
+   * @throws NullPointerException when a required setting is null
+   * @throws IllegalArgumentException when a setting is out of range
+   */
+  @PostConstruct
+  public void validate() {
+    ElasticProtosFactory.mappingDefaultsOf(this);
+    ElasticProtosFactory.codecConfigOf(this);
+    ElasticProtosFactory.queryCompilerConfigOf(this);
+    ElasticProtosFactory.migrationOptionsOf(this);
+  }
 
   /** Returns {@code elastic-protos.engine}: {@code elasticsearch} or {@code opensearch}. */
   public String getEngine() {
@@ -538,7 +563,8 @@ public class ElasticProtosConfiguration {
    *   <li>{@code default-size}: page size when the criteria set none; default 10
    *   <li>{@code default-keep-alive}: point-in-time keep-alive; default {@code 1m}
    *   <li>{@code track-total-hits}: {@code true} counts hits exactly, {@code false} counts none,
-   *       a number counts up to that bound; default true
+   *       a number counts up to that bound, {@code default} leaves the engine's default; default
+   *       true
    *   <li>{@code allow-script-sort}: accept script sorts, which run a caller-supplied Painless
    *       script on the cluster; default false
    *   <li>{@code allow-regex}: accept {@code TEXT_REGEX}; default false
@@ -625,24 +651,19 @@ public class ElasticProtosConfiguration {
       this.defaultKeepAlive = defaultKeepAlive;
     }
 
-    /** Returns {@code track-total-hits}: {@code true}, {@code false} or a number. */
-    public String getTrackTotalHits() {
-      return trackTotalHits.toString();
+    /** Returns {@code track-total-hits}. */
+    public TrackTotalHits getTrackTotalHits() {
+      return trackTotalHits;
     }
 
     /**
-     * Sets {@code track-total-hits}.
+     * Sets {@code track-total-hits}; configuration values {@code true}, {@code false}, {@code
+     * default} and numbers are converted by {@link TrackTotalHitsConverter}.
      *
-     * @param trackTotalHits {@code true}, {@code false} or a non-negative number
-     * @throws IllegalArgumentException when the value is none of these
+     * @throws NullPointerException when {@code trackTotalHits} is null
      */
-    public void setTrackTotalHits(String trackTotalHits) {
-      this.trackTotalHits = TrackTotalHits.parse(trackTotalHits);
-    }
-
-    /** Returns {@code track-total-hits} as the compiler setting. */
-    public TrackTotalHits trackTotalHits() {
-      return trackTotalHits;
+    public void setTrackTotalHits(TrackTotalHits trackTotalHits) {
+      this.trackTotalHits = Objects.requireNonNull(trackTotalHits, "trackTotalHits");
     }
 
     /** Returns {@code shard-doc-tiebreaker}. */

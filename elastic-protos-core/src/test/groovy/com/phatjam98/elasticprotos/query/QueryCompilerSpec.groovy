@@ -576,7 +576,7 @@ class QueryCompilerSpec extends Specification {
 
   def "size defaults, count-only and track_total_hits"() {
     given:
-    def custom = QueryCompiler.of(QueryCompilerConfig.standard().withDefaultSize(25).withTrackTotalHits(null))
+    def custom = QueryCompiler.of(QueryCompilerConfig.standard().withDefaultSize(25).withTrackTotalHits(TrackTotalHits.engineDefault()))
 
     expect:
     custom.compile(SearchCriteria.defaultInstance, document).body() == [query: [match_all: [:]], size: 25, from: 0]
@@ -850,7 +850,7 @@ class QueryCompilerSpec extends Specification {
     config.withDefaultSize(3).defaultSize() == 3
     config.withDefaultKeepAlive(Duration.ofSeconds(5)).defaultKeepAlive() == Duration.ofSeconds(5)
     config.withTrackTotalHits(TrackTotalHits.none()).trackTotalHits() == TrackTotalHits.none()
-    config.withTrackTotalHits(null).trackTotalHits() == null
+    config.withTrackTotalHits(TrackTotalHits.engineDefault()).trackTotalHits() == TrackTotalHits.engineDefault()
     !config.withShardDocTiebreaker(false).shardDocTiebreaker()
     QueryCompiler.of(config).config() == config
   }
@@ -872,6 +872,7 @@ class QueryCompilerSpec extends Specification {
     'default above cap'   | { it.withMaxPageSize(9) }                         || IllegalArgumentException
     'negative size'       | { it.withDefaultSize(-1) }                        || IllegalArgumentException
     'null keep-alive'     | { it.withDefaultKeepAlive(null) }                 || NullPointerException
+    'null totals'         | { it.withTrackTotalHits(null) }                   || NullPointerException
     'zero keep-alive'     | { it.withDefaultKeepAlive(Duration.ZERO) }        || IllegalArgumentException
   }
 

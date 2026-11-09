@@ -45,7 +45,7 @@ class MigrationModelSpec extends Specification {
     MigrationOptions.standard().withReplicas(null)
 
     then:
-    thrown(IllegalArgumentException)
+    thrown(NullPointerException)
   }
 
   def "replica policies"() {

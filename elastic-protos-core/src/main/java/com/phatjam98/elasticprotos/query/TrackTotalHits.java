@@ -1,12 +1,15 @@
 package com.phatjam98.elasticprotos.query;
 
+import java.math.BigInteger;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.regex.Pattern;
 
 /**
  * The value of {@code track_total_hits} in a compiled search body: count every hit ({@link
- * #exact()}, sent as {@code true}), count none ({@link #none()}, sent as {@code false}), or count
- * up to a bound ({@link #upTo(long)}, sent as the number).
+ * #exact()}, sent as {@code true}), count none ({@link #none()}, sent as {@code false}), count up
+ * to a bound ({@link #upTo(int)}, sent as the number), or leave the key out so that the engine's
+ * own default applies ({@link #engineDefault()}; Elasticsearch and OpenSearch count up to 10000).
  */
 public final class TrackTotalHits {
 
@@ -17,11 +20,16 @@ public final class TrackTotalHits {
     /** Count no hits; sent as {@code false}. */
     NONE,
     /** Count hits up to {@link TrackTotalHits#limit()}; sent as that number. */
-    UP_TO
+    UP_TO,
+    /** Leave {@code track_total_hits} out of the body; the engine's default applies. */
+    DEFAULT
   }
 
   private static final TrackTotalHits EXACT = new TrackTotalHits(Kind.EXACT, 0);
   private static final TrackTotalHits NONE = new TrackTotalHits(Kind.NONE, 0);
+  private static final TrackTotalHits DEFAULT = new TrackTotalHits(Kind.DEFAULT, 0);
+  private static final Pattern INTEGER = Pattern.compile("-?[0-9]+");
+  private static final BigInteger MAX = BigInteger.valueOf(Integer.MAX_VALUE);
 
   private final Kind kind;
   private final int limit;
@@ -41,20 +49,23 @@ public final class TrackTotalHits {
     return NONE;
   }
 
+  /** Leaves {@code track_total_hits} out of the body, so that the engine's default applies. */
+  public static TrackTotalHits engineDefault() {
+    return DEFAULT;
+  }
+
   /**
    * Counts hits up to {@code limit}; beyond it the total is a lower bound.
    *
-   * @param limit the bound, between 0 and {@link Integer#MAX_VALUE} as the engines accept
+   * @param limit the bound, at least 0
    * @return the setting
-   * @throws IllegalArgumentException when the bound is negative or above {@link
-   *     Integer#MAX_VALUE}
+   * @throws IllegalArgumentException when the bound is negative
    */
-  public static TrackTotalHits upTo(long limit) {
-    if (limit < 0 || limit > Integer.MAX_VALUE) {
-      throw new IllegalArgumentException(
-          "trackTotalHits limit must be between 0 and " + Integer.MAX_VALUE + ", got " + limit);
+  public static TrackTotalHits upTo(int limit) {
+    if (limit < 0) {
+      throw new IllegalArgumentException("trackTotalHits limit must not be negative: " + limit);
     }
-    return new TrackTotalHits(Kind.UP_TO, (int) limit);
+    return new TrackTotalHits(Kind.UP_TO, limit);
   }
 
   /** Returns {@link #exact()} for true and {@link #none()} for false. */
@@ -63,30 +74,41 @@ public final class TrackTotalHits {
   }
 
   /**
-   * Parses a configuration value: {@code true}, {@code false} (any case, surrounding blanks
-   * ignored) or a non-negative integer.
+   * Parses a configuration value: {@code true}, {@code false} or {@code default} (any case), or a
+   * decimal integer between 0 and {@link Integer#MAX_VALUE} without a sign; surrounding blanks are
+   * ignored.
    *
    * @param value the text
    * @return the setting
-   * @throws IllegalArgumentException when the text is none of these
+   * @throws NullPointerException when the text is null
+   * @throws IllegalArgumentException when the text is none of these, or the number is negative or
+   *     out of range
    */
-  public static TrackTotalHits parse(String value) {
+  public static TrackTotalHits parse(CharSequence value) {
     Objects.requireNonNull(value, "value");
-    String text = value.trim().toLowerCase(Locale.ROOT);
+    String text = value.toString().trim().toLowerCase(Locale.ROOT);
     if (text.equals("true")) {
       return EXACT;
     }
     if (text.equals("false")) {
       return NONE;
     }
-    long limit;
-    try {
-      limit = Long.parseLong(text);
-    } catch (NumberFormatException e) {
-      throw new IllegalArgumentException(
-          "trackTotalHits must be true, false or a number, got " + value, e);
+    if (text.equals("default")) {
+      return DEFAULT;
     }
-    return upTo(limit);
+    if (!INTEGER.matcher(text).matches()) {
+      throw new IllegalArgumentException(
+          "trackTotalHits must be true, false, default or a number, got " + value);
+    }
+    BigInteger number = new BigInteger(text);
+    if (number.signum() < 0) {
+      throw new IllegalArgumentException("trackTotalHits limit must not be negative: " + text);
+    }
+    if (number.compareTo(MAX) > 0) {
+      throw new IllegalArgumentException("trackTotalHits limit out of range (0 to "
+          + Integer.MAX_VALUE + "): " + text);
+    }
+    return upTo(number.intValue());
   }
 
   /** Returns how hits are counted. */
@@ -101,13 +123,15 @@ public final class TrackTotalHits {
 
   /**
    * Returns the value as it goes into the search body: {@link Boolean#TRUE}, {@link
-   * Boolean#FALSE} or an {@link Integer}.
+   * Boolean#FALSE}, an {@link Integer}, or null for {@link #engineDefault()}, whose key is left
+   * out.
    */
   public Object toJson() {
     return switch (kind) {
       case EXACT -> Boolean.TRUE;
       case NONE -> Boolean.FALSE;
       case UP_TO -> limit;
+      case DEFAULT -> null;
     };
   }
 
@@ -121,9 +145,12 @@ public final class TrackTotalHits {
     return Objects.hash(kind, limit);
   }
 
-  /** Returns the body value as text: {@code true}, {@code false} or the bound. */
+  /**
+   * Returns {@code true}, {@code false}, the bound, or {@code default} for {@link
+   * #engineDefault()}.
+   */
   @Override
   public String toString() {
-    return String.valueOf(toJson());
+    return kind == Kind.DEFAULT ? "default" : String.valueOf(toJson());
   }
 }

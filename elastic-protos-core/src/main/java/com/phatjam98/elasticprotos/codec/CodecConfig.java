@@ -23,8 +23,12 @@ import java.util.Objects;
  *   <li>{@code unknownFields}: what to do with unknown document keys when reading back; default
  *       {@link UnknownFieldPolicy#IGNORE}
  *   <li>{@code anyTypes}: the type registry used to serialize {@code google.protobuf.Any} fields
- *       that are mapped explicitly rather than ignored; empty by default
+ *       that are mapped explicitly rather than ignored; empty by default. {@code TypeRegistry} has
+ *       no value equality, so two configs are equal only when they hold the same registry
+ *       instance
  * </ul>
+ *
+ * <p>A null {@code unknownFields} or {@code anyTypes} throws {@link NullPointerException}.
  */
 public final class CodecConfig {
 
@@ -34,6 +38,8 @@ public final class CodecConfig {
   private final TypeRegistry anyTypes;
 
   private CodecConfig(Builder builder) {
+    Objects.requireNonNull(builder.unknownFields, "unknownFields");
+    Objects.requireNonNull(builder.anyTypes, "anyTypes");
     this.includeDefaults = builder.includeDefaults;
     this.int64AsNumber = builder.int64AsNumber;
     this.unknownFields = builder.unknownFields;
@@ -101,7 +107,7 @@ public final class CodecConfig {
         && includeDefaults == that.includeDefaults
         && int64AsNumber == that.int64AsNumber
         && unknownFields == that.unknownFields
-        && Objects.equals(anyTypes, that.anyTypes);
+        && anyTypes == that.anyTypes;
   }
 
   @Override
@@ -158,7 +164,12 @@ public final class CodecConfig {
       return this;
     }
 
-    /** Builds the settings. */
+    /**
+     * Builds the settings.
+     *
+     * @return the settings
+     * @throws NullPointerException when {@code unknownFields} or {@code anyTypes} is null
+     */
     public CodecConfig build() {
       return new CodecConfig(this);
     }

@@ -793,12 +793,12 @@ QueryCompiler compiler = QueryCompiler.of(QueryCompilerConfig.builder()   // sta
     .maxPageSize(1_000)                   // largest page a caller may ask for
     .allowRegex(true)                     // enable TEXT_REGEX (literal prefix required)
     .allowScriptSort(true)                // enable script sorts: callers run Painless
-    .trackTotalHits(TrackTotalHits.upTo(10_000))   // true: exact(), false: none()
+    .trackTotalHits(TrackTotalHits.upTo(10_000))   // also exact(), none(), engineDefault()
     .shardDocTiebreaker(false)            // OpenSearch < 3.3 with your own cursor
     .build());
 ```
 
-`compiled.body()` is a plain `Map`: copy it to add anything the DSL does not cover, such as `aggs`;
+`compiled.body()` is an unmodifiable `Map`; copy it to add aggregations (`aggs`) or anything else the DSL does not cover;
 raw aggregation results come back in `SearchResult.aggregations()`. `SearchResult.total()` is exact
 when `totalExact()` is true and a lower bound otherwise. With `track_total_hits: false`
 (`withTrackTotalHits(TrackTotalHits.none())`) the engine counts nothing: `total()` is then
@@ -1038,6 +1038,11 @@ It also offers `bulkIndex`, `definition`, `pager` (a `SearchPager`), `plan`, `bo
 
 ### Properties
 
+The configuration is bound and checked when the application context starts, before any
+elastic-protos bean is used: an unparseable value such as `track-total-hits: maybe`, or settings
+that do not fit together such as a `max-page-size` below `default-size`, abort
+`ApplicationContext.start()` with the reason.
+
 | Property | Default | Meaning |
 |---|---|---|
 | `elastic-protos.engine` | `elasticsearch` | `elasticsearch` or `opensearch` |
@@ -1070,7 +1075,7 @@ It also offers `bulkIndex`, `definition`, `pager` (a `SearchPager`), `plan`, `bo
 | `elastic-protos.query.max-result-window` | `10000` | Largest `from + size` without a point in time |
 | `elastic-protos.query.default-size` | `10` | Page size when the criteria set none |
 | `elastic-protos.query.default-keep-alive` | `1m` | Point-in-time keep-alive |
-| `elastic-protos.query.track-total-hits` | `true` | `true` counts hits exactly, `false` counts none, a number counts up to that bound |
+| `elastic-protos.query.track-total-hits` | `true` | `true` counts hits exactly, `false` counts none, a number counts up to that bound, `default` leaves the key out so the engine's default applies |
 | `elastic-protos.query.shard-doc-tiebreaker` | `AUTO` | `_shard_doc` tiebreaker on point-in-time searches: `AUTO`, `ON` or `OFF` |
 | `elastic-protos.query.allow-script-sort` | `false` | Accept script sorts; callers then run Painless on the cluster |
 | `elastic-protos.query.allow-regex` | `false` | Accept `TEXT_REGEX` (a pattern without a literal prefix also needs `allow-leading-wildcards`) |

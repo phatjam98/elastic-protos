@@ -86,6 +86,63 @@ class ConfigTypesSpec extends Specification {
     'maxTotalFields'  | { it.withMaxTotalFields(1) }
   }
 
+  @Unroll
+  def "MappingDefaults: rejects #name"() {
+    when:
+    change(MappingDefaults.builder()).build()
+
+    then:
+    def e = thrown(exception)
+    e.message == message
+
+    where:
+    name                    | change                                      || exception                | message
+    'null dateFormat'       | { it.dateFormat(null) }                     || NullPointerException     | 'dateFormat'
+    'null dynamic'          | { it.dynamic(null) }                        || NullPointerException     | 'dynamic'
+    'null singularMessage'  | { it.singularMessage(null) }                || NullPointerException     | 'singularMessage'
+    'null repeatedMessage'  | { it.repeatedMessage(null) }                || NullPointerException     | 'repeatedMessage'
+    'null structKind'       | { it.structKind(null) }                     || NullPointerException     | 'structKind'
+    'keyword singulars'     | { it.singularMessage(FieldKind.KEYWORD) }   || IllegalArgumentException | 'singularMessage must be OBJECT or NESTED: KEYWORD'
+    'flattened repeateds'   | { it.repeatedMessage(FieldKind.FLATTENED) } || IllegalArgumentException | 'repeatedMessage must be OBJECT or NESTED: FLATTENED'
+    'nested structs'        | { it.structKind(FieldKind.NESTED) }         || IllegalArgumentException | 'structKind must be FLATTENED or OBJECT: NESTED'
+    'negative ignoreAbove'  | { it.ignoreAbove(-1) }                      || IllegalArgumentException | 'ignoreAbove must not be negative: -1'
+    'negative maxDepth'     | { it.maxDepth(-1) }                         || IllegalArgumentException | 'maxDepth must not be negative: -1'
+    'negative nested limit' | { it.maxNestedFields(-1) }                  || IllegalArgumentException | 'maxNestedFields must not be negative: -1'
+    'negative total limit'  | { it.maxTotalFields(-1) }                   || IllegalArgumentException | 'maxTotalFields must not be negative: -1'
+  }
+
+  def "MappingDefaults: zero limits and the other allowed kinds are accepted"() {
+    expect:
+    MappingDefaults.builder().ignoreAbove(0).maxDepth(0).maxNestedFields(0).maxTotalFields(0)
+        .singularMessage(FieldKind.NESTED).repeatedMessage(FieldKind.OBJECT).structKind(FieldKind.OBJECT)
+        .build().maxDepth() == 0
+  }
+
+  @Unroll
+  def "CodecConfig: rejects a null #name"() {
+    when:
+    change(CodecConfig.builder()).build()
+
+    then:
+    def e = thrown(NullPointerException)
+    e.message == name
+
+    where:
+    name            | change
+    'unknownFields' | { it.unknownFields(null) }
+    'anyTypes'      | { it.anyTypes(null) }
+  }
+
+  def "CodecConfig: type registries compare by identity"() {
+    given:
+    def a = TypeRegistry.newBuilder().add(Timestamp.descriptor).build()
+    def b = TypeRegistry.newBuilder().add(Timestamp.descriptor).build()
+
+    expect:
+    CodecConfig.standard().withAnyTypes(a) == CodecConfig.standard().withAnyTypes(a)
+    CodecConfig.standard().withAnyTypes(a) != CodecConfig.standard().withAnyTypes(b)
+  }
+
   // ---- CodecConfig -------------------------------------------------------------------------
 
   def "CodecConfig: builder, copies and equality"() {
@@ -162,7 +219,7 @@ class ConfigTypesSpec extends Specification {
     'allowLeadingWildcards' | { it.withAllowLeadingWildcards(true) }
     'lenient'               | { it.withLenient(true) }
     'trackTotalHits'        | { it.withTrackTotalHits(TrackTotalHits.none()) }
-    'null trackTotalHits'   | { it.withTrackTotalHits(null) }
+    'engine default totals' | { it.withTrackTotalHits(TrackTotalHits.engineDefault()) }
     'maxResultWindow'       | { it.withMaxResultWindow(1) }
     'defaultSize'           | { it.withDefaultSize(1) }
     'defaultKeepAlive'      | { it.withDefaultKeepAlive(Duration.ofSeconds(1)) }
@@ -191,12 +248,17 @@ class ConfigTypesSpec extends Specification {
     'null keep-alive'  | { it.defaultKeepAlive(null) }                      || NullPointerException     | 'defaultKeepAlive'
     'zero keep-alive'  | { it.defaultKeepAlive(Duration.ZERO) }             || IllegalArgumentException | 'defaultKeepAlive must be positive: PT0S'
     'neg. keep-alive'  | { it.defaultKeepAlive(Duration.ofSeconds(-1)) }    || IllegalArgumentException | 'defaultKeepAlive must be positive: PT-1S'
+    'null totals'      | { it.trackTotalHits(null) }                        || NullPointerException     | 'trackTotalHits'
   }
 
   // ---- TrackTotalHits ----------------------------------------------------------------------
 
-  def "TrackTotalHits serialises to true, false or the bound"() {
+  def "TrackTotalHits serialises to true, false, the bound, or nothing for the engine default"() {
     expect:
+    TrackTotalHits.engineDefault().toJson() == null
+    TrackTotalHits.engineDefault().kind() == TrackTotalHits.Kind.DEFAULT
+    TrackTotalHits.engineDefault().toString() == 'default'
+    TrackTotalHits.engineDefault() != TrackTotalHits.exact()
     TrackTotalHits.exact().toJson() == Boolean.TRUE
     TrackTotalHits.none().toJson() == Boolean.FALSE
     TrackTotalHits.upTo(1000).toJson() instanceof Integer
@@ -232,6 +294,8 @@ class ConfigTypesSpec extends Specification {
     'False'   || TrackTotalHits.none()
     '0'       || TrackTotalHits.upTo(0)
     '10000'   || TrackTotalHits.upTo(10000)
+    'Default' || TrackTotalHits.engineDefault()
+    '2147483647' || TrackTotalHits.upTo(Integer.MAX_VALUE)
   }
 
   @Unroll
@@ -245,9 +309,13 @@ class ConfigTypesSpec extends Specification {
 
     where:
     description     | action                                            || message
-    'a word'        | { TrackTotalHits.parse('yes') }                   || 'trackTotalHits must be true, false or a number, got yes'
-    'a negative'    | { TrackTotalHits.parse('-1') }                    || 'trackTotalHits limit must be between 0 and 2147483647, got -1'
-    'a big number'  | { TrackTotalHits.upTo(Integer.MAX_VALUE + 1L) }   || 'trackTotalHits limit must be between 0 and 2147483647, got 2147483648'
+    'a word'          | { TrackTotalHits.parse('yes') }                    || 'trackTotalHits must be true, false, default or a number, got yes'
+    'a plus sign'     | { TrackTotalHits.parse('+5') }                     || 'trackTotalHits must be true, false, default or a number, got +5'
+    'a decimal'       | { TrackTotalHits.parse('1.5') }                    || 'trackTotalHits must be true, false, default or a number, got 1.5'
+    'a negative text' | { TrackTotalHits.parse('-1') }                     || 'trackTotalHits limit must not be negative: -1'
+    'a negative'      | { TrackTotalHits.upTo(-1) }                        || 'trackTotalHits limit must not be negative: -1'
+    'beyond int'      | { TrackTotalHits.parse('2147483648') }             || 'trackTotalHits limit out of range (0 to 2147483647): 2147483648'
+    'beyond long'     | { TrackTotalHits.parse('99999999999999999999') }   || 'trackTotalHits limit out of range (0 to 2147483647): 99999999999999999999'
   }
 
   def "TrackTotalHits.parse rejects null"() {
@@ -309,16 +377,18 @@ class ConfigTypesSpec extends Specification {
     change(MigrationOptions.builder()).build()
 
     then:
-    def e = thrown(IllegalArgumentException)
+    def e = thrown(exception)
     e.message == message
 
     where:
-    name             | change                         || message
-    'zero shards'    | { it.defaultShards(0) }        || 'defaultShards must be at least 1: 0'
-    'no failure'     | { it.failure(null) }           || 'failure, removedFields, replicas and reindexTimeout are required'
-    'no removed'     | { it.removedFields(null) }     || 'failure, removedFields, replicas and reindexTimeout are required'
-    'no replicas'    | { it.replicas(null) }          || 'failure, removedFields, replicas and reindexTimeout are required'
-    'no timeout'     | { it.reindexTimeout(null) }    || 'failure, removedFields, replicas and reindexTimeout are required'
+    name             | change                                       || exception                | message
+    'zero shards'    | { it.defaultShards(0) }                      || IllegalArgumentException | 'defaultShards must be at least 1: 0'
+    'zero timeout'   | { it.reindexTimeout(Duration.ZERO) }         || IllegalArgumentException | 'reindexTimeout must be positive: PT0S'
+    'neg. timeout'   | { it.reindexTimeout(Duration.ofSeconds(-1)) } || IllegalArgumentException | 'reindexTimeout must be positive: PT-1S'
+    'no failure'     | { it.failure(null) }                         || NullPointerException     | 'failure'
+    'no removed'     | { it.removedFields(null) }                   || NullPointerException     | 'removedFields'
+    'no replicas'    | { it.replicas(null) }                        || NullPointerException     | 'replicas'
+    'no timeout'     | { it.reindexTimeout(null) }                  || NullPointerException     | 'reindexTimeout'
   }
 
   // ---- ReplicaPolicy -----------------------------------------------------------------------
@@ -371,7 +441,11 @@ class ConfigTypesSpec extends Specification {
     plain != plain.withTimeout(Duration.ofMinutes(1))
     plain != plain.toBuilder().script('s').build()
     plain != plain.toBuilder().scriptParams([y: 2]).build()
-    plain.toBuilder().scriptParams(null).build().scriptParams() == [:]
+    plain.withSource('c') == ReindexRequest.of('c', 'b')
+    plain.withDest('c') == ReindexRequest.of('a', 'c')
+    !plain.withRefresh(false).refresh()
+    plain.withScriptParams([y: 2]).scriptParams() == [y: 2]
+    plain.withScriptParams([y: 2]).script() == null
     !plain.equals('x')
     plain.toString() == 'ReindexRequest[source=a, dest=b, script=null, scriptParams={}, timeout=PT10M, refresh=true]'
   }
@@ -395,18 +469,31 @@ class ConfigTypesSpec extends Specification {
     thrown(UnsupportedOperationException)
   }
 
+  def "ReindexRequest: a null script clears the script parameters"() {
+    given:
+    def scripted = ReindexRequest.of('a', 'b').withScript('s', [x: 1])
+
+    expect:
+    scripted.toBuilder().script(null).build() == ReindexRequest.of('a', 'b')
+    scripted.withScript(null, [x: 1]) == ReindexRequest.of('a', 'b')
+    scripted.toBuilder().script('t').build().scriptParams() == [x: 1]
+  }
+
   @Unroll
-  def "ReindexRequest: rejects a missing #name"() {
+  def "ReindexRequest: rejects #name"() {
     when:
     builder.build()
 
     then:
-    def e = thrown(IllegalArgumentException)
-    e.message == "$name is required"
+    def e = thrown(exception)
+    e.message == message
 
     where:
-    name     | builder
-    'source' | ReindexRequest.builder().dest('b')
-    'dest'   | ReindexRequest.builder().source('a')
+    name               | builder                                                               || exception                | message
+    'a missing source' | ReindexRequest.builder().dest('b')                                    || NullPointerException     | 'source'
+    'a missing dest'   | ReindexRequest.builder().source('a')                                  || NullPointerException     | 'dest'
+    'null params'      | ReindexRequest.builder().source('a').dest('b').scriptParams(null)     || NullPointerException     | 'scriptParams'
+    'a null timeout'   | ReindexRequest.builder().source('a').dest('b').timeout(null)          || NullPointerException     | 'timeout'
+    'a zero timeout'   | ReindexRequest.builder().source('a').dest('b').timeout(Duration.ZERO) || IllegalArgumentException | 'timeout must be positive: PT0S'
   }
 }

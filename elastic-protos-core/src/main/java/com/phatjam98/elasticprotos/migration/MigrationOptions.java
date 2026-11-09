@@ -41,6 +41,9 @@ import java.util.Objects;
  *       to false if you place write blocks on live indices yourself, or if another process may be
  *       reindexing the same alias at the same time (which is unsupported)
  * </ul>
+ *
+ * <p>Null settings throw {@link NullPointerException}; a shard count below 1 or a timeout that is
+ * not positive throws {@link IllegalArgumentException}.
  */
 public final class MigrationOptions {
 
@@ -55,10 +58,13 @@ public final class MigrationOptions {
   private final boolean clearStaleWriteBlock;
 
   private MigrationOptions(Builder builder) {
-    if (builder.failure == null || builder.removedFields == null || builder.replicas == null
-        || builder.reindexTimeout == null) {
-      throw new IllegalArgumentException("failure, removedFields, replicas and reindexTimeout"
-          + " are required");
+    Objects.requireNonNull(builder.failure, "failure");
+    Objects.requireNonNull(builder.removedFields, "removedFields");
+    Objects.requireNonNull(builder.replicas, "replicas");
+    Objects.requireNonNull(builder.reindexTimeout, "reindexTimeout");
+    if (builder.reindexTimeout.isNegative() || builder.reindexTimeout.isZero()) {
+      throw new IllegalArgumentException(
+          "reindexTimeout must be positive: " + builder.reindexTimeout);
     }
     if (builder.defaultShards < 1) {
       throw new IllegalArgumentException(
@@ -302,8 +308,9 @@ public final class MigrationOptions {
      * Builds the options.
      *
      * @return the options
-     * @throws IllegalArgumentException when a policy or the timeout is null, or {@code
-     *     defaultShards} is below 1
+     * @throws NullPointerException when a policy or the timeout is null
+     * @throws IllegalArgumentException when {@code defaultShards} is below 1 or the timeout is not
+     *     positive
      */
     public MigrationOptions build() {
       return new MigrationOptions(this);

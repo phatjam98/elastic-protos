@@ -20,6 +20,7 @@ public record CompiledSearch(Map<String, Object> body, List<String> warnings,
 
   /** Copies the body and the warnings. */
   public CompiledSearch {
+    // the same shallow, null-tolerant copy as com.phatjam98.elasticprotos.engine.Copies
     body = Collections.unmodifiableMap(new LinkedHashMap<>(body));
     warnings = List.copyOf(warnings);
   }

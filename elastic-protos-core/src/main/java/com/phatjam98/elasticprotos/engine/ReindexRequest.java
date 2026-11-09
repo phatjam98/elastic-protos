@@ -27,11 +27,14 @@ import java.util.Objects;
  *   <li>{@code source}: the source index or alias; required
  *   <li>{@code dest}: the destination index; required
  *   <li>{@code script}: an optional Painless script applied to every document, or null
- *   <li>{@code scriptParams}: parameters for the script; copied one level deep and returned
- *       unmodifiable; values may be null
+ *   <li>{@code scriptParams}: parameters for the script; a shallow copy is kept and returned
+ *       unmodifiable; values may be null; cleared when the script is set to null
  *   <li>{@code timeout}: how long to wait for the reindex task to finish; default ten minutes
  *   <li>{@code refresh}: whether to refresh the destination when done; default true
  * </ul>
+ *
+ * <p>Null settings other than {@code script} throw {@link NullPointerException}; a timeout that is
+ * not positive throws {@link IllegalArgumentException}.
  */
 public final class ReindexRequest {
 
@@ -43,18 +46,18 @@ public final class ReindexRequest {
   private final boolean refresh;
 
   private ReindexRequest(Builder builder) {
-    if (builder.source == null) {
-      throw new IllegalArgumentException("source is required");
-    }
-    if (builder.dest == null) {
-      throw new IllegalArgumentException("dest is required");
+    Objects.requireNonNull(builder.source, "source");
+    Objects.requireNonNull(builder.dest, "dest");
+    Objects.requireNonNull(builder.scriptParams, "scriptParams");
+    Objects.requireNonNull(builder.timeout, "timeout");
+    if (builder.timeout.isNegative() || builder.timeout.isZero()) {
+      throw new IllegalArgumentException("timeout must be positive: " + builder.timeout);
     }
     this.source = builder.source;
     this.dest = builder.dest;
     this.script = builder.script;
-    this.scriptParams = builder.scriptParams == null
-        ? Map.of()
-        : Collections.unmodifiableMap(new LinkedHashMap<>(builder.scriptParams));
+    // shallow, null-tolerant copy, like the result types
+    this.scriptParams = Collections.unmodifiableMap(new LinkedHashMap<>(builder.scriptParams));
     this.timeout = builder.timeout;
     this.refresh = builder.refresh;
   }
@@ -107,14 +110,34 @@ public final class ReindexRequest {
     return refresh;
   }
 
-  /** Returns a copy with a script. */
+  /** Returns a copy with another source index or alias. */
+  public ReindexRequest withSource(String value) {
+    return toBuilder().source(value).build();
+  }
+
+  /** Returns a copy with another destination index. */
+  public ReindexRequest withDest(String value) {
+    return toBuilder().dest(value).build();
+  }
+
+  /** Returns a copy with a script and its parameters; a null script also clears the parameters. */
   public ReindexRequest withScript(String painless, Map<String, Object> params) {
     return toBuilder().script(painless, params).build();
+  }
+
+  /** Returns a copy with other script parameters. */
+  public ReindexRequest withScriptParams(Map<String, Object> value) {
+    return toBuilder().scriptParams(value).build();
   }
 
   /** Returns a copy with a timeout. */
   public ReindexRequest withTimeout(Duration value) {
     return toBuilder().timeout(value).build();
+  }
+
+  /** Returns a copy that does or does not refresh the destination when done. */
+  public ReindexRequest withRefresh(boolean value) {
+    return toBuilder().refresh(value).build();
   }
 
   @Override
@@ -176,18 +199,24 @@ public final class ReindexRequest {
       return this;
     }
 
-    /** Sets the Painless script applied to every document; null for none. */
+    /**
+     * Sets the Painless script applied to every document; null for none, which also clears the
+     * script parameters.
+     */
     public Builder script(String value) {
       this.script = value;
+      if (value == null) {
+        this.scriptParams = Map.of();
+      }
       return this;
     }
 
-    /** Sets the script and its parameters. */
+    /** Sets the script and its parameters; a null script clears the parameters instead. */
     public Builder script(String painless, Map<String, Object> params) {
-      return script(painless).scriptParams(params);
+      return painless == null ? script(null) : script(painless).scriptParams(params);
     }
 
-    /** Sets the script parameters; they are copied when the request is built. */
+    /** Sets the script parameters; a shallow copy is taken when the request is built. */
     public Builder scriptParams(Map<String, Object> value) {
       this.scriptParams = value;
       return this;
@@ -209,7 +238,8 @@ public final class ReindexRequest {
      * Builds the request.
      *
      * @return the request
-     * @throws IllegalArgumentException when source or dest is missing
+     * @throws NullPointerException when source, dest, the script parameters or the timeout is null
+     * @throws IllegalArgumentException when the timeout is not positive
      */
     public ReindexRequest build() {
       return new ReindexRequest(this);

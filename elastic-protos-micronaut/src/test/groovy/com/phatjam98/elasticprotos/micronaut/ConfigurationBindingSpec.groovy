@@ -135,8 +135,7 @@ class ConfigurationBindingSpec extends Specification {
       maxResultWindow == 50000
       defaultSize == 25
       defaultKeepAlive == Duration.ofMinutes(5)
-      trackTotalHits == 'false'
-      trackTotalHits() == TrackTotalHits.none()
+      trackTotalHits == TrackTotalHits.none()
       allowScriptSort
       allowRegex
       maxPageSize == 500

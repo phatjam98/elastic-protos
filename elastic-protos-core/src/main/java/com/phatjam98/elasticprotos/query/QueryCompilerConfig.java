@@ -30,8 +30,8 @@ import java.util.Objects;
  *       every term of the field and are disabled by default
  *   <li>{@code lenient}: false to throw on fields the index does not map; true to skip them and
  *       record a warning
- *   <li>{@code trackTotalHits}: value of {@code track_total_hits}, or null to leave it out of the
- *       body; default {@link TrackTotalHits#exact()}
+ *   <li>{@code trackTotalHits}: value of {@code track_total_hits}; default {@link
+ *       TrackTotalHits#exact()}; {@link TrackTotalHits#engineDefault()} leaves it out of the body
  *   <li>{@code maxResultWindow}: the largest {@code from + size} allowed without a point in time;
  *       match it to the index setting {@code index.max_result_window}
  *   <li>{@code defaultSize}: page size when the criteria do not set one; at most {@code
@@ -84,6 +84,7 @@ public final class QueryCompilerConfig {
       throw new IllegalArgumentException("defaultSize " + builder.defaultSize
           + " must not exceed maxPageSize " + builder.maxPageSize);
     }
+    Objects.requireNonNull(builder.trackTotalHits, "trackTotalHits");
     Objects.requireNonNull(builder.defaultKeepAlive, "defaultKeepAlive");
     if (builder.defaultKeepAlive.isNegative() || builder.defaultKeepAlive.isZero()) {
       throw new IllegalArgumentException(
@@ -131,7 +132,7 @@ public final class QueryCompilerConfig {
     return lenient;
   }
 
-  /** Returns the {@code track_total_hits} setting, or null when it is left out of the body. */
+  /** Returns the {@code track_total_hits} setting; never null. */
   public TrackTotalHits trackTotalHits() {
     return trackTotalHits;
   }
@@ -186,7 +187,12 @@ public final class QueryCompilerConfig {
     return toBuilder().lenient(value).build();
   }
 
-  /** Returns a copy with {@code trackTotalHits} replaced; null leaves it out of the body. */
+  /**
+   * Returns a copy with {@code trackTotalHits} replaced; {@link TrackTotalHits#engineDefault()}
+   * leaves it out of the body.
+   *
+   * @throws NullPointerException when {@code value} is null
+   */
   public QueryCompilerConfig withTrackTotalHits(TrackTotalHits value) {
     return toBuilder().trackTotalHits(value).build();
   }
@@ -236,7 +242,7 @@ public final class QueryCompilerConfig {
     return other instanceof QueryCompilerConfig that
         && allowLeadingWildcards == that.allowLeadingWildcards
         && lenient == that.lenient
-        && Objects.equals(trackTotalHits, that.trackTotalHits)
+        && trackTotalHits.equals(that.trackTotalHits)
         && maxResultWindow == that.maxResultWindow
         && defaultSize == that.defaultSize
         && defaultKeepAlive.equals(that.defaultKeepAlive)
@@ -313,11 +319,13 @@ public final class QueryCompilerConfig {
     }
 
     /**
-     * Sets {@code track_total_hits}; default {@link TrackTotalHits#exact()}, null leaves it out of
-     * the body.
+     * Sets {@code track_total_hits}; default {@link TrackTotalHits#exact()}; {@link
+     * TrackTotalHits#engineDefault()} leaves it out of the body.
+     *
+     * @throws NullPointerException when {@code value} is null
      */
     public Builder trackTotalHits(TrackTotalHits value) {
-      this.trackTotalHits = value;
+      this.trackTotalHits = Objects.requireNonNull(value, "trackTotalHits");
       return this;
     }
 
@@ -373,8 +381,8 @@ public final class QueryCompilerConfig {
      * Builds the settings.
      *
      * @return the settings
-     * @throws IllegalArgumentException when a size, window or keep-alive is out of range
      * @throws NullPointerException when {@code defaultKeepAlive} is null
+     * @throws IllegalArgumentException when a size, window or keep-alive is out of range
      */
     public QueryCompilerConfig build() {
       return new QueryCompilerConfig(this);

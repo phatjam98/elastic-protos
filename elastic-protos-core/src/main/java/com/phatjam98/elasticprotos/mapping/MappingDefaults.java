@@ -40,6 +40,9 @@ import java.util.Objects;
  *       {@code index.mapping.total_fields.limit} (default 1000): every mapped field, including
  *       object and nested containers and multi-fields; 0 disables the check
  * </ul>
+ *
+ * <p>Null settings throw {@link NullPointerException}; negative counts and field kinds other than
+ * the ones listed throw {@link IllegalArgumentException}.
  */
 public final class MappingDefaults {
 
@@ -62,6 +65,21 @@ public final class MappingDefaults {
   private final int maxTotalFields;
 
   private MappingDefaults(Builder builder) {
+    Objects.requireNonNull(builder.dateFormat, "dateFormat");
+    Objects.requireNonNull(builder.dynamic, "dynamic");
+    Objects.requireNonNull(builder.singularMessage, "singularMessage");
+    Objects.requireNonNull(builder.repeatedMessage, "repeatedMessage");
+    Objects.requireNonNull(builder.structKind, "structKind");
+    requireMessageKind("singularMessage", builder.singularMessage);
+    requireMessageKind("repeatedMessage", builder.repeatedMessage);
+    if (builder.structKind != FieldKind.FLATTENED && builder.structKind != FieldKind.OBJECT) {
+      throw new IllegalArgumentException(
+          "structKind must be FLATTENED or OBJECT: " + builder.structKind);
+    }
+    requireNotNegative("ignoreAbove", builder.ignoreAbove);
+    requireNotNegative("maxDepth", builder.maxDepth);
+    requireNotNegative("maxNestedFields", builder.maxNestedFields);
+    requireNotNegative("maxTotalFields", builder.maxTotalFields);
     this.stringsAsText = builder.stringsAsText;
     this.keywordSubfield = builder.keywordSubfield;
     this.ignoreAbove = builder.ignoreAbove;
@@ -73,6 +91,18 @@ public final class MappingDefaults {
     this.structKind = builder.structKind;
     this.maxNestedFields = builder.maxNestedFields;
     this.maxTotalFields = builder.maxTotalFields;
+  }
+
+  private static void requireMessageKind(String name, FieldKind kind) {
+    if (kind != FieldKind.OBJECT && kind != FieldKind.NESTED) {
+      throw new IllegalArgumentException(name + " must be OBJECT or NESTED: " + kind);
+    }
+  }
+
+  private static void requireNotNegative(String name, int value) {
+    if (value < 0) {
+      throw new IllegalArgumentException(name + " must not be negative: " + value);
+    }
   }
 
   /**
@@ -209,7 +239,7 @@ public final class MappingDefaults {
         && stringsAsText == that.stringsAsText
         && keywordSubfield == that.keywordSubfield
         && ignoreAbove == that.ignoreAbove
-        && Objects.equals(dateFormat, that.dateFormat)
+        && dateFormat.equals(that.dateFormat)
         && maxDepth == that.maxDepth
         && dynamic == that.dynamic
         && singularMessage == that.singularMessage
@@ -337,7 +367,14 @@ public final class MappingDefaults {
       return this;
     }
 
-    /** Builds the defaults. */
+    /**
+     * Builds the defaults.
+     *
+     * @return the defaults
+     * @throws NullPointerException when the date format, dynamic mode or a field kind is null
+     * @throws IllegalArgumentException when a field kind is not allowed for its setting, or a
+     *     count is negative
+     */
     public MappingDefaults build() {
       return new MappingDefaults(this);
     }
