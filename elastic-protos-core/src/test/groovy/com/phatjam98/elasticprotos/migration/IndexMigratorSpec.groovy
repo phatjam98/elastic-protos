@@ -992,22 +992,173 @@ class IndexMigratorSpec extends Specification {
     DEFAULT.naming() == IndexNamingStrategy.DEFAULT
   }
 
-  def "settings differences are warnings, never changes"() {
+  static ProtoMapper withSettings(Map<String, Object> settings) {
+    def overrides = MappingOverrides.builder()
+    settings.each { k, v -> overrides.setting(k, v) }
+    ProtoMapper.builder().overrides(overrides.build()).build()
+  }
+
+  def "dynamic settings are updated in place, and the next plan is a no-op"() {
+    given:
+    migrator().bootstrap(Firm)
+    String firms = DEFAULT.map(Firm).name()
+    def mapper = withSettings(refresh_interval: '5s', 'index.max_result_window': 20000)
+    engine.clearLog()
+
+    when:
+    def plan = migrator(mapper).plan(Firm)
+    def result = migrator(mapper).apply(plan)
+
+    then:
+    plan.items()[0].action() == Action.UPDATE_SETTINGS
+    plan.items()[0].reason() == 'dynamic settings changed: max_result_window null -> 20000, refresh_interval null -> 5s'
+    plan.items()[0].warnings().isEmpty()
+    plan.hasChanges()
+    plan.toReport().contains("UPDATE_SETTINGS firms: ${firms} (in place)")
+    plan.toJson().contains('"dynamic" : [')
+    result.ok()
+    result.outcomes()[0].index() == firms
+    engine.log().contains("putSettings ${firms} {index.max_result_window=20000, index.refresh_interval=5s}".toString())
+    engine.getSettings('firms').index.refresh_interval == '5s'
+    engine.getSettings('firms').index.max_result_window == '20000'
+    migrator(mapper).plan(Firm).items()[0].action() == Action.NO_OP
+  }
+
+  def "static settings that differ are a warning by default, and dynamic ones are still applied"() {
     given:
     engine.createIndex(DEFAULT.map(Firm).name(), [number_of_shards: 2],
         DEFAULT.map(Firm).mappings(), ['firms'] as Set)
-    def mapper = ProtoMapper.builder()
-        .overrides(MappingOverrides.builder().setting('refresh_interval', '5s').build()).build()
+    def mapper = withSettings(refresh_interval: '5s')
 
     when:
     def item = migrator(mapper).plan(Firm).items()[0]
 
     then:
-    item.action() == Action.NO_OP
+    item.action() == Action.UPDATE_SETTINGS
     item.diff().settingsChanged()
-    !item.diff().isEmpty()
-    item.warnings() == ['number_of_shards is 2 but the proto asks for 1; not applied',
-                        'settings differ; not applied']
+    item.diff().settings().staticChanges()*.path == ['number_of_shards']
+    item.warnings() == ['static settings differ; not applied: number_of_shards 2 -> 1']
+  }
+
+  def "static settings that differ only warn when nothing else changes"() {
+    given:
+    engine.createIndex(DEFAULT.map(Firm).name(), [number_of_shards: 2],
+        DEFAULT.map(Firm).mappings(), ['firms'] as Set)
+
+    when:
+    def item = migrator().plan(Firm).items()[0]
+
+    then:
+    item.action() == Action.NO_OP
+    item.warnings() == ['static settings differ; not applied: number_of_shards 2 -> 1']
+  }
+
+  def "with staticSettings REINDEX a static change reindexes into the next generation: #mode"() {
+    given:
+    String firms = DEFAULT.map(Firm).name()
+    engine.createIndex(firms, [number_of_shards: 2], DEFAULT.map(Firm).mappings(), ['firms'] as Set)
+    engine.index('firms', 'f1', [id: 'f1'], IndexOptions.defaults())
+    def options = BLOCKING.withReindexMode(mode).withSwapGrace(java.time.Duration.ZERO)
+        .withStaticSettings(StaticSettingsPolicy.REINDEX)
+
+    when:
+    def plan = migrator(DEFAULT, options).plan(Firm)
+    def result = migrator(DEFAULT, options).apply(plan)
+
+    then:
+    plan.items()[0].action() == Action.REINDEX
+    plan.items()[0].target().name() == firms + '-g2'
+    plan.items()[0].reason().startsWith('static settings changed: number_of_shards 2 -> 1')
+    result.ok()
+    engine.indices()[firms + '-g2'] == ['firms'] as Set
+    engine.getSettings(firms + '-g2').index.number_of_shards == '1'
+    engine.documents(firms + '-g2').keySet() == ['f1'] as Set
+    migrator(DEFAULT, options).plan(Firm).items()[0].action() == Action.NO_OP
+
+    where:
+    mode << [ReindexMode.BLOCKING, ReindexMode.ZERO_DOWNTIME]
+  }
+
+  def "a static change needing a reindex is blocked when reindexing is not allowed"() {
+    given:
+    engine.createIndex(DEFAULT.map(Firm).name(), [number_of_shards: 2],
+        DEFAULT.map(Firm).mappings(), ['firms'] as Set)
+
+    when:
+    def item = migrator(DEFAULT, BLOCKING.withStaticSettings(StaticSettingsPolicy.REINDEX).withAllowReindex(false))
+        .plan(Firm).items()[0]
+
+    then:
+    item.action() == Action.BLOCKED
+    item.reason() == 'breaking change needs a reindex but allowReindex is false: static settings changed: number_of_shards 2 -> 1'
+  }
+
+  def "a mapping change with dynamic settings updates the settings first"() {
+    given:
+    migrator(NO_RELEVANCE).bootstrap(Document)
+    def mapper = ProtoMapper.builder().overrides(MappingOverrides.builder()
+        .setting('mapping.total_fields.limit', 2000).build()).build()
+    engine.clearLog()
+
+    when:
+    def plan = migrator(mapper).plan(Document)
+    migrator(mapper).apply(plan)
+    def writes = engine.log().findAll { it.startsWith('putSettings') || it.startsWith('putMappings') }
+
+    then:
+    plan.items()[0].action() == Action.PUT_MAPPING
+    plan.items()[0].reason() == 'compatible change: added [relevance]; dynamic settings are updated first: mapping.total_fields.limit null -> 2000'
+    writes*.split(' ')*.getAt(0) == ['putSettings', 'putMappings']
+    engine.getSettings('documents').index['mapping.total_fields.limit'] == '2000'
+    migrator(mapper).plan(Document).items()[0].action() == Action.NO_OP
+  }
+
+  def "the replica policy never turns into a settings update"() {
+    given:
+    migrator(DEFAULT, BLOCKING.withReplicas(ReplicaPolicy.fixed(2))).bootstrap(Document)
+
+    expect:
+    migrator(DEFAULT, BLOCKING.withReplicas(ReplicaPolicy.fixed(0))).plan(Document).items()[0].action() == Action.NO_OP
+  }
+
+  def "a dry run of a settings update changes nothing, and a stale write block is cleared with it"() {
+    given:
+    migrator().bootstrap(Firm)
+    def mapper = withSettings(refresh_interval: '5s')
+    engine.setWriteBlock('firms', true)
+    engine.clearLog()
+
+    when:
+    def dry = migrator(mapper, BLOCKING.withDryRun(true)).bootstrap(Firm)
+
+    then:
+    dry.outcomes()[0].status() == MigrationResult.Status.DRY_RUN
+    !engine.log().any { it.startsWith('putSettings') }
+
+    when:
+    def plan = migrator(mapper).plan(Firm)
+    def result = migrator(mapper).apply(plan)
+
+    then:
+    plan.items()[0].warnings().any { it.contains('it will be cleared (clearStaleWriteBlock)') }
+    result.ok()
+    !engine.isWriteBlocked(DEFAULT.map(Firm).name())
+  }
+
+  def "a same-hash leftover with other static settings is recreated, not reused"() {
+    given:
+    String firms = DEFAULT.map(Firm).name()
+    engine.createIndex(firms, [number_of_shards: 2], DEFAULT.map(Firm).mappings(), ['firms'] as Set)
+    engine.createIndex(firms + '-g2', [number_of_shards: 3], DEFAULT.map(Firm).mappings(), [] as Set)
+    def options = BLOCKING.withStaticSettings(StaticSettingsPolicy.REINDEX)
+
+    when:
+    def result = migrator(DEFAULT, options).bootstrap(Firm)
+
+    then:
+    result.ok()
+    engine.log().contains("deleteIndex ${firms}-g2".toString())
+    engine.getSettings(firms + '-g2').index.number_of_shards == '1'
   }
 
   def "a legacy index without metadata reports the legacy hash"() {

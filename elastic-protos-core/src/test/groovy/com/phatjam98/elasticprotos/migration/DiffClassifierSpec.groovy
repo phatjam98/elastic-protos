@@ -165,19 +165,59 @@ class DiffClassifierSpec extends Specification {
   }
 
   def "settings #description"() {
+    given:
+    def diff = DiffClassifier.diff([:], [:], existing, desired, extra as Set)
+
     expect:
-    DiffClassifier.diff([:], [:], existing, desired).settingsChanged() == changed
-    DiffClassifier.settingsWarnings(existing, desired) == warnings
+    diff.settingsChanged() == !(dynamic.isEmpty() && stat.isEmpty())
+    diff.settings().dynamicChanges()*.path == dynamic
+    diff.settings().staticChanges()*.path == stat
+    diff.settings().ignored() == ignored
 
     where:
-    description                          | existing                                                         | desired                                              | changed | warnings
-    'are compared as strings under index' | [index: [refresh_interval: '1s', number_of_shards: '1']]        | [refresh_interval: '1s', number_of_shards: 1]        | false   | []
-    'ignore keys not desired'             | [index: [refresh_interval: '1s']]                                | [:]                                                  | false   | []
-    'detect a differing value'            | [index: [refresh_interval: '1s']]                                | [refresh_interval: '5s']                             | true    | []
-    'detect a missing value'              | [index: [:]]                                                     | ['index.refresh_interval': '5s']                     | true    | []
-    'compare nested analysis'             | [index: [analysis: [analyzer: [a: [type: 'standard', max_token_length: '5']]]]] | [index: [analysis: [analyzer: [a: [type: 'standard', max_token_length: 5]]]]] | false | []
-    'never treat shard counts as changes' | [index: [number_of_shards: '2', number_of_replicas: '1']]       | [number_of_shards: 1, number_of_replicas: 0]         | false   | ['number_of_replicas is 1 but the proto asks for 0; not applied', 'number_of_shards is 2 but the proto asks for 1; not applied']
-    'accept null settings'                | null                                                             | null                                                 | false   | []
+    description                                | existing                                                           | desired                                                   | extra     | dynamic                    | stat                                  | ignored
+    'compare as strings under index'           | [index: [refresh_interval: '1s', number_of_shards: '1']]          | [refresh_interval: '1s', number_of_shards: 1]             | []        | []                         | []                                    | []
+    'ignore keys not desired'                  | [index: [refresh_interval: '1s']]                                  | [:]                                                       | []        | []                         | []                                    | []
+    'treat a replica change as dynamic'        | [index: [number_of_replicas: '1']]                                 | [number_of_replicas: 2]                                   | []        | ['number_of_replicas']     | []                                    | []
+    'treat refresh_interval as dynamic'        | [index: [refresh_interval: '1s']]                                  | [refresh_interval: '5s']                                  | []        | ['refresh_interval']       | []                                    | []
+    'read index.-prefixed keys'                | [index: [:]]                                                       | ['index.refresh_interval': '5s']                          | []        | ['refresh_interval']       | []                                    | []
+    'read the nested index form'               | [index: [max_result_window: '20000']]                              | [index: [max_result_window: 20000]]                       | []        | []                         | []                                    | []
+    'treat a dotted dynamic key as dynamic'    | [index: [mapping: [total_fields: [limit: '1000']]]]                | ['mapping.total_fields.limit': 2000]                      | []        | ['mapping.total_fields.limit'] | []                                | []
+    'treat a dynamic prefix as dynamic'        | [index: [:]]                                                       | [routing: [allocation: [include: [_name: 'n1']]]]         | []        | ['routing.allocation.include._name'] | []                          | []
+    'treat analysis as static, key by key'     | [index: [analysis: [analyzer: [a: [type: 'standard', max_token_length: '5']]]]] | [analysis: [analyzer: [a: [type: 'standard', max_token_length: 6]]]] | [] | [] | ['analysis.analyzer.a.max_token_length'] | []
+    'compare equal analysis given as int'      | [index: [analysis: [analyzer: [a: [type: 'standard', max_token_length: '5']]]]] | [index: [analysis: [analyzer: [a: [type: 'standard', max_token_length: 5]]]]] | [] | [] | [] | []
+    'treat shards as static'                   | [index: [number_of_shards: '1']]                                   | [number_of_shards: 2]                                     | []        | []                         | ['number_of_shards']                  | []
+    'treat an unknown key as static'           | [index: [:]]                                                       | [codec: 'best_compression']                               | []        | []                         | ['codec']                             | []
+    'take extra dynamic keys'                  | [index: [:]]                                                       | [codec: 'best_compression']                               | ['codec'] | ['codec']                  | []                                    | []
+    'ignore managed keys'                      | [index: [blocks: [write: 'true']]]                                 | ['blocks.write': false, uuid: 'x', 'version.created': 1]  | []        | []                         | []                                    | ['blocks.write', 'uuid', 'version.created']
+    'skip replicas under auto_expand_replicas' | [index: [number_of_replicas: '1', auto_expand_replicas: '0-1']]   | [auto_expand_replicas: '0-1', number_of_replicas: 0]      | []        | []                         | []                                    | []
+    'compare replicas when auto-expand is off' | [index: [number_of_replicas: '1', auto_expand_replicas: 'false']] | [auto_expand_replicas: false, number_of_replicas: 0]      | []        | ['number_of_replicas']     | []                                    | []
+    'accept null settings'                     | null                                                               | null                                                      | []        | []                         | []                                    | []
+  }
+
+  def "settings warnings name static and managed keys"() {
+    expect:
+    DiffClassifier.settingsWarnings([index: [number_of_shards: '2', number_of_replicas: '1']],
+        [number_of_shards: 1, number_of_replicas: 0, uuid: 'x']) ==
+        ['settings managed by the engine or the migrator are never applied: [uuid]',
+         'static settings differ; not applied: number_of_shards 2 -> 1']
+    DiffClassifier.settingsWarnings([:], [refresh_interval: '5s']).isEmpty()
+  }
+
+  def "a settings diff lists its dynamic values for the settings API and describes itself"() {
+    given:
+    def diff = DiffClassifier.settingsDiff([index: [refresh_interval: '1s', number_of_shards: '1']],
+        [refresh_interval: '5s', number_of_shards: 2, max_result_window: 20000], [] as Set)
+
+    expect:
+    diff.dynamicValues() == ['index.max_result_window': 20000, 'index.refresh_interval': '5s']
+    diff.describe() == 'max_result_window null -> 20000, refresh_interval 1s -> 5s, number_of_shards 1 -> 2'
+    !diff.isEmpty()
+    SettingsDiff.empty().isEmpty()
+    DiffClassifier.isDynamicSetting('search.slowlog.threshold.query.warn', [] as Set)
+    !DiffClassifier.isDynamicSetting('number_of_shards', [] as Set)
+    DiffClassifier.isManagedSetting('creation_date')
+    new MappingDiff([], [], [], [], false, []).settings().isEmpty()
   }
 
   def "a settings-only difference is not an empty diff but classifies as a no-op"() {

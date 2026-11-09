@@ -36,6 +36,7 @@ import com.phatjam98.elasticprotos.migration.MigrationResult
 import com.phatjam98.elasticprotos.migration.MigrationScriptProvider
 import com.phatjam98.elasticprotos.migration.ReconcileStats
 import com.phatjam98.elasticprotos.migration.RollbackMode
+import com.phatjam98.elasticprotos.migration.StaticSettingsPolicy
 import com.phatjam98.elasticprotos.migration.RemovedFieldPolicy
 import com.phatjam98.elasticprotos.proto.Bool3
 import com.phatjam98.elasticprotos.proto.DistanceUnit
@@ -895,6 +896,53 @@ abstract class EngineIntegrationSpec extends Specification {
     then:
     written != null
     count(alias) == 12
+  }
+
+  // ------------------------------------------------------------------ settings
+
+  def "dynamic settings are updated in place, and a static change reindexes into the next generation"() {
+    given: 'a documents alias under -st with the sample set'
+    IndexNamingStrategy stNaming = IndexNamingStrategy.prefixed(prefix + '-st')
+    def plain = ProtoMapper.builder().naming(stNaming).build()
+    IndexDefinition v1 = plain.map(Document)
+    indexSampleDocuments(plain)
+    def dynamic = ProtoMapper.builder().naming(stNaming).overrides(MappingOverrides.builder()
+        .setting('refresh_interval', '5s').setting('index.max_result_window', 20000).build()).build()
+    def migrator = IndexMigrator.builder().engine(engine).mapper(dynamic).options(FAST).build()
+
+    when:
+    MigrationPlan plan = migrator.plan(Document)
+    def result = migrator.apply(plan)
+    def settings = engine.getSettings(v1.name()).index
+
+    then:
+    plan.items()*.action() == [Action.UPDATE_SETTINGS]
+    result.ok()
+    settings.refresh_interval == '5s'
+    settings.max_result_window == '20000'
+    migrator.plan(Document).items()*.action() == [Action.NO_OP]
+
+    when: 'the shard count changes, with static settings reindexed'
+    def sharded = ProtoMapper.builder().naming(stNaming).overrides(MappingOverrides.builder()
+        .setting('refresh_interval', '5s').setting('index.max_result_window', 20000)
+        .setting('number_of_shards', 2).build()).build()
+    def reindexing = IndexMigrator.builder().engine(engine).mapper(sharded)
+        .options(FAST.withStaticSettings(StaticSettingsPolicy.REINDEX)).build()
+    MigrationPlan staticPlan = reindexing.plan(Document)
+    def reindexed = reindexing.apply(staticPlan)
+    def newSettings = engine.getSettings(v1.name() + '-g2').index
+
+    then:
+    staticPlan.items()*.action() == [Action.REINDEX]
+    staticPlan.items()[0].target().name() == v1.name() + '-g2'
+    staticPlan.items()[0].reason().startsWith('static settings changed: number_of_shards 1 -> 2')
+    reindexed.ok()
+    reindexed.outcomes()[0].sourceCount() == 6L
+    reindexed.outcomes()[0].destCount() == 6L
+    engine.getAliases(v1.alias()).keySet() == [v1.name() + '-g2'] as Set
+    newSettings.number_of_shards == '2'
+    newSettings.refresh_interval == '5s'
+    reindexing.plan(Document).items()*.action() == [Action.NO_OP]
   }
 
   // ------------------------------------------------------------------ concurrent bootstrap

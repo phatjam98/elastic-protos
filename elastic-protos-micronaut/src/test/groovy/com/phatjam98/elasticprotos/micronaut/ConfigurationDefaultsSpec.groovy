@@ -112,6 +112,8 @@ class ConfigurationDefaultsSpec extends Specification {
       lock.enabled
       lock.wait == Duration.ofMinutes(10)
       lock.ttl == Duration.ofMinutes(2)
+      staticSettings.name() == 'WARN'
+      extraDynamicSettings.isEmpty()
     }
     config.defaults.shards == 1
     config.defaults.replicas == -1
