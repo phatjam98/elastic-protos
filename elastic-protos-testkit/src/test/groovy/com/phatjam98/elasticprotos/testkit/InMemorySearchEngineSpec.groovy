@@ -755,14 +755,134 @@ class InMemorySearchEngineSpec extends Specification {
     when:
     def result = engine.reindex(external)
 
-    then:
+    then: 'total is still every snapshot document, so the result is not accounted for'
     !result.ok()
     result.versionConflicts() == 1
-    result.total() == 1
+    result.total() == 2
+    !result.accounted()
+    !result.complete()
     result.failures().size() == 1
     result.failures()[0].id == '1'
     result.failures()[0].status == 409
     result.failures()[0].cause.type == 'version_conflict_engine_exception'
+  }
+
+  def "a delete leaves a tombstone: the version continues on the next write"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+    engine.index('a', '1', [title: 'x'], IndexOptions.defaults())
+    engine.index('a', '1', [title: 'x'], IndexOptions.defaults())
+
+    when:
+    engine.delete('a', '1')
+
+    then:
+    engine.tombstoneVersion('a-v1', '1') == 3L
+    engine.tombstoneVersion('a-v1', '2') == null
+
+    when:
+    def again = engine.index('a', '1', [title: 'y'], IndexOptions.defaults())
+
+    then:
+    again.version() == 4L
+    again.result() == 'created'
+    engine.tombstoneVersion('a-v1', '1') == null
+
+    when: 'a bulk delete leaves one too'
+    engine.bulk([BulkOp.delete('a', '1')])
+
+    then:
+    engine.tombstoneVersion('a-v1', '1') == 5L
+  }
+
+  def "an external-version reindex onto a recently deleted id is a version conflict"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+    engine.createIndex('a-v2', [:], MAPPINGS, [] as Set)
+    engine.index('a', '1', [title: 'one'], IndexOptions.defaults())
+    engine.index('a', '2', [title: 'two'], IndexOptions.defaults())
+    def external = ReindexRequest.of('a', 'a-v2').withVersionType(ReindexRequest.VersionType.EXTERNAL)
+        .withProceedOnConflicts(true)
+    engine.reindex(external)
+
+    when: 'the copy of 1 is deleted from the destination, then the copy runs again'
+    engine.delete('a-v2', '1')
+    def result = engine.reindex(external)
+
+    then:
+    result.total() == 2
+    result.versionConflicts() == 2
+    result.created() == 0
+    result.complete()
+    !engine.get('a-v2', '1').present
+  }
+
+  def "a conditional write needs an id"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+
+    when:
+    engine.index('a', null, [title: 'x'], IndexOptions.ifMatch(0, 1))
+
+    then:
+    def e = thrown(IllegalArgumentException)
+    e.message.contains('needs a document id')
+    engine.documents('a-v1').isEmpty()
+  }
+
+  def "updateByQuery counts documents changed after it took their sequence numbers as conflicts"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+    engine.index('a', '1', [title: 'one'], IndexOptions.defaults())
+    engine.index('a', '2', [title: 'two'], IndexOptions.defaults())
+    engine.index('a', '3', [title: 'three'], IndexOptions.defaults())
+    List<String> seen = []
+    engine.duringUpdateByQuery { request ->
+      seen << request.index()
+      engine.index('a', '1', [title: 'changed'], IndexOptions.defaults())
+      engine.delete('a', '3')
+    }
+
+    when:
+    def result = engine.updateByQuery(UpdateByQueryRequest.of('a').withProceedOnConflicts(true))
+
+    then:
+    seen == ['a']
+    result.total() == 3
+    result.updated() == 1
+    result.versionConflicts() == 2
+    result.complete()
+    engine.get('a', '1').get().version() == 2L
+    engine.get('a', '2').get().version() == 2L
+  }
+
+  def "updateByQuery without proceedOnConflicts stops at the first changed document with one 409 failure"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+    engine.index('a', '1', [title: 'one'], IndexOptions.defaults())
+    engine.index('a', '2', [title: 'two'], IndexOptions.defaults())
+    engine.duringUpdateByQuery { engine.index('a', '1', [title: 'changed'], IndexOptions.defaults()) }
+
+    when:
+    def result = engine.updateByQuery(UpdateByQueryRequest.of('a'))
+
+    then:
+    result.total() == 2
+    result.updated() == 0
+    result.versionConflicts() == 1
+    result.failures().size() == 1
+    result.failures()[0].id == '1'
+    result.failures()[0].status == 409
+    result.failures()[0].cause.reason.contains('current document has seqNo [2]')
+    !result.ok()
+    !result.accounted()
+    engine.get('a', '2').get().version() == 1L
+
+    when: 'the hook is removed, nothing conflicts'
+    engine.duringUpdateByQuery(null)
+
+    then:
+    engine.updateByQuery(UpdateByQueryRequest.of('a')).complete()
   }
 
   def "putSettings merges flat and nested settings, keeps the getSettings shape and records itself"() {

@@ -750,7 +750,7 @@ abstract class EngineIntegrationSpec extends Specification {
     String spi = prefix + '-spi'
     String copy = prefix + '-spi-copy'
     Map<String, Object> settings = [number_of_shards: 1, number_of_replicas: 0]
-    Map<String, Object> mappings = [properties: [title: [type: 'keyword']]]
+    Map<String, Object> mappings = [properties: [title: [type: 'text']]]
     engine.createIndex(spi, settings, mappings, [] as Set)
     engine.createIndex(copy, settings, mappings, [] as Set)
 
@@ -825,10 +825,68 @@ abstract class EngineIntegrationSpec extends Specification {
     when: 'without proceeding on conflicts'
     def aborted = engine.reindex(external.withProceedOnConflicts(false))
 
-    then: 'the conflict is reported as a failure'
+    then: 'the conflict is reported as a failure, and the total still counts every document'
     !aborted.ok()
     aborted.versionConflicts() >= 1
     !aborted.failures().isEmpty()
+    !aborted.complete()
+
+    when: 'a conditional delete has a stale sequence number'
+    def two = engine.get(spi, '2').get()
+    engine.delete(spi, '2', IndexOptions.ifMatch(two.seqNo() + 100, two.primaryTerm()))
+
+    then:
+    def staleDelete = thrown(EngineException)
+    staleDelete.kind == EngineException.Kind.CONFLICT
+    engine.get(spi, '2').present
+
+    when: 'a conditional delete names a missing document'
+    def missingDelete = outcome { engine.delete(spi, 'missing', IndexOptions.ifMatch(0, 1)) }
+
+    then: 'both engines answer 409'
+    missingDelete == EngineException.Kind.CONFLICT
+
+    when: 'a bulk carries one stale conditional delete'
+    def bulk = engine.bulk([
+        BulkOp.index(spi, '4', [title: 'four']),
+        BulkOp.deleteIfMatch(spi, '2', two.seqNo() + 100, two.primaryTerm()),
+        BulkOp.deleteIfMatch(spi, '3', engine.get(spi, '3').get().seqNo(), two.primaryTerm()),
+    ])
+
+    then: 'only that item fails'
+    bulk.items()*.status() == [201, 409, 200]
+    bulk.failures()*.id() == ['2']
+    engine.get(spi, '2').present
+    !engine.get(spi, '3').present
+
+    when: 'a reindex selects one document by id'
+    String one = prefix + '-spi-one'
+    engine.createIndex(one, settings, mappings, [] as Set)
+    def selected = engine.reindex(ReindexRequest.of(spi, one).withQuery([ids: [values: ['1']]]))
+
+    then:
+    selected.total() == 1
+    selected.created() == 1
+    selected.complete()
+    count(one) == 1
+
+    when: 'a match query asks for highlights on a text field'
+    engine.refresh(spi)
+    def highlighted = engine.search([spi], [query: [match: [title: 'four']], highlight: [fields: [title: [:]]]]).hits()
+
+    then:
+    highlighted*.id() == ['4']
+    !highlighted[0].highlight()['title'].isEmpty()
+    highlighted[0].highlight()['title'][0].contains('<em>four</em>')
+  }
+
+  /** Runs a call and returns its result, or the kind of the {@link EngineException} it threw. */
+  static Object outcome(Closure<?> call) {
+    try {
+      call()
+    } catch (EngineException e) {
+      e.kind
+    }
   }
 
   // ------------------------------------------------------------------ helpers
