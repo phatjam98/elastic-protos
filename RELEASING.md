@@ -22,8 +22,8 @@ stages every module into the shared `build/staging-deploy` directory (`./gradlew
    namespace `com.phatjam98` verified (it is shared with proto-faker). Generate a **user token**
    (Account > Generate User Token); legacy OSSRH credentials do not work. For snapshot publishing,
    enable SNAPSHOTs for the namespace (Namespaces > `com.phatjam98`).
-2. **GitHub token** for creating releases: a classic token with `repo` scope or a fine-grained
-   token with Contents read/write on `phatjam98/elastic-protos`.
+2. **GitHub token** for creating releases, needed for local runs only: a classic token with `repo`
+   scope (for example the output of `gh auth token`). GitHub Actions uses its automatic token.
 3. **GPG key** `0BF66CC2B921A8AA` (owner phatjam98@gmail.com, expires **2027-10-31**, see
    [Key renewal](#gpg-key-renewal)). Its public key must be on the public keyservers, because Central
    verifies signatures against them:
@@ -40,7 +40,6 @@ Repository Settings > Secrets and variables > Actions. The snapshot and release 
 
 | Secret | Value |
 |---|---|
-| `JRELEASER_GITHUB_TOKEN` | The GitHub token above |
 | `JRELEASER_MAVENCENTRAL_USERNAME` | Central Portal user token username |
 | `JRELEASER_MAVENCENTRAL_PASSWORD` | Central Portal user token password |
 | `JRELEASER_NEXUS2_USERNAME` | Central Portal user token username (snapshots) |
@@ -48,6 +47,10 @@ Repository Settings > Secrets and variables > Actions. The snapshot and release 
 | `JRELEASER_GPG_PUBLIC_KEY` | `gpg --armor --export 0BF66CC2B921A8AA` |
 | `JRELEASER_GPG_SECRET_KEY` | `gpg --armor --export-secret-keys 0BF66CC2B921A8AA` |
 | `JRELEASER_GPG_PASSPHRASE` | The key's passphrase (leave empty if it has none) |
+
+No GitHub token secret is needed in GitHub Actions: the workflows pass the automatic `GITHUB_TOKEN`
+to JReleaser (job permission `contents: write`, plus `issues: write` for the release workflow). For a
+local run, set `JRELEASER_GITHUB_TOKEN` to a personal access token with `repo` scope.
 
 The keys are stored ASCII-armored. The workflows also import the secret key into the runner's GPG
 agent (`crazy-max/ghaction-import-gpg`).
@@ -210,6 +213,22 @@ real releases run on `main`.
 
 **Inspecting configuration.** `./gradlew jreleaserConfig` prints the resolved configuration with
 secrets masked; add `--info` to any JReleaser task for more output.
+
+## Recovering a half-finished release
+
+A Maven Central release is irreversible, so never rerun `jreleaserFullRelease` for a version that is
+already on Central. If the Central deploy succeeded but the GitHub release failed (for example a bad
+GitHub token), run Actions > **Release** > Run workflow by hand (`workflow_dispatch`) from `main` with
+`version` set, **dry run** unchecked and **release only** checked. That runs `jreleaserRelease` from the
+tagged commit: it signs and creates the GitHub release with the changelog and never touches Maven
+Central. The local equivalent, with the GPG and GitHub env vars set, is:
+
+```bash
+JRELEASER_SKIP_TAG=true ./gradlew jreleaserRelease -Pversion=X.Y.Z
+```
+
+If the tag itself is missing, dispatch without release only: that creates the tag as part of the full
+release, so use it only when the version is not yet on Central.
 
 ## GPG key renewal
 
