@@ -297,7 +297,7 @@ class ProtoMapperSpec extends Specification {
 
     then:
     names == ['ep:children.*.items.quantity', 'ep:children.*.items.sku', 'ep:children.*.count',
-              'ep:children.*.items', 'ep:children.*.label', 'ep:children.*.name', 'ep:bags.*',
+              'ep:children.*.items', 'ep:children.*.label', 'ep:children.*.name', 'ep:attributes.*', 'ep:bags.*',
               'ep:children.*', 'ep:counters.*', 'ep:due.*', 'ep:levels.*', 'ep:notes.*', 'ep:places.*']
     definition.fields().keySet().every { !it.contains('*') }
     definition.dynamicFields().keySet() == ['children.*', 'children.*.count', 'children.*.items',
@@ -322,7 +322,8 @@ class ProtoMapperSpec extends Specification {
     definition.resolve('children.k').get().kind() == FieldKind.OBJECT
     definition.resolve('id').get().isDynamic() == false
     ['counters', 'labels'].every { !definition.resolve(it).get().isDynamic() }
-    ['counters.', 'counters..x', 'counters.a.', 'counters.a.b', 'children.k.nope', 'nope.x', 'labels.env']
+    ['counters.', 'counters..x', 'counters.a.', 'counters.a.b', 'children.k.nope', 'nope.x', 'labels.env',
+     'counters.*', 'counters.a*', 'children.*.count']
         .every { definition.resolve(it).isEmpty() }
     definition.typedMapValues('children.k.nope').get().path() == 'children.*'
     definition.typedMapValues('labels.env').isEmpty()
@@ -340,8 +341,9 @@ class ProtoMapperSpec extends Specification {
         'each distinct key of due adds 1 field(s) at index time (index.mapping.total_fields.limit)',
         'each distinct key of levels adds 1 field(s) at index time (index.mapping.total_fields.limit)',
         'each distinct key of places adds 1 field(s) at index time (index.mapping.total_fields.limit)',
-        'each distinct key of children adds 5 field(s) at index time (index.mapping.total_fields.limit)',
-        'values of bags are untyped: phatjam98.elasticprotos.example.TypedBag contains a map or Struct',
+        'each distinct key of children adds 7 field(s) at index time (index.mapping.total_fields.limit), 1 of them nested (index.mapping.nested_fields.limit, default 50)',
+        'values of bags are untyped: phatjam98.elasticprotos.example.TypedBag is or contains a map, Struct or Any',
+        'values of attributes are untyped: google.protobuf.Struct is or contains a map, Struct or Any',
     ]
   }
 
@@ -384,7 +386,11 @@ class ProtoMapperSpec extends Specification {
     templates['ep:message_map.*.grandchild.note'].mapping == [type: 'keyword', ignore_above: 256]
     definition.fullTextFields() == ['string_map.*': 3f]
     definition.nestedAncestors('message_map.k.rank') == ['message_map.k']
+    definition.nestedAncestors('message_map.k.grandchild.note') == ['message_map.k']
     definition.resolve('message_map.k').get().kind() == FieldKind.NESTED
+    definition.resolve('message_map.k').get().isDynamic()
+    definition.warnings().contains('each distinct key of message_map adds 5 field(s) at index time'
+        + ' (index.mapping.total_fields.limit), 1 of them nested (index.mapping.nested_fields.limit, default 50)')
   }
 
   def "full_text on a message-valued map adds its text leaves outside nested values"() {
@@ -428,7 +434,7 @@ class ProtoMapperSpec extends Specification {
     definition.dynamicFields().keySet() == ['message_map.*'] as Set
   }
 
-  def "Struct, Timestamp and wrapper values are single values; Any values are untyped"() {
+  def "wrapper values are single values; Struct and Any values are untyped"() {
     given:
     def file = FileDescriptorProto.newBuilder().setName('values.proto').setPackage('values')
         .setSyntax('proto3')
@@ -456,11 +462,14 @@ class ProtoMapperSpec extends Specification {
     Map templates = definition.mappings().dynamic_templates.collectEntries { it }
 
     then:
-    templates['ep:structs.*'].mapping == [type: 'flattened']
+    templates['ep:structs.*'] == [path_match: 'structs.*', match_mapping_type: 'object',
+                                  mapping: [type: 'object', dynamic: true]]
+    definition.warnings().contains('values of structs are untyped: google.protobuf.Struct is or contains a map, Struct or Any')
     templates['ep:wrapped.*'].mapping == [type: 'integer']
     templates['ep:anys.*'] == [path_match: 'anys.*', match_mapping_type: 'object',
                                mapping: [type: 'object', dynamic: true]]
-    definition.warnings().contains('values of anys are untyped: google.protobuf.Any contains a map or Struct')
+    definition.warnings().contains('values of anys are untyped: google.protobuf.Any is or contains a map, Struct or Any')
+    definition.dynamicFields().keySet() == ['wrapped.*'] as Set
   }
 
   static FieldDescriptorProto mapField(String name, int number, String entryType) {

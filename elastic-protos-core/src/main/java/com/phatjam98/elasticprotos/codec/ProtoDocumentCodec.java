@@ -320,10 +320,10 @@ public final class ProtoDocumentCodec {
     Map<String, Object> out = new TreeMap<>();
     for (Map.Entry<String, Object> entry : entries.entrySet()) {
       String key = entry.getKey();
-      if (key.isEmpty() || key.indexOf('.') >= 0) {
+      if (key.isBlank() || key.indexOf('.') >= 0) {
         throw new CodecException("Field " + info.protoPath() + " has the key '" + key
             + "'; keys of a map mapped as " + info.kind()
-            + " must be non-empty and contain no '.'");
+            + " must not be blank and must contain no '.'");
       }
       Object converted = forwardValue(entry.getValue(), valueField, values, schema);
       if (converted != null) {

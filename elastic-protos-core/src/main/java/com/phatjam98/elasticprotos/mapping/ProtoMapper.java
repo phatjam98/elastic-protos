@@ -535,7 +535,8 @@ public final class ProtoMapper {
 
       if (!isMessageValue(value, valueType)) {
         if (value.getType() == FieldDescriptor.Type.MESSAGE
-            && UNTYPED_VALUES.contains(value.getMessageType().getFullName())) {
+            && (UNTYPED_VALUES.contains(value.getMessageType().getFullName())
+                || STRUCT_LIKE.contains(value.getMessageType().getFullName()))) {
           untyped(path, value.getMessageType());
           return;
         }
@@ -546,7 +547,7 @@ public final class ProtoMapper {
         if (fullText && (kind.isText() || kind == FieldKind.KEYWORD)) {
           fullTextFields.put(valuePath, boost);
         }
-        keyWarning(path, 1 + subFieldCount(scratch.mapping()));
+        keyWarning(path, 1 + subFieldCount(scratch.mapping()), 0);
         return;
       }
 
@@ -563,7 +564,7 @@ public final class ProtoMapper {
         template(valuePath, false, disabled);
         dynamicFields.put(valuePath, new FieldInfo(valuePath, valueProtoPath, FieldKind.OBJECT,
             false, false, boost, value, valuePath));
-        keyWarning(path, 1);
+        keyWarning(path, 1, 0);
         return;
       }
       FieldKind rootKind = valueType == EsType.NESTED ? FieldKind.NESTED : FieldKind.OBJECT;
@@ -571,7 +572,9 @@ public final class ProtoMapper {
       dynamicFields.put(valuePath, new FieldInfo(valuePath, valueProtoPath, rootKind, false, false,
           boost, value, valuePath));
       scratch.fields().forEach((pattern, info) -> dynamicFields.put(pattern, dynamic(info)));
-      int leaves = templates(scratch.mapping(), valuePath);
+      // the object (or nested) field of the key itself, then everything inside the value
+      int[] counts = {1, rootKind == FieldKind.NESTED ? 1 : 0};
+      templates(scratch.mapping(), valuePath, counts);
       if (fullText && rootKind != FieldKind.NESTED) {
         scratch.fullText().forEach((pattern, fieldBoost) -> {
           boolean underNested = scratch.fields().values().stream()
@@ -582,25 +585,33 @@ public final class ProtoMapper {
           }
         });
       }
-      keyWarning(path, leaves);
+      keyWarning(path, counts[0], counts[1]);
     }
 
-    /** Turns the properties of a map value into templates; returns the number of leaf fields. */
+    /**
+     * Turns the properties of a map value into templates, counting the fields they add per key the
+     * way the engines count them.
+     *
+     * @param counts {@code [fields, nested fields]}, incremented in place
+     */
     @SuppressWarnings("unchecked")
-    private int templates(Map<String, Object> properties, String prefix) {
-      int count = 0;
+    private void templates(Map<String, Object> properties, String prefix, int[] counts) {
       for (Map.Entry<String, Object> entry : properties.entrySet()) {
         String pattern = prefix + "." + entry.getKey();
         Map<String, Object> property = (Map<String, Object>) entry.getValue();
         if (property.get("properties") instanceof Map) {
-          template(pattern, true, container(String.valueOf(property.get("type"))));
-          count += templates((Map<String, Object>) property.get("properties"), pattern);
+          String type = String.valueOf(property.get("type"));
+          template(pattern, true, container(type));
+          counts[0]++;
+          if (FieldKind.NESTED.esType().equals(type)) {
+            counts[1]++;
+          }
+          templates((Map<String, Object>) property.get("properties"), pattern, counts);
         } else {
           template(pattern, false, property);
-          count += 1 + subFieldCount(property);
+          counts[0] += 1 + subFieldCount(property);
         }
       }
-      return count;
     }
 
     private void template(String pathMatch, boolean objectsOnly, Map<String, Object> mapping) {
@@ -615,13 +626,15 @@ public final class ProtoMapper {
 
     private void untyped(String path, Descriptor message) {
       warnings.add("values of " + path + " are untyped: " + message.getFullName()
-          + " contains a map or Struct");
+          + " is or contains a map, Struct or Any");
       template(path + ".*", true, container(FieldKind.OBJECT.esType()));
     }
 
-    private void keyWarning(String path, int count) {
+    private void keyWarning(String path, int count, int nested) {
       warnings.add("each distinct key of " + path + " adds " + count
-          + " field(s) at index time (index.mapping.total_fields.limit)");
+          + " field(s) at index time (index.mapping.total_fields.limit)"
+          + (nested == 0 ? "" : ", " + nested + " of them nested"
+              + " (index.mapping.nested_fields.limit, default 50)"));
     }
 
     /**

@@ -471,10 +471,10 @@ class ProtoDocumentCodecSpec extends Specification {
 
     then:
     def e = thrown(CodecException)
-    e.message == "Field counters has the key '${key}'; keys of a map mapped as OBJECT must be non-empty and contain no '.'"
+    e.message == "Field counters has the key '${key}'; keys of a map mapped as OBJECT must not be blank and must contain no '.'"
 
     where:
-    key << ['a.b', '']
+    key << ['a.b', '', '  ']
   }
 
   def "keys of flattened maps stay opaque"() {

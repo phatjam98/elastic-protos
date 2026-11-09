@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package phatjam98.elasticprotos.example;
 
+import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 import "phatjam98/elasticprotos/v1/elastic_options.proto";
 import "phatjam98/elasticprotos/v1/geo.proto";
@@ -37,6 +38,8 @@ message TypedMaps {
   map<string, TypedBag> bags = 8 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
   // the default: flattened
   map<string, string> labels = 9;
+  // attributes.<key> => untyped object: a Struct has no fixed fields
+  map<string, google.protobuf.Struct> attributes = 10 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
 }
 
 enum TypedMapLevel {
