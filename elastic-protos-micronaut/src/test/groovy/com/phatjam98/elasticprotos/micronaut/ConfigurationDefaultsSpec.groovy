@@ -109,6 +109,9 @@ class ConfigurationDefaultsSpec extends Specification {
       reindexMode.name() == 'ZERO_DOWNTIME'
       swapGrace == Duration.ofSeconds(5)
       backfill
+      lock.enabled
+      lock.wait == Duration.ofMinutes(10)
+      lock.ttl == Duration.ofMinutes(2)
     }
     config.defaults.shards == 1
     config.defaults.replicas == -1

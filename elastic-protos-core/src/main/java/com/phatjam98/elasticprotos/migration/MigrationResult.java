@@ -26,6 +26,11 @@ public record MigrationResult(List<Outcome> outcomes) {
     BLOCKED,
     /** The change failed; see {@link Outcome#error()}. */
     FAILED,
+    /**
+     * Nothing was done because another process held the alias's migration lock for longer than
+     * {@link MigrationOptions#lockWait()}; see {@link Outcome#error()}, a {@link LockException}.
+     */
+    LOCKED,
     /** Nothing was done because the options ask for a dry run. */
     DRY_RUN
   }
@@ -94,17 +99,17 @@ public record MigrationResult(List<Outcome> outcomes) {
 
     /** Returns whether this item neither failed nor was blocked. */
     public boolean ok() {
-      return status != Status.FAILED && status != Status.BLOCKED
+      return status != Status.FAILED && status != Status.BLOCKED && status != Status.LOCKED
           && plan.action() != Action.BLOCKED;
     }
   }
 
-  /** Returns whether no item failed and none was blocked. */
+  /** Returns whether no item failed, was blocked or found its lock held. */
   public boolean ok() {
     return outcomes.stream().allMatch(Outcome::ok);
   }
 
-  /** Returns the items that failed or were blocked. */
+  /** Returns the items that failed, were blocked or found their lock held. */
   public List<Outcome> problems() {
     List<Outcome> problems = new ArrayList<>();
     for (Outcome outcome : outcomes) {

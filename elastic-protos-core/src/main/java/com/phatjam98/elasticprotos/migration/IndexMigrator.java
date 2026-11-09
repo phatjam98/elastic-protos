@@ -90,9 +90,18 @@ import org.slf4j.LoggerFactory;
  * target name exists and is write-blocked: it is an old index retained by an earlier reindex,
  * kept for rollback, and is never reused or deleted.
  *
- * <p>Running the migrator for the same aliases from several processes at once is unsupported and
- * can be destructive: one process can clear the write block or delete the index another is
- * reindexing into. Run it from one instance or a dedicated job.
+ * <p><b>Several instances.</b> With {@link MigrationOptions#lock()} (the default), {@link #apply}
+ * takes a per-alias lock before it changes anything: a document named after the alias in the lock
+ * index ({@link IndexNamingStrategy#lockIndex()}), created with {@code op_type: create} so that
+ * one process wins, renewed by a heartbeat every third of {@link MigrationOptions#lockTtl()} and
+ * taken over once it expired. Under the lock the item is planned again and the fresh plan is
+ * applied, so processes that waited find the work done ({@code NO_OP}) or pick up what a crashed
+ * holder left. A lock still held after {@link MigrationOptions#lockWait()} makes the item {@link
+ * Status#LOCKED}. Before every step that cannot be taken back (alias swaps, write blocks, mapping
+ * and {@code _meta} updates, deleting the old index) the lease is checked; a lost lease stops the
+ * item without cleanup, and the next run resumes. {@link #rollback(IndexPlan, String,
+ * RollbackMode)} takes the same lock. Without the lock, running the migrator for the same aliases
+ * from several processes at once is unsupported and can be destructive.
  */
 public final class IndexMigrator {
 
@@ -123,6 +132,9 @@ public final class IndexMigrator {
   private final MigrationOptions options;
   private final MigrationScriptProvider scripts;
   private final MigrationListener listener;
+  private final AliasLock lock;
+  /** The lease the current thread holds while it applies an item under the alias lock. */
+  private final ThreadLocal<AliasLock.Lease> lease = new ThreadLocal<>();
 
   private IndexMigrator(Builder builder) {
     this.engine = Objects.requireNonNull(builder.engine, "engine is required");
@@ -130,6 +142,10 @@ public final class IndexMigrator {
     this.options = builder.options;
     this.scripts = builder.scripts;
     this.listener = builder.listener;
+    this.lock = options.lock()
+        ? new AliasLock(engine, mapper.naming().lockIndex(), options.lockTtl(),
+            () -> replicasFor(options.replicas()))
+        : null;
   }
 
   /** Starts building a migrator. */
@@ -492,14 +508,85 @@ public final class IndexMigrator {
         outcomes.add(new Outcome(item, Status.DRY_RUN, expectedIndex(item), List.of(), null));
         continue;
       }
-      Outcome outcome = applyOne(item);
+      Outcome outcome = needsLock(item) ? applyLocked(item) : applyOne(item);
       outcomes.add(outcome);
-      if (outcome.status() == Status.FAILED && options.failure() == FailurePolicy.FAIL_FAST) {
+      if ((outcome.status() == Status.FAILED || outcome.status() == Status.LOCKED)
+          && options.failure() == FailurePolicy.FAIL_FAST) {
         LOG.info("stopping after the failure of {} (FAIL_FAST)", item.alias());
         break;
       }
     }
     return new MigrationResult(outcomes);
+  }
+
+  /** Returns whether applying the item changes anything, and so needs the alias lock. */
+  private boolean needsLock(IndexPlan item) {
+    if (lock == null) {
+      return false;
+    }
+    switch (item.action()) {
+      case BLOCKED:
+        return false;
+      case NO_OP:
+        return item.writeBlocked() && options.clearStaleWriteBlock();
+      default:
+        return true;
+    }
+  }
+
+  /**
+   * Takes the alias lock, plans the item again under it and applies the fresh plan. Planning again
+   * is what turns the work another process finished meanwhile into a {@code NO_OP}, and what lets
+   * a run pick up a migration another process left unfinished.
+   */
+  private Outcome applyLocked(IndexPlan item) {
+    AliasLock.Lease held;
+    try {
+      held = lock.acquire(item.alias(), item.action().name(), item.target().contentHash(),
+          options.lockWait());
+    } catch (LockException e) {
+      LOG.warn("{}: {}", item.alias(), e.getMessage());
+      return new Outcome(item, Status.LOCKED, item.currentIndex(), List.of(), e);
+    } catch (RuntimeException e) {
+      LOG.warn("{}: could not take the migration lock: {}", item.alias(), e.getMessage());
+      return new Outcome(item, Status.FAILED, item.currentIndex(), List.of(), e);
+    }
+    lease.set(held);
+    try (held) {
+      IndexPlan fresh;
+      try {
+        fresh = planOne(mapper.map(item.target().descriptor()));
+      } catch (RuntimeException e) {
+        return new Outcome(item, Status.FAILED, item.currentIndex(), List.of(), e);
+      }
+      if (fresh.action() != item.action()) {
+        LOG.info("{}: planned again under the lock: {} instead of {} ({})", item.alias(),
+            fresh.action(), item.action(), fresh.reason());
+      }
+      return applyOne(fresh);
+    } finally {
+      lease.remove();
+    }
+  }
+
+  /**
+   * Throws when the alias lock this thread holds was lost; called before every step that cannot
+   * be taken back. The run then stops without cleanup, like a crash, and the next run resumes.
+   */
+  private void guard() {
+    AliasLock.Lease held = lease.get();
+    if (held == null) {
+      return;
+    }
+    try {
+      held.check();
+    } catch (LockException e) {
+      throw new Interrupted(null, e);
+    }
+  }
+
+  private int replicasFor(ReplicaPolicy policy) {
+    return policy.replicas(policy.needsDataNodes() ? engine.health().numberOfDataNodes() : 0);
   }
 
   /**
@@ -535,6 +622,27 @@ public final class IndexMigrator {
   public Outcome rollback(IndexPlan plan, String previousIndex, RollbackMode mode) {
     Objects.requireNonNull(previousIndex, "previousIndex");
     Objects.requireNonNull(mode, "mode");
+    if (lock == null) {
+      return rollbackUnlocked(plan, previousIndex, mode);
+    }
+    AliasLock.Lease held;
+    try {
+      held = lock.acquire(plan.alias(), "ROLLBACK", plan.target().contentHash(),
+          options.lockWait());
+    } catch (LockException e) {
+      return new Outcome(plan, Status.LOCKED, plan.target().name(), List.of(), e);
+    } catch (RuntimeException e) {
+      return new Outcome(plan, Status.FAILED, plan.target().name(), List.of(), e);
+    }
+    lease.set(held);
+    try (held) {
+      return rollbackUnlocked(plan, previousIndex, mode);
+    } finally {
+      lease.remove();
+    }
+  }
+
+  private Outcome rollbackUnlocked(IndexPlan plan, String previousIndex, RollbackMode mode) {
     String alias = plan.alias();
     String next = plan.target().name();
     LOG.info("rolling back {} ({}): alias from {} to {}", alias, mode, next, previousIndex);
@@ -546,6 +654,7 @@ public final class IndexMigrator {
             + ", not at " + next + " only; nothing was rolled back");
       }
       if (mode == RollbackMode.ALIAS_ONLY) {
+        guard();
         engine.setWriteBlock(previousIndex, false);
         engine.updateAliases(List.of(AliasAction.remove(next, alias),
             AliasAction.add(previousIndex, alias)));
@@ -591,6 +700,7 @@ public final class IndexMigrator {
   private Outcome reverseDelta(IndexPlan plan, String previous, String next) {
     String alias = plan.alias();
     Map<String, Object> meta = metaOf(engine.getMappings(previous));
+    guard();
     engine.setWriteBlock(previous, false);
     Pit pit;
     try {
@@ -601,6 +711,7 @@ public final class IndexMigrator {
       abortRollback(alias, previous, meta, null);
       return new Outcome(plan, Status.FAILED, next, List.of(), rollbackAborted(alias, next, e));
     }
+    guard();
     try {
       engine.updateAliases(List.of(AliasAction.remove(next, alias),
           AliasAction.add(previous, alias)));
@@ -656,6 +767,7 @@ public final class IndexMigrator {
         case PUT_MAPPING:
           LOG.info("{}: adding fields {} to {}", item.alias(), paths(item.diff().added()),
               item.currentIndex());
+          guard();
           engine.putMappings(item.currentIndex(), item.target().mappings());
           clearStaleWriteBlock(item);
           return new Outcome(item, Status.APPLIED, item.currentIndex(), List.of(), null);
@@ -681,6 +793,13 @@ public final class IndexMigrator {
 
   /** Reports a run the listener stopped, naming the index the alias points at now. */
   private Outcome interrupted(IndexPlan item, Interrupted e) {
+    if (e.getCause() instanceof LockException) {
+      LOG.warn("{}: stopped: {}", item.alias(), e.getCause().getMessage());
+      Set<String> holders = aliasHolders(item.alias());
+      String index = holders != null && holders.size() == 1
+          ? holders.iterator().next() : item.currentIndex();
+      return new Outcome(item, Status.FAILED, index, List.of(), e.getCause());
+    }
     LOG.warn("{}: stopped by the listener after {}: {}", item.alias(), e.phase,
         e.getCause().getMessage());
     Set<String> holders = aliasHolders(item.alias());
@@ -697,6 +816,7 @@ public final class IndexMigrator {
     }
     LOG.warn("{}: clearing the write block on {}, assumed to be left by an interrupted reindex",
         item.alias(), item.currentIndex());
+    guard();
     engine.setWriteBlock(item.currentIndex(), false);
     return true;
   }
@@ -704,6 +824,7 @@ public final class IndexMigrator {
   private Outcome create(IndexPlan item) {
     IndexDefinition target = item.target();
     LOG.info("{}: creating {} with the alias", target.alias(), target.name());
+    guard();
     engine.createIndex(target.name(), creationSettings(target), target.mappings(),
         Set.of(target.alias()));
     return new Outcome(item, Status.APPLIED, target.name(), List.of(), null);
@@ -713,9 +834,7 @@ public final class IndexMigrator {
     Map<String, Object> settings = new TreeMap<>(target.settings());
     settings.putIfAbsent("number_of_shards", options.defaultShards());
     if (!settings.containsKey("number_of_replicas")) {
-      ReplicaPolicy policy = options.replicas();
-      int dataNodes = policy.needsDataNodes() ? engine.health().numberOfDataNodes() : 0;
-      settings.put("number_of_replicas", policy.replicas(dataNodes));
+      settings.put("number_of_replicas", replicasFor(options.replicas()));
     }
     return settings;
   }
@@ -746,6 +865,7 @@ public final class IndexMigrator {
       }
     }
     LOG.info("{}: blocking writes to {}", alias, current);
+    guard();
     engine.setWriteBlock(current, true);
     long before;
     long after;
@@ -796,6 +916,7 @@ public final class IndexMigrator {
     }
 
     LOG.info("{}: swapping the alias from {} to {}", alias, current, next);
+    guard();
     try {
       engine.updateAliases(List.of(AliasAction.remove(current, alias),
           AliasAction.add(next, alias)));
@@ -813,6 +934,7 @@ public final class IndexMigrator {
     phase(alias, Phase.SWAPPED);
     if (options.deleteOldAfter()) {
       LOG.info("{}: deleting old index {}", alias, current);
+      guard();
       engine.deleteIndex(current);
       return new Outcome(item, Status.APPLIED, next, List.of(), null, before, after, warnings);
     }
@@ -831,6 +953,7 @@ public final class IndexMigrator {
     if (item.writeBlocked() && options.clearStaleWriteBlock()) {
       LOG.warn("{}: clearing the write block on {}, assumed to be left by an interrupted reindex",
           alias, current);
+      guard();
       engine.setWriteBlock(current, false);
     }
     String fromHash = item.currentHash() == null ? LEGACY_HASH : item.currentHash();
@@ -852,6 +975,7 @@ public final class IndexMigrator {
     }
 
     LOG.info("{}: swapping the alias from {} to {}", alias, current, next);
+    guard();
     try {
       engine.updateAliases(List.of(AliasAction.remove(current, alias),
           AliasAction.add(next, alias)));
@@ -1009,6 +1133,7 @@ public final class IndexMigrator {
     }
     if (move.deleteOld()) {
       LOG.info("{}: deleting old index {}", alias, from);
+      guard();
       engine.deleteIndex(from);
       return new Outcome(item, Status.APPLIED, to, List.of(), null, before, after, warnings,
           counts.stats());
@@ -1024,6 +1149,7 @@ public final class IndexMigrator {
     if (!isWriteBlocked(engine.getSettings(from))) {
       pause(options.swapGrace());
       LOG.info("{}: blocking writes to {}", move.alias(), from);
+      guard();
       engine.setWriteBlock(from, true);
     }
     engine.refresh(from);
@@ -1110,6 +1236,7 @@ public final class IndexMigrator {
    * whole on a mapping update, so leaving the key out removes it.
    */
   private void writePending(String index, Map<String, Object> meta, Map<String, Object> pending) {
+    guard();
     engine.putMappings(index, Map.of("_meta", withPending(meta, pending)));
   }
 
@@ -1167,7 +1294,10 @@ public final class IndexMigrator {
     }
   }
 
-  /** The listener stopped the run; nothing is cleaned up, as after a crash. */
+  /**
+   * The listener stopped the run, or the alias lock was lost (phase null); nothing is cleaned up,
+   * as after a crash.
+   */
   private static final class Interrupted extends RuntimeException {
     private static final long serialVersionUID = 1L;
     private final transient Phase phase;
@@ -1193,6 +1323,7 @@ public final class IndexMigrator {
     mappings.put("_meta", withPending(meta, pending));
     LOG.info("{}: adding {} to {} and backfilling its documents", alias,
         paths(item.diff().unindexedAdditions()), current);
+    guard();
     engine.putMappings(current, mappings);
     phase(alias, Phase.BACKFILL_MARKED);
     ReindexResult result = engine.updateByQuery(UpdateByQueryRequest.builder()

@@ -49,12 +49,26 @@ import java.util.Objects;
  *   <li>{@code backfill}: whether additions that existing documents were never indexed into are
  *       applied in place with an update by query ({@link Action#BACKFILL}); when false they are
  *       reindexed; default true
+ *   <li>{@code lock}: whether {@link IndexMigrator#apply(MigrationPlan)} and {@code rollback} take
+ *       a per-alias lock in the lock index ({@link
+ *       com.phatjam98.elasticprotos.mapping.IndexNamingStrategy#lockIndex()}) and re-plan the item
+ *       under it, so that several instances can bootstrap at once; default true. Turn it off only
+ *       when a single process ever migrates
+ *   <li>{@code lockWait}: how long to wait for a lock another process holds before the item is
+ *       {@link MigrationResult.Status#LOCKED}; default ten minutes; {@link Duration#ZERO} fails at
+ *       once
+ *   <li>{@code lockTtl}: how long a lock lives without a heartbeat (the holder renews it every
+ *       third of it); a lock older than that is taken over; default two minutes, at least one
+ *       second
  * </ul>
  *
  * <p>Null settings throw {@link NullPointerException}; a shard count below 1 or a timeout that is
- * not positive, or a negative swap grace, throws {@link IllegalArgumentException}.
+ * not positive, a negative swap grace or lock wait, or a lock TTL under one second, throws {@link IllegalArgumentException}.
  */
 public final class MigrationOptions {
+
+  /** The shortest lock TTL: the heartbeat runs every third of it. */
+  private static final Duration MIN_LOCK_TTL = Duration.ofSeconds(1);
 
   private final FailurePolicy failure;
   private final boolean allowReindex;
@@ -68,6 +82,9 @@ public final class MigrationOptions {
   private final ReindexMode reindexMode;
   private final Duration swapGrace;
   private final boolean backfill;
+  private final boolean lock;
+  private final Duration lockWait;
+  private final Duration lockTtl;
 
   private MigrationOptions(Builder builder) {
     Objects.requireNonNull(builder.failure, "failure");
@@ -78,6 +95,14 @@ public final class MigrationOptions {
     Objects.requireNonNull(builder.swapGrace, "swapGrace");
     if (builder.swapGrace.isNegative()) {
       throw new IllegalArgumentException("swapGrace must not be negative: " + builder.swapGrace);
+    }
+    Objects.requireNonNull(builder.lockWait, "lockWait");
+    Objects.requireNonNull(builder.lockTtl, "lockTtl");
+    if (builder.lockWait.isNegative()) {
+      throw new IllegalArgumentException("lockWait must not be negative: " + builder.lockWait);
+    }
+    if (builder.lockTtl.compareTo(MIN_LOCK_TTL) < 0) {
+      throw new IllegalArgumentException("lockTtl must be at least one second: " + builder.lockTtl);
     }
     if (builder.reindexTimeout.isNegative() || builder.reindexTimeout.isZero()) {
       throw new IllegalArgumentException(
@@ -99,13 +124,16 @@ public final class MigrationOptions {
     this.reindexMode = builder.reindexMode;
     this.swapGrace = builder.swapGrace;
     this.backfill = builder.backfill;
+    this.lock = builder.lock;
+    this.lockWait = builder.lockWait;
+    this.lockTtl = builder.lockTtl;
   }
 
   /**
    * Returns the defaults: fail fast, reindex allowed, old index retained, removed fields kept, one
    * shard, data nodes minus one replicas (at most 1), a ten minute reindex timeout, no dry run,
    * stale write blocks cleared, zero-downtime reindexing with a five second swap grace, backfill
-   * enabled.
+   * enabled, a per-alias lock waited for up to ten minutes with a two minute TTL.
    */
   public static MigrationOptions standard() {
     return builder().build();
@@ -181,6 +209,21 @@ public final class MigrationOptions {
     return backfill;
   }
 
+  /** Returns whether apply and rollback take a per-alias lock. */
+  public boolean lock() {
+    return lock;
+  }
+
+  /** Returns how long to wait for a lock another process holds. */
+  public Duration lockWait() {
+    return lockWait;
+  }
+
+  /** Returns how long a lock lives without a heartbeat. */
+  public Duration lockTtl() {
+    return lockTtl;
+  }
+
   /** Returns a copy with another failure policy. */
   public MigrationOptions withFailure(FailurePolicy value) {
     return toBuilder().failure(value).build();
@@ -241,6 +284,21 @@ public final class MigrationOptions {
     return toBuilder().backfill(value).build();
   }
 
+  /** Returns a copy that takes, or does not take, the per-alias lock. */
+  public MigrationOptions withLock(boolean value) {
+    return toBuilder().lock(value).build();
+  }
+
+  /** Returns a copy with another lock wait. */
+  public MigrationOptions withLockWait(Duration value) {
+    return toBuilder().lockWait(value).build();
+  }
+
+  /** Returns a copy with another lock TTL. */
+  public MigrationOptions withLockTtl(Duration value) {
+    return toBuilder().lockTtl(value).build();
+  }
+
   @Override
   public boolean equals(Object other) {
     return other instanceof MigrationOptions that
@@ -255,13 +313,16 @@ public final class MigrationOptions {
         && clearStaleWriteBlock == that.clearStaleWriteBlock
         && reindexMode == that.reindexMode
         && swapGrace.equals(that.swapGrace)
-        && backfill == that.backfill;
+        && backfill == that.backfill
+        && lock == that.lock
+        && lockWait.equals(that.lockWait)
+        && lockTtl.equals(that.lockTtl);
   }
 
   @Override
   public int hashCode() {
     return Objects.hash(failure, allowReindex, deleteOldAfter, removedFields, defaultShards,
-        replicas, reindexTimeout, dryRun, clearStaleWriteBlock, reindexMode, swapGrace, backfill);
+        replicas, reindexTimeout, dryRun, clearStaleWriteBlock, reindexMode, swapGrace, backfill, lock, lockWait, lockTtl);
   }
 
   @Override
@@ -277,7 +338,10 @@ public final class MigrationOptions {
         + ", clearStaleWriteBlock=" + clearStaleWriteBlock
         + ", reindexMode=" + reindexMode
         + ", swapGrace=" + swapGrace
-        + ", backfill=" + backfill + "]";
+        + ", backfill=" + backfill
+        + ", lock=" + lock
+        + ", lockWait=" + lockWait
+        + ", lockTtl=" + lockTtl + "]";
   }
 
   /** Builds {@link MigrationOptions}; starts from the {@link #standard()} options. */
@@ -295,6 +359,9 @@ public final class MigrationOptions {
     private ReindexMode reindexMode = ReindexMode.ZERO_DOWNTIME;
     private Duration swapGrace = Duration.ofSeconds(5);
     private boolean backfill = true;
+    private boolean lock = true;
+    private Duration lockWait = Duration.ofMinutes(10);
+    private Duration lockTtl = Duration.ofMinutes(2);
 
     private Builder() {}
 
@@ -311,6 +378,9 @@ public final class MigrationOptions {
       this.reindexMode = options.reindexMode;
       this.swapGrace = options.swapGrace;
       this.backfill = options.backfill;
+      this.lock = options.lock;
+      this.lockWait = options.lockWait;
+      this.lockTtl = options.lockTtl;
     }
 
     /** Sets what to do after an index fails to migrate; default FAIL_FAST. */
@@ -388,13 +458,31 @@ public final class MigrationOptions {
       return this;
     }
 
+    /** Sets whether apply and rollback take a per-alias lock; default true. */
+    public Builder lock(boolean value) {
+      this.lock = value;
+      return this;
+    }
+
+    /** Sets how long to wait for a lock another process holds; default ten minutes. */
+    public Builder lockWait(Duration value) {
+      this.lockWait = value;
+      return this;
+    }
+
+    /** Sets how long a lock lives without a heartbeat; default two minutes. */
+    public Builder lockTtl(Duration value) {
+      this.lockTtl = value;
+      return this;
+    }
+
     /**
      * Builds the options.
      *
      * @return the options
      * @throws NullPointerException when a policy, the mode, the timeout or the grace is null
      * @throws IllegalArgumentException when {@code defaultShards} is below 1, the timeout is not
-     *     positive or the grace is negative
+     *     positive, the grace or the lock wait is negative, or the lock TTL is under one second
      */
     public MigrationOptions build() {
       return new MigrationOptions(this);
