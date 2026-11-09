@@ -91,7 +91,10 @@ public final class OpenSearchEngine {
       return this;
     }
 
-    /** Uses a custom SSL context, for example one that trusts a private CA. */
+    /**
+     * Uses a custom SSL context, for example one that trusts a private CA. Cannot be combined
+     * with {@link #insecureTrustAllCertificates(boolean)}.
+     */
     public Builder sslContext(SSLContext context) {
       this.sslContext = context;
       return this;
@@ -99,17 +102,27 @@ public final class OpenSearchEngine {
 
     /**
      * Disables certificate and hostname verification. Only for local development; traffic is
-     * still encrypted but open to interception.
+     * still encrypted but open to interception. Cannot be combined with {@link
+     * #sslContext(SSLContext)}.
      */
     public Builder insecureTrustAllCertificates(boolean insecure) {
       this.insecureTrustAllCertificates = insecure;
       return this;
     }
 
-    /** Builds the engine. */
+    /**
+     * Builds the engine.
+     *
+     * @throws IllegalStateException when no host is set, or when both {@link
+     *     #sslContext(SSLContext)} and {@link #insecureTrustAllCertificates(boolean)} are set
+     */
     public SearchEngine build() {
       if (hosts.isEmpty()) {
         throw new IllegalStateException("at least one host is required");
+      }
+      if (insecureTrustAllCertificates && sslContext != null) {
+        throw new IllegalStateException("sslContext and insecureTrustAllCertificates(true) are"
+            + " mutually exclusive: trusting all certificates would ignore the SSL context");
       }
       RestClientBuilder builder = RestClient.builder(hosts.toArray(new HttpHost[0]));
       if (apiKey != null) {
