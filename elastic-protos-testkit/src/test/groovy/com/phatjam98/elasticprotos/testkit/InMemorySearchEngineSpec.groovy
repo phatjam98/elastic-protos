@@ -9,6 +9,13 @@ import com.phatjam98.elasticprotos.engine.IndexOptions
 import com.phatjam98.elasticprotos.engine.ReindexRequest
 import com.phatjam98.elasticprotos.engine.SearchResult
 import com.phatjam98.elasticprotos.engine.UpdateByQueryRequest
+import com.phatjam98.elasticprotos.proto.SortingOrder
+import com.phatjam98.elasticprotos.proto.TermsAggregation
+import com.phatjam98.elasticprotos.proto.TermsOrder
+import com.phatjam98.elasticprotos.proto.TermsOrderBy
+import com.phatjam98.elasticprotos.query.AggregationResults
+import com.phatjam98.elasticprotos.query.Aggs
+import com.phatjam98.elasticprotos.query.Criteria
 import java.time.Duration
 import spock.lang.Specification
 
@@ -957,5 +964,90 @@ class InMemorySearchEngineSpec extends Specification {
 
     then:
     seen.size() == 1
+  }
+
+  // ---- aggregations ------------------------------------------------------------------------
+
+  def "compiled terms, metrics, nested and reverse_nested aggregations run over the sample documents"() {
+    given:
+    def mapper = com.phatjam98.elasticprotos.mapping.ProtoMapper.withDefaults()
+    def codec = com.phatjam98.elasticprotos.codec.ProtoDocumentCodec.of(mapper)
+    def documents = mapper.map(com.phatjam98.elasticprotos.proto.example.Document)
+    def compiler = com.phatjam98.elasticprotos.query.QueryCompiler.withDefaults()
+    engine.createIndex(documents.name(), [:], documents.mappings(), [documents.alias()] as Set)
+    SampleData.documents().each { engine.index(documents.alias(), it.id, codec.toDocument(it), IndexOptions.defaults()) }
+
+    when:
+    def criteria = Criteria.builder().aggregate(
+        Aggs.sub(Aggs.terms('by_type', 'type'), Aggs.sum('total', 'size_bytes')),
+        Aggs.sub(Aggs.terms('roles', 'parties.role').setTerms(TermsAggregation.newBuilder()
+            .setOrder(TermsOrder.newBuilder().setBy(TermsOrderBy.BY_METRIC).setMetric('firms'))),
+            Aggs.cardinality('firms', 'firm_id'), Aggs.max('latest', 'filed_at')),
+        Aggs.min('smallest', 'size_bytes'), Aggs.max('largest', 'size_bytes'), Aggs.avg('average', 'size_bytes'),
+        Aggs.count('counted', 'size_bytes'), Aggs.max('latest', 'filed_at'), Aggs.min('lowest_relevance', 'relevance'),
+        Aggs.terms('top_tag', 'tags').setTerms(TermsAggregation.newBuilder().setSize(1)),
+        Aggs.terms('by_key', 'type').setTerms(TermsAggregation.newBuilder()
+            .setOrder(TermsOrder.newBuilder().setBy(TermsOrderBy.BY_KEY).setDirection(SortingOrder.DESC))),
+        Aggs.terms('few', 'firm_id').setTerms(TermsAggregation.newBuilder().setMinDocCount(2)
+            .setOrder(TermsOrder.newBuilder().setBy(TermsOrderBy.BY_COUNT).setDirection(SortingOrder.ASC))),
+        Aggs.terms('rel', 'relevance').setTerms(TermsAggregation.newBuilder().setMissing(
+            com.phatjam98.elasticprotos.proto.PrimitiveValue.newBuilder().setNumberValue(0)))
+    ).aggregationsOnly().build()
+    def result = engine.search([documents.alias()], compiler.compile(criteria, documents).body())
+    def aggs = AggregationResults.of(result)
+
+    then:
+    result.hits().isEmpty()
+    result.total() == 6
+    aggs.buckets('by_type')*.key() == ['FILING', 'MOTION', 'NOTICE', 'ORDER']
+    aggs.buckets('by_type')*.docCount() == [3L, 1L, 1L, 1L]
+    aggs.buckets('by_type')*.sub()*.metric('total')*.asLong() == [2_870_000L, 45_000L, 8_000L, 30_000L]
+    aggs.buckets('roles')*.key() == ['DEFENDANT', 'PLAINTIFF', 'COUNSEL']
+    aggs.buckets('roles')*.docCount() == [4L, 3L, 1L]
+    aggs.buckets('roles')*.sub()*.metric('firms')*.asLong() == [3L, 2L, 1L]
+    aggs.buckets('roles')[0].sub().metric('latest').valueAsString() == '2024-06-30T08:00:00Z'
+    aggs.metric('smallest').asLong() == 8_000L
+    aggs.metric('largest').asLong() == 2_500_000L
+    Math.abs(aggs.metric('average').value() - 2_953_000d / 6) < 0.01
+    aggs.metric('counted').asLong() == 6L
+    aggs.metric('latest').asLong() == 1719734400000L
+    aggs.metric('lowest_relevance').value() == 0.75d
+    aggs.buckets('top_tag')*.key() == ['civil']
+    aggs.sumOtherDocCount('top_tag') == 6
+    aggs.buckets('by_key')*.key() == ['ORDER', 'NOTICE', 'MOTION', 'FILING']
+    aggs.buckets('few')*.key() == ['firm-1', 'firm-2', 'firm-3']
+    aggs.buckets('rel').collectEntries { [(it.key()): it.docCount()] } == [0L: 5L, 0.75d: 1L]
+  }
+
+  def "a metric of nothing is null, and unsupported aggregations fail with BAD_REQUEST"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+    engine.index('a', '1', [status: 'x', title: 'Not a date', owner: [name: 'n']], IndexOptions.defaults())
+
+    expect:
+    engine.search(['a'], [aggs: [m: [min: [field: 'missing']], s: [sum: [field: 'missing']]]]).aggregations() ==
+        [m: [value: null], s: [value: 0d]]
+    engine.search(['a'], [aggregations: [c: [cardinality: [field: 'status']]]]).aggregations() == [c: [value: 1L]]
+
+    when:
+    engine.search(['a'], [aggs: [x: body]])
+
+    then:
+    def e = thrown(EngineException)
+    e.kind == EngineException.Kind.BAD_REQUEST
+    e.message.contains(message)
+
+    where:
+    body                                                              || message
+    [date_histogram: [field: 'd', calendar_interval: '1M']]           || 'not [date_histogram]'
+    [histogram: [field: 'n', interval: 1]]                            || 'not [histogram]'
+    [range: [field: 'n', ranges: [[to: 1]]]]                          || 'not [range]'
+    [date_range: [field: 'n', ranges: [[to: 1]]]]                     || 'not [date_range]'
+    [meta: [a: 1]]                                                    || 'has no type'
+    [max: [field: 'title']]                                           || 'is not supported for aggregation [max]'
+    [max: [field: 'status'], aggs: [y: [min: [field: 'status']]]]    || 'cannot have sub-aggregations'
+    [terms: [field: 'status', order: [_key: 'asc', _count: 'desc']]] || 'one terms order'
+    [reverse_nested: [path: 'owner']]                                 || 'does not enclose'
+    [nested: [path: 'owner'], aggs: [y: [terms: [field: 'status']]]] || 'is not inside nested path [owner]'
   }
 }
