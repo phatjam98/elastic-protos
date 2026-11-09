@@ -27,6 +27,7 @@ import com.phatjam98.elasticprotos.proto.SortingCriteria
 import com.phatjam98.elasticprotos.proto.SortingOrder
 import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
+import com.phatjam98.elasticprotos.proto.example.TypedMaps
 import com.phatjam98.elasticprotos.proto.test.Geo
 import java.time.Instant
 import spock.lang.Shared
@@ -39,6 +40,7 @@ class QueryCompilerGoldenSpec extends Specification {
   @Shared IndexDefinition document = mapper.map(Document)
   @Shared IndexDefinition firm = mapper.map(Firm)
   @Shared IndexDefinition geo = mapper.map(Geo)
+  @Shared IndexDefinition typedMaps = mapper.map(TypedMaps)
   @Shared QueryCompiler strict = QueryCompiler.withDefaults()
   @Shared QueryCompiler wildcards =
       QueryCompiler.of(QueryCompilerConfig.standard().withAllowLeadingWildcards(true))
@@ -88,6 +90,22 @@ class QueryCompilerGoldenSpec extends Specification {
     'geo_contained'         | strict    | geo      | where(fc('wkt_shape', GEO_CONTAINED, FlatValue.newBuilder().setLatLonValue(ll(36.1, -115.1)).build()))
     'negation'              | strict    | document | where(fc('type', EQUALS, str('ORDER'), true), fc('title', TEXT_MATCHES, str('appeal')))
     'full_text_options'     | strict    | document | where(fullText('breach', fullTextOptions()))
+    'map_key_equals_long'   | strict    | typedMaps | where(fc('counters.views', EQUALS, integer(5)))
+    'map_key_num_range'     | strict    | typedMaps | where(fc('counters.views', NUM_RANGE, range(10, 100)))
+    'map_key_geo_distance'  | strict    | typedMaps | where(fc('places.home', GEO_DISTANCE, geoDistance()))
+    'map_key_full_text'     | strict    | typedMaps | where(fullText('quarterly reports'), fc('notes.summary', TEXT_MATCHES, str('report')))
+    'map_key_nested_message' | strict   | typedMaps | where(fc('children.alice.items.sku', EQUALS, str('A-1')), fc('children.alice.items.quantity', NUM_RANGE, range(1, 5)), fc('children.alice.count', EQUALS, integer(3)))
+  }
+
+  def "op_map_key_unknown_subfield names the value type"() {
+    when:
+    strict.compile(where(fc('children.alice.nope', EQUALS, str('x'))), typedMaps)
+
+    then:
+    QueryCompileException e = thrown()
+    e.field == 'children.alice.nope'
+    e.message == "Unknown field 'children.alice.nope' in EQUALS; the values of map 'children' in index " +
+        "typed_maps are phatjam98.elasticprotos.example.TypedChild, which does not map it"
   }
 
   static FlatValue geoDistance() {

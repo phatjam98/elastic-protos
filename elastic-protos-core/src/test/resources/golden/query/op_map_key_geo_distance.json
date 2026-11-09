@@ -1,0 +1,20 @@
+{
+  "from" : 0,
+  "query" : {
+    "bool" : {
+      "filter" : [ {
+        "geo_distance" : {
+          "distance" : "25km",
+          "distance_type" : "plane",
+          "ignore_unmapped" : true,
+          "places.home" : {
+            "lat" : 36.17,
+            "lon" : -115.14
+          }
+        }
+      } ]
+    }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

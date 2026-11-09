@@ -111,5 +111,5 @@ Checkstyle, JaCoCo and Javadoc.
   overrides second. Do not reintroduce field-name heuristics.
 - Default mapping rules: `string` => `keyword` (opt in to `TEXT`), singular message => `object`,
   repeated message => `nested`, `Timestamp` => `date`, `map<K,V>` => `flattened` (`type: OBJECT` opts in
-  to a dynamic object). Documents carry proto3 default values (`CodecConfig.includeDefaults` is true).
+  to a typed map: dynamic object plus `dynamic_templates` from the value type, ADR 0010). Documents carry proto3 default values (`CodecConfig.includeDefaults` is true).
   Index settings, including analysis, are outside the content hash (ADR 0006).

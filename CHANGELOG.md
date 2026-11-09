@@ -32,6 +32,11 @@ index the reconcile reports and ends `INCOMPLETE` unless `DegradedReconcile.CREA
 mapping update replaces `_meta`, like the engines, and `gcDeletes`/`expireTombstones` model
 `index.gc_deletes`.
 
+Maps mapped with `type: OBJECT` or `NESTED` are typed maps: `dynamic_templates` give every key the
+value type (new `value_type` option), and the query compiler, sorts and codec treat keys as typed
+fields ([ADR 0010](docs/adr/0010-typed-maps-through-dynamic-templates.md)). This changes the content
+hash of indices with such maps; `flattened` maps are unchanged.
+
 `RangeValue.min` and `max` are now proto3 `optional`, so `NUM_RANGE` supports open-ended ranges
 (`Values.atLeast`, `greaterThan`, `atMost`, `lessThan`, `onOrAfter`, `after`, `onOrBefore`,
 `before` and `between(Instant, Instant)`; the same steps on `Criteria`). Only the bounds that are
