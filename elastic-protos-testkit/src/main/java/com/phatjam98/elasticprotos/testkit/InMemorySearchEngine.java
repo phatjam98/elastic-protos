@@ -50,8 +50,9 @@ import java.util.regex.Pattern;
  *       and objects with {@code properties} without {@code type: object}. {@link #getSettings}
  *       returns {@code {"index": {...}}} with string scalars, including default shard and replica
  *       counts and {@code blocks.write} when blocked.
- *   <li>{@link #putMappings} deep-merges {@code properties} and {@code _meta}; with {@link
- *       #rejectTypeChanges(boolean)} (on by default) it refuses to change an existing field's type.
+ *   <li>{@link #putMappings} deep-merges {@code properties} and replaces {@code _meta} as a whole
+ *       when the update carries one, like both engines; with {@link #rejectTypeChanges(boolean)}
+ *       (on by default) it refuses to change an existing field's type.
  *   <li>{@link #updateAliases} validates every action before applying any.
  *   <li>Writes to a write-blocked index fail with {@code BLOCKED} and status 403.
  *   <li>Every write takes the next value of one global sequence number counter (the primary term
@@ -75,6 +76,10 @@ import java.util.regex.Pattern;
  *       since the snapshot is a version conflict, counted when the request proceeds on conflicts
  *       and otherwise reported as one 409 failure that stops the run. {@link #putSettings} merges
  *       into the stored settings ({@code blocks.write} sets the write block).
+ *   <li>{@link #openPit} snapshots the documents, versions and sequence numbers of its indices, so
+ *       a search with that point in time sees them as they were when it was opened. {@link
+ *       #expirePits()} drops every open point in time, after which searches with one fail with
+ *       {@code NOT_FOUND}.
  * </ul>
  *
  * <p>Test hooks: {@link #duringReindex} runs after a reindex took its snapshot and before it
@@ -86,7 +91,8 @@ import java.util.regex.Pattern;
  * (refresh is a no-op); writes to unknown indices fail instead of auto-creating them; {@link
  * #reindex} requires the destination to exist and supports only a tiny stand-in for Painless
  * (one statement per line, {@code ;} optional, blank and {@code //} lines ignored):
- * {@code ctx._source.<field> = params.<name>} and {@code ctx._source.remove('<field>')};
+ * {@code ctx._source.<field> = params.<name>}, {@code ctx._source.remove('<field>')} and {@code
+ * ctx._id = params.<name>};
  * {@link #search} supports only the queries {@code match_all}, {@code term} and {@code terms} on
  * one field (dotted paths walk into objects and arrays), {@code ids}, and {@code bool} with
  * {@code filter}, {@code must}, {@code must_not} and {@code should} (with {@code
@@ -109,9 +115,11 @@ public class InMemorySearchEngine implements SearchEngine {
       Pattern.compile("ctx\\._source\\.([A-Za-z0-9_]+)\\s*=\\s*params\\.([A-Za-z0-9_]+)\\s*;?");
   private static final Pattern REMOVE =
       Pattern.compile("ctx\\._source\\.remove\\(\\s*'([^']+)'\\s*\\)\\s*;?");
+  private static final Pattern ASSIGN_ID =
+      Pattern.compile("ctx\\._id\\s*=\\s*params\\.([A-Za-z0-9_]+)\\s*;?");
 
   private final Map<String, IndexState> indices = new TreeMap<>();
-  private final Map<String, List<String>> pits = new LinkedHashMap<>();
+  private final Map<String, Map<String, IndexState>> pits = new LinkedHashMap<>();
   private final List<String> log = new ArrayList<>();
   private EngineInfo info = new EngineInfo(EngineProduct.ELASTICSEARCH, "9.0.0", "in-memory");
   private int dataNodes = 1;
@@ -178,6 +186,20 @@ public class InMemorySearchEngine implements SearchEngine {
   public InMemorySearchEngine afterAliasUpdate(Runnable hook) {
     this.afterAliasUpdate = hook == null ? () -> {} : hook;
     return this;
+  }
+
+  /**
+   * Drops every open point in time, as if its keep-alive had run out; searches with one then
+   * fail with {@code NOT_FOUND}.
+   */
+  public InMemorySearchEngine expirePits() {
+    pits.clear();
+    return this;
+  }
+
+  /** Returns the ids of the open points in time. */
+  public Set<String> openPits() {
+    return new LinkedHashSet<>(pits.keySet());
   }
 
   /** Returns every concrete index with its aliases, sorted by name. */
@@ -298,7 +320,11 @@ public class InMemorySearchEngine implements SearchEngine {
       }
     }
     for (IndexState state : targets) {
-      state.mappings = Json.deepMerge(state.mappings, mappings);
+      Map<String, Object> merged = Json.deepMerge(state.mappings, mappings);
+      if (mappings.get("_meta") instanceof Map) {
+        merged.put("_meta", Json.sortedCopy(map(mappings.get("_meta"))));
+      }
+      state.mappings = merged;
     }
   }
 
@@ -455,13 +481,13 @@ public class InMemorySearchEngine implements SearchEngine {
         continue;
       }
       Map<String, Object> copy = doc.source();
-      apply(statements, copy, request.scriptParams());
-      if (dest.docs.put(doc.id(), copy) == null) {
+      String id = apply(statements, copy, request.scriptParams(), doc.id());
+      if (dest.docs.put(id, copy) == null) {
         created++;
       } else {
         updated++;
       }
-      stamp(dest, doc.id(), external ? doc.version() : null);
+      stamp(dest, id, external ? doc.version() : null);
     }
     return new ReindexResult(snapshot.size(), created, updated, failures, 0, false, 0, 0,
         conflicts);
@@ -655,15 +681,16 @@ public class InMemorySearchEngine implements SearchEngine {
     Map<String, Object> pit = map(body.get("pit"));
     List<String> names = new ArrayList<>();
     String pitId = null;
+    Map<String, IndexState> snapshot = null;
     if (!pit.isEmpty()) {
       pitId = String.valueOf(pit.get("id"));
       record("search", "pit=" + pitId);
-      List<String> pitIndices = pits.get(pitId);
-      if (pitIndices == null) {
+      snapshot = pits.get(pitId);
+      if (snapshot == null) {
         throw new EngineException(Kind.NOT_FOUND, 404,
             "search_context_missing_exception: no point in time " + pitId);
       }
-      names.addAll(pitIndices);
+      names.addAll(snapshot.keySet());
     } else {
       record("search", String.join(",", targets));
       Set<String> unique = new LinkedHashSet<>();
@@ -678,7 +705,7 @@ public class InMemorySearchEngine implements SearchEngine {
     boolean withSeqNo = Boolean.TRUE.equals(body.get("seq_no_primary_term"));
     List<Hit> matches = new ArrayList<>();
     for (String name : names) {
-      IndexState state = indices.get(name);
+      IndexState state = snapshot != null ? snapshot.get(name) : indices.get(name);
       if (state == null) {
         continue;
       }
@@ -722,7 +749,16 @@ public class InMemorySearchEngine implements SearchEngine {
       names.addAll(existingNames(target));
     }
     String id = UUID.randomUUID().toString();
-    pits.put(id, new ArrayList<>(names));
+    Map<String, IndexState> snapshot = new LinkedHashMap<>();
+    for (String name : names) {
+      IndexState live = indices.get(name);
+      IndexState copy = new IndexState();
+      live.docs.forEach((docId, source) -> copy.docs.put(docId, Json.sortedCopy(source)));
+      copy.versions.putAll(live.versions);
+      copy.seqNos.putAll(live.seqNos);
+      snapshot.put(name, copy);
+    }
+    pits.put(id, snapshot);
     return new Pit(id, keepAlive);
   }
 
@@ -970,7 +1006,8 @@ public class InMemorySearchEngine implements SearchEngine {
       if (statement.isEmpty() || statement.startsWith("//")) {
         continue;
       }
-      if (!ASSIGN.matcher(statement).matches() && !REMOVE.matcher(statement).matches()) {
+      if (!ASSIGN.matcher(statement).matches() && !REMOVE.matcher(statement).matches()
+          && !ASSIGN_ID.matcher(statement).matches()) {
         throw new EngineException(Kind.OTHER, 400,
             "script_exception: the in-memory engine does not support: " + statement);
       }
@@ -979,18 +1016,24 @@ public class InMemorySearchEngine implements SearchEngine {
     return statements;
   }
 
-  private static void apply(
-      List<String> statements, Map<String, Object> source, Map<String, Object> params) {
+  /** Runs the statements on a document and returns its id, which a statement may change. */
+  private static String apply(List<String> statements, Map<String, Object> source,
+      Map<String, Object> params, String id) {
+    String result = id;
     for (String statement : statements) {
       Matcher assign = ASSIGN.matcher(statement);
+      Matcher assignId = ASSIGN_ID.matcher(statement);
       if (assign.matches()) {
         source.put(assign.group(1), params.get(assign.group(2)));
+      } else if (assignId.matches()) {
+        result = String.valueOf(params.get(assignId.group(1)));
       } else {
         Matcher remove = REMOVE.matcher(statement);
         remove.matches();
         source.remove(remove.group(1));
       }
     }
+    return result;
   }
 
   private static boolean matches(Map<String, Object> query, String id,
