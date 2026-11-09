@@ -784,7 +784,8 @@ SearchEngine os = OpenSearchEngine.builder()
 ```
 
 Both builders offer `hosts`, `basicAuth`, `apiKey` (sent as `Authorization: ApiKey ...`),
-`sslContext` and `insecureTrustAllCertificates` (local development only). Building does not connect.
+`sslContext` and `insecureTrustAllCertificates` (local development only); `build()` refuses the two
+together, since trusting every certificate would ignore the context. Building does not connect.
 To reuse a client you already configured, wrap it; each adapter brings its engine's low-level REST
 client (`org.elasticsearch.client:elasticsearch-rest-client` or
 `org.opensearch.client:opensearch-rest-client`) transitively, so there is nothing else to declare:
