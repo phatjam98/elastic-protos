@@ -84,7 +84,7 @@ abstract class EngineIntegrationSpec extends Specification {
   @Shared IndexNamingStrategy naming = IndexNamingStrategy.prefixed(prefix)
   @Shared ProtoMapper mapper = ProtoMapper.builder().naming(naming).build()
   @Shared ProtoDocumentCodec codec = ProtoDocumentCodec.of(mapper)
-  @Shared QueryCompiler compiler = QueryCompiler.withDefaults()
+  @Shared QueryCompiler compiler = QueryCompiler.of(QueryCompilerConfig.standard().withAllowRegex(true))
   @Shared IndexMigrator migrator
   @Shared IndexDefinition firms = mapper.map(Firm)
   @Shared IndexDefinition documents = mapper.map(Document)

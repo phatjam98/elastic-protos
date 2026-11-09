@@ -169,7 +169,7 @@ class InMemorySearchEngineSpec extends Specification {
 
     then:
     def e = thrown(EngineException)
-    e.kind == EngineException.Kind.CONFLICT
+    e.kind == EngineException.Kind.BLOCKED
     e.status == 403
     e.message.contains('blocked')
     engine.isWriteBlocked('a-v1')
