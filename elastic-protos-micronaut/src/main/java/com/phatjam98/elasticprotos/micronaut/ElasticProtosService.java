@@ -32,6 +32,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Repository-style access to protobuf messages stored in their index aliases.
@@ -43,6 +45,8 @@ import java.util.function.Consumer;
 @Singleton
 @Requires(beans = SearchEngine.class)
 public class ElasticProtosService {
+
+  private static final Logger LOG = LoggerFactory.getLogger(ElasticProtosService.class);
 
   private final SearchEngine engine;
   private final ProtoDocumentCodec codec;
@@ -195,6 +199,7 @@ public class ElasticProtosService {
         ? compiler
         : pitCompiler();
     CompiledSearch compiled = effective.compile(criteria, definition);
+    logWarnings(definition, compiled);
     SearchResult result = engine.search(List.of(definition.alias()), compiled.body());
     List<T> items = new ArrayList<>(result.hits().size());
     for (Hit hit : result.hits()) {
@@ -212,18 +217,27 @@ public class ElasticProtosService {
    * @param criteria what to search for and the aggregations to compute; its pagination is
    *     replaced
    * @param type the generated message class whose alias is searched
-   * @return the aggregation results
+   * @return the aggregation results, the total of matching documents and the compiler warnings
    * @throws com.phatjam98.elasticprotos.query.QueryCompileException when the criteria do not fit
    *     the index
    */
-  public AggregationResults aggregate(SearchCriteria criteria, Class<? extends Message> type) {
+  public AggregationPage aggregate(SearchCriteria criteria, Class<? extends Message> type) {
     IndexDefinition definition = definition(type);
     SearchCriteria aggregationsOnly = criteria.toBuilder()
         .setPagination(Pagination.newBuilder().setSize(-1))
         .clearHighlight()
         .build();
     CompiledSearch compiled = compiler.compile(aggregationsOnly, definition);
-    return AggregationResults.of(engine.search(List.of(definition.alias()), compiled.body()));
+    logWarnings(definition, compiled);
+    SearchResult result = engine.search(List.of(definition.alias()), compiled.body());
+    return new AggregationPage(AggregationResults.of(result), result.total(),
+        compiled.warnings());
+  }
+
+  private static void logWarnings(IndexDefinition definition, CompiledSearch compiled) {
+    if (!compiled.warnings().isEmpty() && LOG.isWarnEnabled()) {
+      LOG.warn("Search on {}: {}", definition.alias(), String.join("; ", compiled.warnings()));
+    }
   }
 
   /**
