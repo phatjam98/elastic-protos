@@ -11,7 +11,9 @@ import static com.phatjam98.elasticprotos.proto.SearchOperationType.TEXT_PREFIX
 import static com.phatjam98.elasticprotos.proto.SearchOperationType.TEXT_REGEX
 
 import com.google.protobuf.Message
+import com.google.protobuf.Struct
 import com.google.protobuf.Timestamp
+import com.google.protobuf.Value
 import com.phatjam98.elasticprotos.codec.ProtoDocumentCodec
 import com.phatjam98.elasticprotos.engine.BulkOp
 import com.phatjam98.elasticprotos.engine.EngineException
@@ -433,6 +435,7 @@ abstract class EngineIntegrationSpec extends Specification {
             .addItems(TypedItem.newBuilder().setSku('B-2').setQuantity(9)).build())
         .putBags('b', TypedBag.newBuilder().putTags('k', 'v').build())
         .putLabels('env', 'prod')
+        .putAttributes('a', Struct.newBuilder().putFields('x', Value.newBuilder().setStringValue('y').build()).build())
         .build()
     def second = TypedMaps.newBuilder()
         .setId('tm-2')
@@ -488,6 +491,10 @@ abstract class EngineIntegrationSpec extends Specification {
     typedIds(where(fc('places.home', GEO_DISTANCE, FlatValue.newBuilder().setGeoDistanceValue(
         GeoDistanceValue.newBuilder().setPoint(SampleData.LAS_VEGAS).setDistance('10km')).build()))) == ['tm-1'] as Set
     typedIds(where(fc('children.alice.label', EQUALS, str('Ally')))) == ['tm-1'] as Set
+
+    and: 'a geo query on a key no document has used matches nothing instead of failing'
+    typedIds(where(fc('places.nowhere', GEO_DISTANCE, FlatValue.newBuilder().setGeoDistanceValue(
+        GeoDistanceValue.newBuilder().setPoint(SampleData.LAS_VEGAS).setDistance('10km')).build()))).isEmpty()
 
     and: 'nested values match per element, and a key no document has used matches nothing'
     typedIds(where(fc('children.alice.items.sku', EQUALS, str('A-1')),
