@@ -614,7 +614,121 @@ class ProtoMapperSpec extends Specification {
     'default nested'| 0       | 51     | 50          | 1000       | 'maps 51 nested fields, more than maxNestedFields 50'
   }
 
+  def "limits declared in the index settings replace the defaults: #label"() {
+    given:
+    def overrides = MappingOverrides.builder().forMessage('limits.Wide') { it.settingsJson = settings }.build()
+    def tight = ProtoMapper.builder().defaults(MappingDefaults.standard().withMaxNestedFields(nestedDefault)
+        .withMaxTotalFields(totalDefault)).overrides(overrides).build()
+
+    expect:
+    tight.map(wide(scalars, nested)).nestedPaths().size() == nested
+
+    where: 'the settings may be nested, dotted, or without the index. prefix'
+    label                        | settings                                                       | scalars | nested | nestedDefault | totalDefault
+    'nested total above default' | '{"index":{"mapping":{"total_fields":{"limit":2000}}}}'        | 1500    | 0      | 50            | 1000
+    'dotted nested above'        | '{"index.mapping.nested_fields.limit":60}'                     | 0       | 60     | 50            | 1000
+    'without the index. prefix'  | '{"mapping":{"total_fields":{"limit":"12"}}}'                  | 12      | 0      | 50            | 5
+    'zero disables'              | '{"index":{"mapping":{"total_fields":{"limit":0}}}}'           | 20      | 0      | 50            | 5
+  }
+
+  def "a mapping over a limit declared in the index settings is rejected: #label"() {
+    given:
+    def overrides = MappingOverrides.builder().forMessage('limits.Wide') { it.settingsJson = settings }.build()
+
+    when:
+    ProtoMapper.builder().overrides(overrides).build().map(wide(scalars, nested))
+
+    then:
+    def e = thrown(MappingException)
+    e.message.contains(message)
+
+    where:
+    label    | settings                                                | scalars | nested | message
+    'total'  | '{"index":{"mapping":{"total_fields":{"limit":10}}}}'  | 11      | 0      | 'maps 11 fields, more than index.mapping.total_fields.limit 10 in the index settings'
+    'nested' | '{"mapping.nested_fields.limit":2}'                     | 0       | 3      | 'maps 3 nested fields, more than index.mapping.nested_fields.limit 2 in the index settings'
+    'junk'   | '{"index.mapping.total_fields.limit":"many"}'           | 1       | 0      | 'index.mapping.total_fields.limit is not a number: many'
+  }
+
+  def "search_as_you_type and text with index_prefixes or index_phrases count their extra fields: #label"() {
+    given:
+    def overrides = MappingOverrides.builder().forPath('s0') {
+      it.type = type
+      it.keywordSubfield = com.phatjam98.elasticprotos.proto.Bool3.FALSE
+      it.rawMappingJson = raw
+    }.build()
+    def atLimit = ProtoMapper.builder().defaults(MappingDefaults.standard().withMaxTotalFields(fields + 1))
+        .overrides(overrides).build()
+    def belowLimit = ProtoMapper.builder().defaults(MappingDefaults.standard().withMaxTotalFields(fields))
+        .overrides(overrides).build()
+
+    when: 'Wide has s0, counted as #fields, and the plain keyword s1'
+    atLimit.map(wide(2, 0))
+    belowLimit.map(wide(2, 0))
+
+    then:
+    def e = thrown(MappingException)
+    e.message.contains("maps ${fields + 1} fields, more than maxTotalFields ${fields}")
+
+    where:
+    label                          | type                     | raw                                              | fields
+    'search_as_you_type'           | EsType.SEARCH_AS_YOU_TYPE | ''                                              | 4
+    'search_as_you_type, 4 shingles' | EsType.SEARCH_AS_YOU_TYPE | '{"max_shingle_size":4}'                     | 5
+    'plain text'                   | EsType.TEXT              | ''                                               | 1
+    'text with index_prefixes'     | EsType.TEXT              | '{"index_prefixes":{}}'                          | 2
+    'text with both'               | EsType.TEXT              | '{"index_prefixes":{"min_chars":1},"index_phrases":true}' | 3
+    'text with index_phrases off'  | EsType.TEXT              | '{"index_phrases":false}'                        | 1
+  }
+
   // ------------------------------------------------------------------ name validation
+
+  def "a mapped-name override must not start with an underscore"() {
+    given:
+    def overrides = MappingOverrides.builder().forField(Scalars.descriptor, 'string_value') { it.name = '_source' }.build()
+
+    when:
+    mapper.map(Scalars.descriptor, overrides)
+
+    then:
+    def e = thrown(MappingException)
+    e.path == 'string_value'
+    e.message.contains("elastic_field.name '_source' must not start with '_'")
+  }
+
+  def "declared alias and index names are lower-cased"() {
+    given:
+    def overrides = MappingOverrides.builder().forMessage(Scalars.descriptor) {
+      it.alias = 'My-Scalars'
+      it.index = 'Scalars_Store'
+    }.build()
+
+    when:
+    def definition = mapper.map(Scalars.descriptor, overrides)
+
+    then:
+    definition.alias() == 'my-scalars'
+    definition.name() == "scalars_store-v${definition.contentHash()}"
+  }
+
+  def "a declared alias or index that cannot name an index is rejected: #label"() {
+    given:
+    def overrides = MappingOverrides.builder().forMessage(Scalars.descriptor, configure).build()
+
+    when:
+    mapper.map(Scalars.descriptor, overrides)
+
+    then:
+    def e = thrown(MappingException)
+    e.path == Scalars.descriptor.fullName
+    e.message.contains(message)
+
+    where:
+    label             | configure                         | message
+    'alias with *'    | { it.alias = 'docs*' }            | "alias must not contain '*'"
+    'alias leading _' | { it.alias = '_docs' }            | "alias must not start with '_'"
+    'index leading .' | { it.alias = 'ok'; it.index = '.docs' } | "index must not start with '.'"
+    'index with :'    | { it.alias = 'ok'; it.index = 'a:b' }   | "index must not contain ':'"
+    'index too long'  | { it.alias = 'ok'; it.index = 'a' * 250 } | 'bytes, more than the 255 an index name may have'
+  }
 
   def "a mapped-name override is validated: #label"() {
     given:
@@ -664,6 +778,7 @@ class ProtoMapperSpec extends Specification {
     'leading -'      | '-dev'   | IllegalArgumentException
     'leading _'      | '_dev'   | IllegalArgumentException
     'leading +'      | '+dev'   | IllegalArgumentException
+    'leading .'      | '.dev'   | IllegalArgumentException
     'space'          | 'my env' | IllegalArgumentException
     'backslash'      | 'a\\b'   | IllegalArgumentException
     'slash'          | 'a/b'    | IllegalArgumentException

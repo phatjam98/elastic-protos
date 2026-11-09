@@ -1,8 +1,5 @@
 package com.phatjam98.elasticprotos.mapping;
 
-import java.util.Locale;
-import java.util.Objects;
-
 /**
  * Decides alias and concrete index names.
  *
@@ -57,15 +54,16 @@ public interface IndexNamingStrategy {
    * {@code prefixed("dev")} turns {@code documents} into {@code dev-documents}.
    *
    * <p>The prefix is lower-cased, since index names must be lower case. It must not be empty,
-   * must not start with {@code -}, {@code _} or {@code +}, and must not contain whitespace or any
-   * of {@code \ / * ? " < > | , # :}, all of which are invalid in index names.
+   * must not start with {@code -}, {@code _}, {@code +} or {@code .}, and must not contain
+   * whitespace or any of {@code \ / * ? " < > | , # :}, all of which are invalid in index names
+   * (a leading {@code .} marks hidden and system indices).
    *
    * @param prefix the prefix without a trailing separator
    * @return the strategy
    * @throws IllegalArgumentException if the prefix cannot start an index name
    */
   static IndexNamingStrategy prefixed(String prefix) {
-    String checked = validPrefix(prefix);
+    String checked = IndexNames.check("index name prefix", prefix);
     return new IndexNamingStrategy() {
       @Override
       public String indexName(String declaredBase, String contentHash) {
@@ -77,26 +75,5 @@ public interface IndexNamingStrategy {
         return checked + "-" + declaredAlias;
       }
     };
-  }
-
-  private static String validPrefix(String prefix) {
-    Objects.requireNonNull(prefix, "prefix");
-    String lower = prefix.toLowerCase(Locale.ROOT);
-    if (lower.isEmpty()) {
-      throw new IllegalArgumentException("index name prefix must not be empty");
-    }
-    char first = lower.charAt(0);
-    if (first == '-' || first == '_' || first == '+') {
-      throw new IllegalArgumentException(
-          "index name prefix must not start with '" + first + "': " + prefix);
-    }
-    for (int i = 0; i < lower.length(); i++) {
-      char c = lower.charAt(i);
-      if (Character.isWhitespace(c) || "\\/*?\"<>|,#:".indexOf(c) >= 0) {
-        throw new IllegalArgumentException(
-            "index name prefix must not contain '" + c + "': " + prefix);
-      }
-    }
-    return lower;
   }
 }

@@ -12,6 +12,7 @@ import com.phatjam98.elasticprotos.proto.MessageOpts;
 import com.phatjam98.elasticprotos.util.Json;
 import com.phatjam98.elasticprotos.util.Names;
 import java.lang.reflect.InvocationTargetException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -46,6 +47,10 @@ public final class ProtoMapper {
   private static final String LAT_LON = "phatjam98.elasticprotos.v1.LatLon";
   private static final String GEO_SHAPE = "phatjam98.elasticprotos.v1.GeoShape";
   private static final Pattern VALID_NAME = Pattern.compile("^[^.\\s]+$");
+  private static final String NESTED_LIMIT = "index.mapping.nested_fields.limit";
+  private static final String TOTAL_LIMIT = "index.mapping.total_fields.limit";
+  private static final int DEFAULT_MAX_SHINGLE_SIZE = 3;
+  private static final int MAX_INDEX_NAME_BYTES = 255;
   private static final Set<String> LAT_NAMES = Set.of("lat", "latitude");
   private static final Set<String> LON_NAMES = Set.of("lon", "lng", "longitude");
   private static final Set<String> STRUCT_LIKE =
@@ -235,13 +240,15 @@ public final class ProtoMapper {
                   ? Names.snakeCase(root.getName())
                   : messageOpts.getIndex())
               : messageOpts.getAlias();
-      final String declaredBase =
-          messageOpts.getIndex().isEmpty() ? declaredAlias : messageOpts.getIndex();
+      declaredAlias = declaredName("alias", declaredAlias);
+      final String declaredBase = messageOpts.getIndex().isEmpty()
+          ? declaredAlias : declaredName("index", messageOpts.getIndex());
 
       ancestors.push(root);
       final Map<String, Object> properties = properties(root, "", "");
       ancestors.pop();
-      checkLimits(properties);
+      final Map<String, Object> settings = settings();
+      checkLimits(properties, settings);
 
       if (!messageOpts.getIdField().isEmpty()) {
         if (!fields.containsKey(messageOpts.getIdField())) {
@@ -263,12 +270,18 @@ public final class ProtoMapper {
       mappings.put("_meta", Map.of(META_KEY, meta));
 
       String alias = naming.alias(declaredAlias);
+      String name = naming.indexName(declaredBase, hash);
+      int bytes = name.getBytes(StandardCharsets.UTF_8).length;
+      if (bytes > MAX_INDEX_NAME_BYTES) {
+        throw new MappingException(root.getFullName(), "index name " + name + " is " + bytes
+            + " bytes, more than the " + MAX_INDEX_NAME_BYTES + " an index name may have");
+      }
       return new IndexDefinition(
           root,
           alias,
-          naming.indexName(declaredBase, hash),
+          name,
           hash,
-          settings(),
+          settings,
           mappings,
           fields,
           nestedPaths,
@@ -278,25 +291,56 @@ public final class ProtoMapper {
           warnings);
     }
 
+    /** Lower-cases a declared alias or index name and checks it can name an index. */
+    private String declaredName(String option, String value) {
+      try {
+        return IndexNames.check(option, value);
+      } catch (IllegalArgumentException e) {
+        throw new MappingException(root.getFullName(), e.getMessage());
+      }
+    }
+
     /**
-     * Rejects mappings the engine would refuse under its default field limits: more {@code
-     * nested} fields than {@link MappingDefaults#maxNestedFields()}, or more fields in total than
-     * {@link MappingDefaults#maxTotalFields()}.
+     * Rejects mappings the engine would refuse under its field limits: more {@code nested} fields,
+     * or more fields in total, than the index settings allow ({@code
+     * index.mapping.nested_fields.limit}, {@code index.mapping.total_fields.limit}) or, where the
+     * settings declare none, than {@link MappingDefaults#maxNestedFields()} and {@link
+     * MappingDefaults#maxTotalFields()}.
      */
-    private void checkLimits(Map<String, Object> properties) {
+    private void checkLimits(Map<String, Object> properties, Map<String, Object> settings) {
       int[] counts = new int[2];
       count(properties, counts);
-      int nested = counts[0];
-      int total = counts[1];
-      if (defaults.maxNestedFields() > 0 && nested > defaults.maxNestedFields()) {
-        throw new MappingException(root.getFullName(), "maps " + nested
-            + " nested fields, more than maxNestedFields " + defaults.maxNestedFields()
-            + " (index.mapping.nested_fields.limit)");
+      check(counts[0], "nested fields", settingLimit(settings, NESTED_LIMIT),
+          defaults.maxNestedFields(), "maxNestedFields", NESTED_LIMIT);
+      check(counts[1], "fields", settingLimit(settings, TOTAL_LIMIT),
+          defaults.maxTotalFields(), "maxTotalFields", TOTAL_LIMIT);
+    }
+
+    private void check(int count, String what, Integer fromSettings, int fromDefaults,
+        String option, String setting) {
+      if (fromSettings != null) {
+        if (fromSettings > 0 && count > fromSettings) {
+          throw new MappingException(root.getFullName(), "maps " + count + " " + what
+              + ", more than " + setting + " " + fromSettings + " in the index settings");
+        }
+        return;
       }
-      if (defaults.maxTotalFields() > 0 && total > defaults.maxTotalFields()) {
-        throw new MappingException(root.getFullName(), "maps " + total
-            + " fields, more than maxTotalFields " + defaults.maxTotalFields()
-            + " (index.mapping.total_fields.limit)");
+      if (fromDefaults > 0 && count > fromDefaults) {
+        throw new MappingException(root.getFullName(), "maps " + count + " " + what
+            + ", more than " + option + " " + fromDefaults + " (" + setting + ")");
+      }
+    }
+
+    /** Reads a limit from settings written nested, dotted, or with or without {@code index.}. */
+    private Integer settingLimit(Map<String, Object> settings, String key) {
+      Object value = flatten("", settings).get(key);
+      if (value == null) {
+        return null;
+      }
+      try {
+        return Integer.valueOf(value.toString().trim());
+      } catch (NumberFormatException e) {
+        throw new MappingException(root.getFullName(), key + " is not a number: " + value);
       }
     }
 
@@ -336,6 +380,10 @@ public final class ProtoMapper {
         if (!VALID_NAME.matcher(esName).matches()) {
           throw new MappingException(protoPath, "elastic_field.name '" + esName
               + "' must be non-empty and contain no '.' or whitespace");
+        }
+        if (!options.getName().isEmpty() && esName.startsWith("_")) {
+          throw new MappingException(protoPath, "elastic_field.name '" + esName
+              + "' must not start with '_', which is reserved for metadata fields");
         }
         String path = join(pathPrefix, esName);
         Map<String, Object> property = property(field, options, path, protoPath);
@@ -626,7 +674,7 @@ public final class ProtoMapper {
         continue;
       }
       Map<String, Object> property = (Map<String, Object>) value;
-      counts[1]++;
+      counts[1] += fieldCount(property);
       if ("nested".equals(property.get("type"))) {
         counts[0]++;
       }
@@ -637,6 +685,46 @@ public final class ProtoMapper {
         count((Map<String, Object>) property.get("fields"), counts);
       }
     }
+  }
+
+  /**
+   * Returns how many fields one mapped property adds, not counting its children: a {@code
+   * search_as_you_type} field adds its {@code _2gram} to {@code _<max_shingle_size>gram}
+   * sub-fields and {@code _index_prefix} (4 at the default {@code max_shingle_size} of 3), and a
+   * {@code text} field adds one for {@code index_prefixes} and one for {@code index_phrases}.
+   */
+  private static int fieldCount(Map<String, Object> property) {
+    Object type = property.get("type");
+    if ("search_as_you_type".equals(type)) {
+      Object shingles = property.get("max_shingle_size");
+      return 1 + (shingles == null
+          ? DEFAULT_MAX_SHINGLE_SIZE : Integer.parseInt(shingles.toString()));
+    }
+    int count = 1;
+    if ("text".equals(type)) {
+      if (property.get("index_prefixes") != null) {
+        count++;
+      }
+      if (Boolean.parseBoolean(String.valueOf(property.get("index_phrases")))) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /** Flattens settings to {@code index.}-prefixed dotted keys. */
+  @SuppressWarnings("unchecked")
+  private static Map<String, Object> flatten(String prefix, Map<String, Object> settings) {
+    Map<String, Object> flat = new TreeMap<>();
+    for (Map.Entry<String, Object> entry : settings.entrySet()) {
+      String key = prefix + entry.getKey();
+      if (entry.getValue() instanceof Map) {
+        flat.putAll(flatten(key + ".", (Map<String, Object>) entry.getValue()));
+      } else {
+        flat.put(key.startsWith("index.") ? key : "index." + key, entry.getValue());
+      }
+    }
+    return flat;
   }
 
   private static boolean isStructLike(FieldDescriptor field) {
