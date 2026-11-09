@@ -286,7 +286,7 @@ Index settings follow the same idea: `shards`/`replicas` options, then `settings
 | repeated scalar | same type as the scalar (engines index arrays natively) |
 | singular message | `object` |
 | repeated message | `nested` |
-| `map<K, V>` | `flattened` (OpenSearch: `flat_object`); keys are queried by dotted path (`labels.env`). `type: OBJECT` opts in to `object` with `dynamic: true` |
+| `map<K, V>` | `flattened` (OpenSearch: `flat_object`); keys are queried by dotted path (`labels.env`). `type: OBJECT` (or `NESTED`) maps a typed map: an `object` with `dynamic: true` plus `dynamic_templates` that give every key the value type |
 | `google.protobuf.Timestamp` | `date`, format `strict_date_optional_time` |
 | `google.protobuf.Duration` | `keyword` |
 | wrapper types (`StringValue`, `Int64Value`, ...) | the wrapped scalar's type |
@@ -300,14 +300,38 @@ Maps default to `flattened` because their keys are data, not schema: an `object`
 `dynamic: true` adds a mapping entry (and a type guessed from the first value) for every new key,
 which grows the mapping without bound and can reject a later document whose value has another type.
 A flattened field indexes every leaf as a keyword under one mapping entry; its keys take `EQUALS`,
-`ANY_IN`, `EXISTS` and `TEXT_PREFIX` (see [Query DSL](#query-dsl)). Use `type: OBJECT` when each key
-needs its own type, for example numeric ranges or full text on map values.
+`ANY_IN`, `EXISTS` and `TEXT_PREFIX` (see [Query DSL](#query-dsl)).
+
+Use `type: OBJECT` (or `NESTED`) when the values need their own type, for example numeric ranges
+or full text on map values. The map becomes a typed map: an `object` with `dynamic: true` and, on
+the root mapping, one `dynamic_templates` entry per value field, named `ep:<path>`, so every key
+the engine sees takes the type the value would get as an ordinary field. A scalar, enum, wrapper,
+`Timestamp`, `LatLon` or `GeoShape` value is one template (`counters.*` => `long`); a message
+value is one template per leaf (`children.*.count` => `long`) and per object or nested field inside
+it. `value_type` requests the value type, and the field's `analyzer`, `search_analyzer`,
+`keyword_subfield`, `ignore_above`, `normalizer`, `format`, `index`, `doc_values`, `coerce` and
+`null_value` apply to the values:
+
+```protobuf
+map<string, int64> counters = 2 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+map<string, string> notes = 3 [(phatjam98.elasticprotos.v1.elastic_field) = {
+  type: OBJECT value_type: TEXT analyzer: "english" full_text: TRUE
+}];
+map<string, Child> children = 4 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+```
+
+Keys of a typed map must be non-empty and contain no `.` (the codec throws `CodecException`), and
+every distinct key adds fields to the index at index time, which count toward
+`index.mapping.total_fields.limit`; the mapper warns with the number of fields per key. Values whose
+message holds a map, `Struct` or `Any` at any depth stay untyped (`dynamic: true` only), with a
+warning. A typed map is a different mapping from a flattened one, so switching a map to or from
+`OBJECT` reindexes.
 
 The root mapping is `dynamic: strict`. `MappingDefaults` can change the string rule
 (`withStringsAsText`), the keyword sub-field, `ignore_above`, the date format, the depth limit, the
 root dynamic mode and how singular messages, repeated messages and `Struct` are mapped.
 
-Requested types are validated: `OBJECT`, `NESTED` and `FLATTENED` need a message or map field;
+Requested types are validated (`value_type` against the map's value): `OBJECT`, `NESTED` and `FLATTENED` need a message or map field;
 `GEO_POINT` needs a string or a message with `lat`/`lon` (or `latitude`, `lng`, `longitude`)
 numbers; `GEO_SHAPE` needs a string or `GeoShape`; `DATE` on a message needs `Timestamp`. A
 mapped-name override (`elastic_field.name`) must be non-empty and contain no `.` or whitespace.
@@ -344,7 +368,8 @@ on the index (through `settings_json`), raise them in `MappingDefaults` too
 
 | Option | Meaning | Default |
 |---|---|---|
-| `type` | Requested type: `KEYWORD`, `TEXT`, `SEARCH_AS_YOU_TYPE`, `INTEGER`, `LONG`, `DOUBLE`, `FLOAT`, `BOOLEAN`, `DATE`, `DATE_NANOS`, `GEO_POINT`, `GEO_SHAPE`, `OBJECT`, `NESTED`, `FLATTENED`, `BINARY`, `IP`, or `IGNORE` (left out of the mapping and of documents). On a `map` field, `OBJECT` (or `NESTED`) gives `dynamic: true`, so the engine maps each key on first sight, instead of the default `flattened` | `AUTO`: the default rules |
+| `type` | Requested type: `KEYWORD`, `TEXT`, `SEARCH_AS_YOU_TYPE`, `INTEGER`, `LONG`, `DOUBLE`, `FLOAT`, `BOOLEAN`, `DATE`, `DATE_NANOS`, `GEO_POINT`, `GEO_SHAPE`, `OBJECT`, `NESTED`, `FLATTENED`, `BINARY`, `IP`, or `IGNORE` (left out of the mapping and of documents). On a `map` field, `OBJECT` (or `NESTED`) maps a typed map, whose keys take the value type through dynamic templates, instead of the default `flattened` | `AUTO`: the default rules |
+| `value_type` | Type of the values of a `map` field mapped as `OBJECT` or `NESTED` (any `type` value but `IGNORE`); ignored, with a warning, on other fields | `AUTO`: the default rules for the value type |
 | `analyzer` | Analyzer of a `TEXT` / `SEARCH_AS_YOU_TYPE` field | the message's `default_analyzer` |
 | `search_analyzer` | Search-time analyzer | none |
 | `keyword_subfield` | Give a `TEXT` field a `.keyword` sub-field (`TRUE` / `FALSE`) | `TRUE` |
@@ -463,8 +488,8 @@ MigrationResult result = migrator.apply(plan);
 |---|---|---|
 | `CREATE` | The alias does not exist | Creates the index with settings, mappings and the alias in one request |
 | `NO_OP` | Hash matches, or the mappings already match | Nothing |
-| `PUT_MAPPING` | Only fields were added that existing documents can be indexed into (new top-level fields, new properties under an object that already has typed properties), or only `dynamic` changed | Extends the mapping of the current index in place |
-| `REINDEX` | A field changed type or any mapping parameter other than `dynamic` (analyzer, `search_analyzer`, format, `ignore_above`, normalizer, `copy_to`, `index`, `doc_values`, `null_value`, `coerce`, `enabled`, ...); a multi-field was added to an existing field (for example `name.keyword`); a typed property was added under an object whose current mapping is dynamic; or fields were removed under `RemovedFieldPolicy.REINDEX` | New index, copy, verify, swap the alias (below) |
+| `PUT_MAPPING` | Only fields were added that existing documents can be indexed into (new top-level fields, new properties under an object that already has typed properties, new typed maps with their `dynamic_templates`), or only `dynamic` changed | Extends the mapping of the current index in place |
+| `REINDEX` | A field changed type or any mapping parameter other than `dynamic` (analyzer, `search_analyzer`, format, `ignore_above`, normalizer, `copy_to`, `index`, `doc_values`, `null_value`, `coerce`, `enabled`, ...); the `dynamic_templates` of a typed map that already exists changed; a multi-field was added to an existing field (for example `name.keyword`); a typed property was added under an object whose current mapping is dynamic; or fields were removed under `RemovedFieldPolicy.REINDEX` | New index, copy, verify, swap the alias (below) |
 | `BLOCKED` | A concrete index is named like the alias; the alias points at several indices; or a breaking change with `allowReindex` off | Nothing; the outcome's status is `BLOCKED`, the plan's `reason` says why and `MigrationResult.ok()` is false |
 
 An added multi-field, or typed properties over what used to be a dynamic object, need a reindex
@@ -736,6 +761,16 @@ Notes:
   `labels.env`, needs no mapping entry. It takes `EQUALS`, `ANY_IN`, `EXISTS` and `TEXT_PREFIX`,
   compared as keywords (`labels.count` equal to `3` is the string `"3"`); other operations on a key
   throw `QueryCompileException`. Map the field with `type: OBJECT` for typed ranges or full text.
+- **Typed map keys**: a path below a typed map (`type: OBJECT` or `NESTED` on a `map`), such as
+  `counters.views` or `children.alice.count`, takes every operation of the value type: `NUM_RANGE`
+  on a `long`, `TEXT_MATCHES` on `text`, `GEO_DISTANCE` on a `geo_point`, and so on. A nested
+  field inside the values (`children.alice.items`) is wrapped in a `nested` query with
+  `ignore_unmapped: true`, because it is mapped only once a document uses the key; a sort on a key
+  adds `unmapped_type` for the same reason, and sorts under such a nested field are rejected.
+  `FULL_TEXT` searches a key when it is listed (`notes.summary`), all keys through the pattern
+  (`notes.*`), and, opt-in with `full_text: TRUE` on the map, the pattern as part of the default
+  field set (text leaves `children.*.name` for message values). An unknown field below a typed map
+  names the value type in the error.
 - **Leading wildcards** scan every term and are off by default.
 - **Client-supplied criteria**: criteria often come straight from API callers, so the features that
   run code or can scan a whole field are opt-in. `TEXT_REGEX` needs `allowRegex`, and a pattern
@@ -1093,8 +1128,8 @@ before 3.3); `pager(...)` always adapts.
 - A reindex blocks writes for its duration; there is no dual-write, zero-downtime mode.
 - Settings of existing indices (shards, replicas, analysis) are never changed by a migration;
   settings-only changes need a mapping-visible step (see [Settings changes](#settings-changes)).
-- Keys of a `flattened` map are keywords: no numeric ranges, full text or per-key types unless the
-  field is mapped with `type: OBJECT`.
+- Keys of typed maps must not contain dots; dynamic keys count toward
+  `index.mapping.total_fields.limit` at index time; inner maps inside typed map values stay untyped.
 - Plans are not coordinated across processes; concurrent bootstrap is unsupported and can be
   destructive. Run the bootstrap from one place.
 - `NUM_RANGE` has no open-ended bounds (proto3 `double` has no presence).
