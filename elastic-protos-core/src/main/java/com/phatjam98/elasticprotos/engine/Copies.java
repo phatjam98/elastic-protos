@@ -24,4 +24,15 @@ final class Copies {
   static <K, V> Map<K, V> map(Map<? extends K, ? extends V> map) {
     return map == null ? null : Collections.unmodifiableMap(new LinkedHashMap<>(map));
   }
+
+  /**
+   * Returns an unmodifiable copy of a map of string lists in its iteration order, copying each
+   * list as well; a null list becomes empty.
+   */
+  static Map<String, List<String>> stringLists(Map<String, ? extends List<String>> map) {
+    Map<String, List<String>> copy = new LinkedHashMap<>();
+    map.forEach((key, value) -> copy.put(key,
+        value == null ? List.of() : Collections.unmodifiableList(new ArrayList<>(value))));
+    return Collections.unmodifiableMap(copy);
+  }
 }

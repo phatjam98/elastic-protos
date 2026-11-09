@@ -404,11 +404,39 @@ final class ConditionCompiler {
           field.path());
     }
     RangeValue range = value.getRangeValue();
+    if ((range.hasMin() && Double.isNaN(range.getMin()))
+        || (range.hasMax() && Double.isNaN(range.getMax()))) {
+      throw new QueryCompileException(
+          "NUM_RANGE on '" + field.path() + "' has a NaN bound", field.path());
+    }
+    // Only the natural-side infinity means "unset"; the other describes an empty range.
+    boolean hasMin = range.hasMin() && range.getMin() != Double.NEGATIVE_INFINITY;
+    boolean hasMax = range.hasMax() && range.getMax() != Double.POSITIVE_INFINITY;
+    if (!hasMin && !hasMax) {
+      throw new QueryCompileException(
+          "NUM_RANGE on '" + field.path() + "' needs a min or a max bound", field.path());
+    }
+    boolean empty = (hasMin && range.getMin() == Double.POSITIVE_INFINITY)
+        || (hasMax && range.getMax() == Double.NEGATIVE_INFINITY)
+        || (hasMin && hasMax && (range.getMin() > range.getMax()
+            || (range.getMin() == range.getMax()
+                && !(range.getMinInclusive() && range.getMaxInclusive()))));
+    if (empty) {
+      throw new QueryCompileException(
+          "NUM_RANGE on '" + field.path() + "' is empty: min " + (hasMin ? range.getMin() : "-")
+              + ", max " + (hasMax ? range.getMax() : "-")
+              + " (equal bounds need both inclusive)",
+          field.path());
+    }
     Map<String, Object> bounds = new TreeMap<>();
-    bounds.put(range.getMinInclusive() ? "gte" : "gt",
-        ValueConversions.number(kind, range.getMin()));
-    bounds.put(range.getMaxInclusive() ? "lte" : "lt",
-        ValueConversions.number(kind, range.getMax()));
+    if (hasMin) {
+      bounds.put(range.getMinInclusive() ? "gte" : "gt",
+          ValueConversions.number(kind, range.getMin()));
+    }
+    if (hasMax) {
+      bounds.put(range.getMaxInclusive() ? "lte" : "lt",
+          ValueConversions.number(kind, range.getMax()));
+    }
     if (kind.isDate()) {
       bounds.put("format", "epoch_millis");
     }

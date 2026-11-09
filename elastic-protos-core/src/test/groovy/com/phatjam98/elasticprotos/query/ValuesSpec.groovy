@@ -32,6 +32,28 @@ class ValuesSpec extends Specification {
     'null'                | Values.nullValue()                                        | nul()
     'range'               | Values.range(1, false, 9, true)                           | range(1, 9, false, true)
     'between'             | Values.between(1, 9)                                      | range(1, 9)
+    'between instants'    | Values.between(Instant.ofEpochMilli(1000), Instant.ofEpochMilli(2000)) | range(1000, 2000)
+  }
+
+  def "open-ended range factories set exactly one bound: #description"() {
+    expect:
+    value.rangeValue.hasMin() == hasMin
+    value.rangeValue.hasMax() == hasMax
+    value.rangeValue.min == min
+    value.rangeValue.max == max
+    value.rangeValue.minInclusive == minInc
+    value.rangeValue.maxInclusive == maxInc
+
+    where:
+    description  | value                                         | hasMin | hasMax | min  | max  | minInc | maxInc
+    'atLeast'    | Values.atLeast(5)                             | true   | false  | 5d   | 0d   | true   | false
+    'greaterThan'| Values.greaterThan(5)                         | true   | false  | 5d   | 0d   | false  | false
+    'atMost'     | Values.atMost(7)                              | false  | true   | 0d   | 7d   | false  | true
+    'lessThan'   | Values.lessThan(7)                            | false  | true   | 0d   | 7d   | false  | false
+    'onOrAfter'  | Values.onOrAfter(Instant.ofEpochMilli(1000))  | true   | false  | 1000d| 0d   | true   | false
+    'after'      | Values.after(Instant.ofEpochMilli(1000))      | true   | false  | 1000d| 0d   | false  | false
+    'onOrBefore' | Values.onOrBefore(Instant.ofEpochMilli(2000)) | false  | true   | 0d   | 2000d| false  | true
+    'before'     | Values.before(Instant.ofEpochMilli(2000))     | false  | true   | 0d   | 2000d| false  | false
   }
 
   def "geo factories match the hand-built values: #description"() {
@@ -105,5 +127,26 @@ class ValuesSpec extends Specification {
 
     expect:
     Values.from(value).is(value)
+  }
+
+  def "Instant helpers reject instants beyond epoch milliseconds: #description"() {
+    when:
+    call()
+
+    then:
+    def e = thrown(IllegalArgumentException)
+    e.message.contains('epoch milliseconds')
+
+    where:
+    description | call
+    'after'     | { Values.after(Instant.MAX) }
+    'before'    | { Values.before(Instant.MIN) }
+    'between'   | { Values.between(Instant.MIN, Instant.EPOCH) }
+  }
+
+  def "Instant helpers truncate sub-millisecond precision"() {
+    expect:
+    Values.atLeast(1.0d) != null
+    Values.onOrAfter(Instant.ofEpochSecond(1, 999_999)).rangeValue.min == 1000d
   }
 }

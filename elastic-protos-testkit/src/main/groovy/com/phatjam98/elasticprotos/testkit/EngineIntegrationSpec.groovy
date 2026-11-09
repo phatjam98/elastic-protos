@@ -20,8 +20,10 @@ import com.phatjam98.elasticprotos.engine.EngineException
 import com.phatjam98.elasticprotos.engine.EngineProduct
 import com.phatjam98.elasticprotos.engine.Hit
 import com.phatjam98.elasticprotos.engine.IndexOptions
+import com.phatjam98.elasticprotos.engine.ReindexRequest
 import com.phatjam98.elasticprotos.engine.SearchEngine
 import com.phatjam98.elasticprotos.engine.SearchResult
+import com.phatjam98.elasticprotos.engine.UpdateByQueryRequest
 import com.phatjam98.elasticprotos.mapping.IndexDefinition
 import com.phatjam98.elasticprotos.mapping.IndexNamingStrategy
 import com.phatjam98.elasticprotos.mapping.MappingOverrides
@@ -283,6 +285,27 @@ abstract class EngineIntegrationSpec extends Specification {
 
     expect:
     docIds(Criteria.where('filed_at').between(from, to).build()) == ['doc-2', 'doc-3'] as Set
+  }
+
+  def "NUM_RANGE with only a lower bound matches at or above it"() {
+    given:
+    long threshold = 120_000L
+    Set<String> expected = SampleData.documents().findAll { it.sizeBytes >= threshold }*.id as Set
+
+    expect:
+    expected == ['doc-1', 'doc-5', 'doc-6'] as Set
+    docIds(Criteria.where('size_bytes').atLeast(threshold).build()) == expected
+  }
+
+  def "NUM_RANGE with an exclusive lower date bound matches strictly after it"() {
+    given:
+    Instant after = Instant.parse('2024-03-10T09:15:00Z')
+    Set<String> expected = SampleData.documents()
+        .findAll { Instant.ofEpochSecond(it.filedAt.seconds, it.filedAt.nanos).isAfter(after) }*.id as Set
+
+    expect: 'the document filed exactly at the bound is excluded'
+    expected == ['doc-4', 'doc-5', 'doc-6'] as Set
+    docIds(Criteria.where('filed_at').after(after).build()) == expected
   }
 
   def "ANY_IN matches any of the listed values"() {
@@ -852,6 +875,152 @@ abstract class EngineIntegrationSpec extends Specification {
     then:
     def missing = thrown(EngineException)
     missing.kind == EngineException.Kind.NOT_FOUND
+  }
+
+  // ------------------------------------------------------------------ engine SPI
+
+  def "settings updates, conditional writes, hit metadata, update by query and external-version reindex"() {
+    given: 'two indices of their own, so the sample set is untouched'
+    String spi = prefix + '-spi'
+    String copy = prefix + '-spi-copy'
+    Map<String, Object> settings = [number_of_shards: 1, number_of_replicas: 0]
+    Map<String, Object> mappings = [properties: [title: [type: 'text']]]
+    engine.createIndex(spi, settings, mappings, [] as Set)
+    engine.createIndex(copy, settings, mappings, [] as Set)
+
+    when: 'a dynamic setting is changed'
+    engine.putSettings(spi, ['index.refresh_interval': '5s'])
+
+    then:
+    engine.getSettings(spi).index.refresh_interval == '5s'
+
+    when: 'a document is written, then overwritten on its sequence number and primary term'
+    def first = engine.index(spi, '1', [title: 'one'], IndexOptions.defaults())
+    def second = engine.index(spi, '1', [title: 'uno'], IndexOptions.ifMatch(first.seqNo(), first.primaryTerm()))
+
+    then:
+    first.seqNo() != null
+    first.primaryTerm() != null
+    second.seqNo() > first.seqNo()
+    second.version() == 2
+
+    when: 'the sequence number is stale'
+    engine.index(spi, '1', [title: 'stale'], IndexOptions.ifMatch(first.seqNo(), first.primaryTerm()))
+
+    then:
+    def conflict = thrown(EngineException)
+    conflict.kind == EngineException.Kind.CONFLICT
+    conflict.status == 409
+
+    when: 'a search asks for versions and sequence numbers, and get returns them anyway'
+    engine.bulk([BulkOp.index(spi, '2', [title: 'two']), BulkOp.index(spi, '3', [title: 'three'])])
+    engine.refresh(spi)
+    def hits = engine.search([spi], [query: [ids: [values: ['1']]], version: true, seq_no_primary_term: true]).hits()
+    def got = engine.get(spi, '1').get()
+
+    then:
+    hits*.id() == ['1']
+    hits[0].version() == 2L
+    hits[0].seqNo() == second.seqNo()
+    hits[0].primaryTerm() == second.primaryTerm()
+    got.version() == 2L
+    got.seqNo() == second.seqNo()
+    got.primaryTerm() == second.primaryTerm()
+
+    when: 'every document is updated in place'
+    long docs = count(spi)
+    def updated = engine.updateByQuery(UpdateByQueryRequest.builder().index(spi).proceedOnConflicts(true).build())
+
+    then:
+    docs == 3
+    updated.total() == docs
+    updated.updated() == docs
+    updated.accounted()
+    updated.ok()
+    engine.get(spi, '1').get().version() == 3L
+
+    when: 'copied twice with external versions'
+    def external = ReindexRequest.of(spi, copy)
+        .withVersionType(ReindexRequest.VersionType.EXTERNAL).withProceedOnConflicts(true)
+    def firstCopy = engine.reindex(external)
+    def secondCopy = engine.reindex(external)
+
+    then: 'the second copy finds nothing newer and conflicts on every document'
+    firstCopy.created() == docs
+    firstCopy.accounted()
+    engine.get(copy, '1').get().version() == 3L
+    secondCopy.total() == docs
+    secondCopy.versionConflicts() == secondCopy.total()
+    secondCopy.created() == 0
+    secondCopy.updated() == 0
+    secondCopy.accounted()
+    secondCopy.ok()
+
+    when: 'without proceeding on conflicts'
+    def aborted = engine.reindex(external.withProceedOnConflicts(false))
+
+    then: 'the conflict is reported as a failure, and the total still counts every document'
+    !aborted.ok()
+    aborted.versionConflicts() >= 1
+    !aborted.failures().isEmpty()
+    !aborted.complete()
+
+    when: 'a conditional delete has a stale sequence number'
+    def two = engine.get(spi, '2').get()
+    engine.delete(spi, '2', IndexOptions.ifMatch(two.seqNo() + 100, two.primaryTerm()))
+
+    then:
+    def staleDelete = thrown(EngineException)
+    staleDelete.kind == EngineException.Kind.CONFLICT
+    engine.get(spi, '2').present
+
+    when: 'a conditional delete names a missing document'
+    def missingDelete = outcome { engine.delete(spi, 'missing', IndexOptions.ifMatch(0, 1)) }
+
+    then: 'both engines answer 409'
+    missingDelete == EngineException.Kind.CONFLICT
+
+    when: 'a bulk carries one stale conditional delete'
+    def bulk = engine.bulk([
+        BulkOp.index(spi, '4', [title: 'four']),
+        BulkOp.deleteIfMatch(spi, '2', two.seqNo() + 100, two.primaryTerm()),
+        BulkOp.deleteIfMatch(spi, '3', engine.get(spi, '3').get().seqNo(), two.primaryTerm()),
+    ])
+
+    then: 'only that item fails'
+    bulk.items()*.status() == [201, 409, 200]
+    bulk.failures()*.id() == ['2']
+    engine.get(spi, '2').present
+    !engine.get(spi, '3').present
+
+    when: 'a reindex selects one document by id'
+    String one = prefix + '-spi-one'
+    engine.createIndex(one, settings, mappings, [] as Set)
+    def selected = engine.reindex(ReindexRequest.of(spi, one).withQuery([ids: [values: ['1']]]))
+
+    then:
+    selected.total() == 1
+    selected.created() == 1
+    selected.complete()
+    count(one) == 1
+
+    when: 'a match query asks for highlights on a text field'
+    engine.refresh(spi)
+    def highlighted = engine.search([spi], [query: [match: [title: 'four']], highlight: [fields: [title: [:]]]]).hits()
+
+    then:
+    highlighted*.id() == ['4']
+    !highlighted[0].highlight()['title'].isEmpty()
+    highlighted[0].highlight()['title'][0].contains('<em>four</em>')
+  }
+
+  /** Runs a call and returns its result, or the kind of the {@link EngineException} it threw. */
+  static Object outcome(Closure<?> call) {
+    try {
+      call()
+    } catch (EngineException e) {
+      e.kind
+    }
   }
 
   // ------------------------------------------------------------------ helpers

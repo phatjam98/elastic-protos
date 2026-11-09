@@ -8,6 +8,7 @@ import com.phatjam98.elasticprotos.engine.EngineProduct
 import com.phatjam98.elasticprotos.engine.IndexOptions
 import com.phatjam98.elasticprotos.engine.ReindexRequest
 import com.phatjam98.elasticprotos.engine.SearchResult
+import com.phatjam98.elasticprotos.engine.UpdateByQueryRequest
 import java.time.Duration
 import spock.lang.Specification
 
@@ -492,5 +493,469 @@ class InMemorySearchEngineSpec extends Specification {
 
     then:
     engine.log().isEmpty()
+  }
+
+  // ------------------------------------------------------------------ versions and sequence numbers
+
+  def "every write takes the next global sequence number and bumps the document version"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+    engine.createIndex('b-v1', [:], MAPPINGS, [] as Set)
+
+    when:
+    def first = engine.index('a', '1', [title: 'x'], IndexOptions.defaults())
+    def other = engine.index('b-v1', '1', [title: 'y'], IndexOptions.defaults())
+    def second = engine.index('a', '1', [title: 'z'], IndexOptions.defaults())
+    def updated = engine.update('a', '1', [status: 'open'])
+
+    then:
+    [first, other, second, updated]*.seqNo() == [0L, 1L, 2L, 3L]
+    [first, other, second, updated]*.primaryTerm() == [1L, 1L, 1L, 1L]
+    [first, other, second, updated]*.version() == [1L, 1L, 2L, 3L]
+
+    when:
+    def hit = engine.get('a', '1').get()
+
+    then:
+    hit.version() == 3L
+    hit.seqNo() == 3L
+    hit.primaryTerm() == 1L
+  }
+
+  def "a conditional index or delete succeeds only on the current sequence number and primary term"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+    def written = engine.index('a', '1', [title: 'x'], IndexOptions.defaults())
+
+    when:
+    def next = engine.index('a', '1', [title: 'y'], IndexOptions.ifMatch(written.seqNo(), written.primaryTerm()))
+
+    then:
+    next.version() == 2L
+    next.seqNo() > written.seqNo()
+
+    when: 'the sequence number is stale'
+    engine.index('a', '1', [title: 'z'], IndexOptions.ifMatch(written.seqNo(), 1))
+
+    then:
+    def stale = thrown(EngineException)
+    stale.kind == EngineException.Kind.CONFLICT
+    stale.status == 409
+    stale.message.contains('current document has seqNo [' + next.seqNo() + ']')
+    engine.documents('a-v1')['1'] == [title: 'y']
+
+    when: 'the primary term is wrong'
+    engine.delete('a', '1', IndexOptions.ifMatch(next.seqNo(), 2))
+
+    then:
+    thrown(EngineException)
+
+    when: 'the document does not exist'
+    engine.index('a', '9', [title: 'z'], IndexOptions.ifMatch(0, 1))
+
+    then:
+    def missing = thrown(EngineException)
+    missing.kind == EngineException.Kind.CONFLICT
+    missing.message.contains('no document was found')
+
+    expect:
+    engine.delete('a', '1', IndexOptions.ifMatch(next.seqNo(), next.primaryTerm()))
+    !engine.get('a', '1').present
+  }
+
+  def "conditional bulk items that do not match fail with 409 and leave the document alone"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+    def one = engine.index('a', '1', [title: 'one'], IndexOptions.defaults())
+    def two = engine.index('a', '2', [title: 'two'], IndexOptions.defaults())
+
+    when:
+    def result = engine.bulk([
+        BulkOp.indexIfMatch('a', '1', [title: 'uno'], one.seqNo(), 1),
+        BulkOp.indexIfMatch('a', '2', [title: 'dos'], one.seqNo(), 1),
+        BulkOp.deleteIfMatch('a', '2', two.seqNo() + 100, 1),
+        BulkOp.deleteIfMatch('a', '1', 99, 1),
+    ])
+
+    then:
+    result.errors()
+    result.items()*.status() == [200, 409, 409, 409]
+    result.failures()*.id() == ['2', '2', '1']
+    result.failures()[0].error().startsWith('version_conflict_engine_exception')
+    engine.documents('a-v1') == ['1': [title: 'uno'], '2': [title: 'two']]
+
+    when:
+    def hit = engine.get('a', '1').get()
+    def deleted = engine.bulk([BulkOp.deleteIfMatch('a', '1', hit.seqNo(), hit.primaryTerm())])
+
+    then:
+    !deleted.errors()
+    deleted.items()[0].status() == 200
+    !engine.get('a', '1').present
+  }
+
+  def "search returns version metadata only when the body asks, and accepts a highlight"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+    engine.index('a', '1', [title: 'x'], IndexOptions.defaults())
+    engine.index('a', '1', [title: 'x'], IndexOptions.defaults())
+
+    when:
+    def plain = engine.search(['a'], [:]).hits()[0]
+    def versioned = engine.search(['a'], [version: true]).hits()[0]
+    def full = engine.search(['a'], [version: true, seq_no_primary_term: true, sort: ['_doc'],
+                                     highlight: [fields: [title: [:]]]]).hits()[0]
+
+    then:
+    plain.version() == null
+    plain.seqNo() == null
+    plain.primaryTerm() == null
+    versioned.version() == 2L
+    versioned.seqNo() == null
+    full.version() == 2L
+    full.seqNo() == 1L
+    full.primaryTerm() == 1L
+    full.sort() == [0L]
+    full.highlight() == [:]
+  }
+
+  def "updateByQuery rewrites the matching documents and bumps their versions"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+    engine.index('a', '1', [title: 'one', status: 'open'], IndexOptions.defaults())
+    engine.index('a', '2', [title: 'two', status: 'closed'], IndexOptions.defaults())
+    engine.index('a', '3', [title: 'three', status: 'open'], IndexOptions.defaults())
+
+    when:
+    def all = engine.updateByQuery(UpdateByQueryRequest.of('a'))
+
+    then:
+    all.total() == 3
+    all.updated() == 3
+    all.accounted()
+    all.ok()
+    ['1', '2', '3'].collect { engine.get('a', it).get().version() } == [2L, 2L, 2L]
+    engine.get('a', '3').get().seqNo() == 5L
+    engine.documents('a-v1')['1'] == [title: 'one', status: 'open']
+
+    when:
+    def some = engine.updateByQuery(UpdateByQueryRequest.builder().index('a-v1')
+        .query([ids: [values: ['1', '3']]]).proceedOnConflicts(true).build())
+    def closed = engine.updateByQuery(UpdateByQueryRequest.of('a').withQuery([term: [status: 'closed']]))
+
+    then:
+    some.updated() == 2
+    closed.updated() == 1
+    ['1', '2', '3'].collect { engine.get('a', it).get().version() } == [3L, 3L, 3L]
+    engine.log().contains('updateByQuery a-v1')
+
+    when:
+    engine.setWriteBlock('a-v1', true)
+    engine.updateByQuery(UpdateByQueryRequest.of('a'))
+
+    then:
+    def blocked = thrown(EngineException)
+    blocked.kind == EngineException.Kind.BLOCKED
+
+    when:
+    engine.updateByQuery(UpdateByQueryRequest.of('missing'))
+
+    then:
+    def missing = thrown(EngineException)
+    missing.kind == EngineException.Kind.NOT_FOUND
+  }
+
+  def "reindex copies a snapshot taken when it starts and honours a source query"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+    engine.createIndex('a-v2', [:], MAPPINGS, [] as Set)
+    engine.index('a', '1', [title: 'one'], IndexOptions.defaults())
+    engine.index('a', '2', [title: 'two'], IndexOptions.defaults())
+    engine.index('a', '3', [title: 'three'], IndexOptions.defaults())
+    List<String> seen = []
+    engine.duringReindex { request ->
+      seen << request.dest()
+      engine.index('a', '1', [title: 'changed'], IndexOptions.defaults())
+      engine.index('a', '4', [title: 'late'], IndexOptions.defaults())
+      engine.delete('a', '2')
+    }
+
+    when:
+    def result = engine.reindex(ReindexRequest.of('a', 'a-v2').withQuery([ids: [values: ['1', '2', '4']]]))
+
+    then:
+    seen == ['a-v2']
+    result.total() == 2
+    result.created() == 2
+    result.accounted()
+    engine.documents('a-v2') == ['1': [title: 'one'], '2': [title: 'two']]
+    engine.documents('a-v1').keySet() == ['1', '3', '4'] as Set
+
+    when: 'the hook is removed'
+    engine.duringReindex(null)
+    def again = engine.reindex(ReindexRequest.of('a', 'a-v2'))
+
+    then:
+    again.total() == 3
+    again.updated() == 1
+    again.created() == 2
+    engine.documents('a-v2')['1'] == [title: 'changed']
+  }
+
+  def "an external-version reindex keeps source versions and counts newer destination documents as conflicts"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+    engine.createIndex('a-v2', [:], MAPPINGS, [] as Set)
+    engine.index('a', '1', [title: 'one'], IndexOptions.defaults())
+    engine.index('a', '1', [title: 'one again'], IndexOptions.defaults())
+    engine.index('a', '2', [title: 'two'], IndexOptions.defaults())
+    def external = ReindexRequest.of('a', 'a-v2').withVersionType(ReindexRequest.VersionType.EXTERNAL)
+        .withProceedOnConflicts(true)
+
+    when:
+    def first = engine.reindex(external)
+
+    then:
+    first.created() == 2
+    first.versionConflicts() == 0
+    engine.get('a-v2', '1').get().version() == 2L
+    engine.get('a-v2', '2').get().version() == 1L
+
+    when: 'the source changes one document and the destination already has a newer write of another'
+    engine.index('a', '2', [title: 'two again'], IndexOptions.defaults())
+    engine.index('a-v2', '1', [title: 'written to the new index'], IndexOptions.defaults())
+    def second = engine.reindex(external)
+
+    then:
+    second.total() == 2
+    second.updated() == 1
+    second.versionConflicts() == 1
+    second.accounted()
+    second.ok()
+    engine.documents('a-v2') == ['1': [title: 'written to the new index'], '2': [title: 'two again']]
+    engine.get('a-v2', '2').get().version() == 2L
+
+    when: 'nothing changed, so every document conflicts'
+    def third = engine.reindex(external)
+
+    then:
+    third.versionConflicts() == third.total()
+    third.accounted()
+  }
+
+  def "an external-version reindex that does not proceed on conflicts stops at the first one and reports it"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+    engine.createIndex('a-v2', [:], MAPPINGS, [] as Set)
+    engine.index('a', '1', [title: 'one'], IndexOptions.defaults())
+    engine.index('a', '2', [title: 'two'], IndexOptions.defaults())
+    def external = ReindexRequest.of('a', 'a-v2').withVersionType(ReindexRequest.VersionType.EXTERNAL)
+    engine.reindex(external)
+
+    when:
+    def result = engine.reindex(external)
+
+    then: 'total is still every snapshot document, so the result is not accounted for'
+    !result.ok()
+    result.versionConflicts() == 1
+    result.total() == 2
+    !result.accounted()
+    !result.complete()
+    result.failures().size() == 1
+    result.failures()[0].id == '1'
+    result.failures()[0].status == 409
+    result.failures()[0].cause.type == 'version_conflict_engine_exception'
+  }
+
+  def "a delete leaves a tombstone: the version continues on the next write"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+    engine.index('a', '1', [title: 'x'], IndexOptions.defaults())
+    engine.index('a', '1', [title: 'x'], IndexOptions.defaults())
+
+    when:
+    engine.delete('a', '1')
+
+    then:
+    engine.tombstoneVersion('a-v1', '1') == 3L
+    engine.tombstoneVersion('a-v1', '2') == null
+
+    when:
+    def again = engine.index('a', '1', [title: 'y'], IndexOptions.defaults())
+
+    then:
+    again.version() == 4L
+    again.result() == 'created'
+    engine.tombstoneVersion('a-v1', '1') == null
+
+    when: 'a bulk delete leaves one too'
+    engine.bulk([BulkOp.delete('a', '1')])
+
+    then:
+    engine.tombstoneVersion('a-v1', '1') == 5L
+  }
+
+  def "an external-version reindex onto a recently deleted id is a version conflict"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+    engine.createIndex('a-v2', [:], MAPPINGS, [] as Set)
+    engine.index('a', '1', [title: 'one'], IndexOptions.defaults())
+    engine.index('a', '2', [title: 'two'], IndexOptions.defaults())
+    def external = ReindexRequest.of('a', 'a-v2').withVersionType(ReindexRequest.VersionType.EXTERNAL)
+        .withProceedOnConflicts(true)
+    engine.reindex(external)
+
+    when: 'the copy of 1 is deleted from the destination, then the copy runs again'
+    engine.delete('a-v2', '1')
+    def result = engine.reindex(external)
+
+    then:
+    result.total() == 2
+    result.versionConflicts() == 2
+    result.created() == 0
+    result.complete()
+    !engine.get('a-v2', '1').present
+  }
+
+  def "a conditional write needs an id"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+
+    when:
+    engine.index('a', null, [title: 'x'], IndexOptions.ifMatch(0, 1))
+
+    then:
+    def e = thrown(IllegalArgumentException)
+    e.message.contains('needs a document id')
+    engine.documents('a-v1').isEmpty()
+  }
+
+  def "updateByQuery counts documents changed after it took their sequence numbers as conflicts"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+    engine.index('a', '1', [title: 'one'], IndexOptions.defaults())
+    engine.index('a', '2', [title: 'two'], IndexOptions.defaults())
+    engine.index('a', '3', [title: 'three'], IndexOptions.defaults())
+    List<String> seen = []
+    engine.duringUpdateByQuery { request ->
+      seen << request.index()
+      engine.index('a', '1', [title: 'changed'], IndexOptions.defaults())
+      engine.delete('a', '3')
+    }
+
+    when:
+    def result = engine.updateByQuery(UpdateByQueryRequest.of('a').withProceedOnConflicts(true))
+
+    then:
+    seen == ['a']
+    result.total() == 3
+    result.updated() == 1
+    result.versionConflicts() == 2
+    result.complete()
+    engine.get('a', '1').get().version() == 2L
+    engine.get('a', '2').get().version() == 2L
+  }
+
+  def "updateByQuery without proceedOnConflicts stops at the first changed document with one 409 failure"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+    engine.index('a', '1', [title: 'one'], IndexOptions.defaults())
+    engine.index('a', '2', [title: 'two'], IndexOptions.defaults())
+    engine.duringUpdateByQuery { engine.index('a', '1', [title: 'changed'], IndexOptions.defaults()) }
+
+    when:
+    def result = engine.updateByQuery(UpdateByQueryRequest.of('a'))
+
+    then:
+    result.total() == 2
+    result.updated() == 0
+    result.versionConflicts() == 1
+    result.failures().size() == 1
+    result.failures()[0].id == '1'
+    result.failures()[0].status == 409
+    result.failures()[0].cause.reason.contains('current document has seqNo [2]')
+    !result.ok()
+    !result.accounted()
+    engine.get('a', '2').get().version() == 1L
+
+    when: 'the hook is removed, nothing conflicts'
+    engine.duringUpdateByQuery(null)
+
+    then:
+    engine.updateByQuery(UpdateByQueryRequest.of('a')).complete()
+  }
+
+  def "putSettings merges flat and nested settings, keeps the getSettings shape and records itself"() {
+    given:
+    engine.createIndex('a-v1', [number_of_shards: 2], MAPPINGS, ['a'] as Set)
+
+    when:
+    engine.putSettings('a', ['index.refresh_interval': '5s', 'index.number_of_replicas': 0])
+    engine.putSettings('a-v1', [index: [max_result_window: 500]])
+
+    then:
+    engine.getSettings('a') == [index: [number_of_shards: '2', number_of_replicas: '0',
+                                        refresh_interval: '5s', max_result_window: '500']]
+    engine.log().contains('putSettings a {index.number_of_replicas=0, index.refresh_interval=5s}')
+
+    when: 'a null value resets a setting'
+    engine.putSettings('a', ['index.refresh_interval': null])
+
+    then:
+    !engine.getSettings('a').index.containsKey('refresh_interval')
+
+    when: 'the write block is a setting too'
+    engine.putSettings('a', ['index.blocks.write': true])
+
+    then:
+    engine.isWriteBlocked('a-v1')
+    engine.getSettings('a').index.blocks == [write: 'true']
+
+    when:
+    engine.putSettings('a', [index: [blocks: [write: false, read_only_allow_delete: false]]])
+
+    then:
+    !engine.isWriteBlocked('a-v1')
+    engine.getSettings('a').index.blocks == [read_only_allow_delete: 'false']
+
+    when:
+    engine.putSettings('a', [index: [blocks: [write: true]]])
+
+    then:
+    engine.isWriteBlocked('a-v1')
+
+    when:
+    engine.putSettings('missing', [:])
+
+    then:
+    thrown(EngineException)
+  }
+
+  def "afterAliasUpdate runs once the aliases are applied"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)
+    engine.createIndex('a-v2', [:], MAPPINGS, [] as Set)
+    List<Set<String>> seen = []
+    engine.afterAliasUpdate { seen << engine.getAliases('a').keySet() }
+
+    when:
+    engine.updateAliases([AliasAction.remove('a-v1', 'a'), AliasAction.add('a-v2', 'a')])
+
+    then:
+    seen == [['a-v2'] as Set]
+
+    when: 'a rejected update does not run the hook'
+    engine.updateAliases([AliasAction.remove('a-v1', 'a')])
+
+    then:
+    thrown(EngineException)
+    seen.size() == 1
+
+    when:
+    engine.afterAliasUpdate(null)
+    engine.updateAliases([AliasAction.add('a-v1', 'b')])
+
+    then:
+    seen.size() == 1
   }
 }

@@ -23,3 +23,21 @@ Maps mapped with `type: OBJECT` or `NESTED` are typed maps: `dynamic_templates` 
 value type (new `value_type` option), and the query compiler, sorts and codec treat keys as typed
 fields ([ADR 0010](docs/adr/0010-typed-maps-through-dynamic-templates.md)). This changes the content
 hash of indices with such maps; `flattened` maps are unchanged.
+
+`RangeValue.min` and `max` are now proto3 `optional`, so `NUM_RANGE` supports open-ended ranges
+(`Values.atLeast`, `greaterThan`, `atMost`, `lessThan`, `onOrAfter`, `after`, `onOrBefore`,
+`before` and `between(Instant, Instant)`; the same steps on `Criteria`). Only the bounds that are
+set are compiled. Wire break: with implicit presence, rc.1/rc.2 generated code never put `0.0` on
+the wire and the default `JsonFormat` printer omits it, so criteria built with rc.2 such as
+`between(0, 100)` or `range(-50, 0)` and then serialized (binary or JSON), or saved queries, now
+arrive with that `min` or `max` unset and therefore open. Rebuild producers against rc.3 or
+persist criteria with `includingDefaultValueFields`. A range with no bound, a NaN bound or an empty
+range is rejected with `QueryCompileException`.
+
+Engine SPI additions before 1.0.0 (conditional writes, `updateByQuery`, `putSettings`, hit
+metadata):
+
+- Hits read by id (`SearchEngine.get`) now carry `version`, `seqNo` and `primaryTerm`, so they no
+  longer equal a `Hit` built with the five-argument constructor.
+- The in-memory test engine copies a reindex from a snapshot of the source taken when the call
+  starts, and a delete consumes a sequence number and leaves a version tombstone.

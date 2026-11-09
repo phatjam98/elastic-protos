@@ -740,7 +740,7 @@ throw `QueryCompileException` (or are skipped with a warning when lenient). `Val
 | `TEXT_PREFIX` | `startsWith(p)` | keyword or text with `.keyword` | `prefix` |
 | `TEXT_SUFFIX` | `endsWith(s)` | keyword or text with `.keyword`; needs `allowLeadingWildcards` | `*s` wildcard |
 | `TEXT_REGEX` | `regex(pattern)` | keyword or text with `.keyword`; needs `allowRegex` | `regexp` |
-| `NUM_RANGE` | `between(min, max)`, `between(Instant, Instant)`, `range(...)` | numeric, date | `range` with both bounds |
+| `NUM_RANGE` | `between(min, max)`, `between(Instant, Instant)`, `range(...)`; open-ended: `atLeast`, `greaterThan`, `atMost`, `lessThan`, `onOrAfter`, `after`, `onOrBefore`, `before` | numeric, date | `range` with the bounds that are set |
 | `ANY_IN` | `anyOf(a, b, ...)` | exact fields | `terms` |
 | `GEO_DISTANCE` | `withinDistance(lat, lon, "10km")` | `geo_point` | `geo_distance` |
 | `GEO_BOUNDING_BOX` | `inBoundingBox(top, left, bottom, right)`, `inBoundingBox(wkt)` | `geo_point` | `geo_bounding_box` |
@@ -758,8 +758,16 @@ Notes:
   level. Predicates of one condition on the same nested path are grouped so they must match the same
   element (`QueryCompilerConfig.groupNested`, default on). Full-text fields are grouped per nested
   path.
-- **Ranges**: proto3 cannot express an unset `double`, so `NUM_RANGE` always emits both bounds; use
-  very small or large values for open ranges. Date ranges are epoch milliseconds.
+- **Ranges**: `RangeValue.min` and `max` are proto3 `optional`, so a range may have only a lower or
+  only an upper bound (`atLeast(n)`, `lessThan(n)`, `after(instant)`, ...; the same helpers exist on
+  `Values`). Only the bounds that are set are emitted, and only the natural-side infinity (`-Infinity` min, `+Infinity` max) counts as unset.
+  `min_inclusive` / `max_inclusive` default to `false`, so a hand-built range is exclusive unless you
+  set them. A range with no bound, a NaN bound, or an empty range (`min > max`, equal bounds that are not
+  both inclusive, `+Infinity` min, `-Infinity` max) throws `QueryCompileException`, also when
+  lenient. Instant helpers use millisecond precision (sub-millisecond parts are truncated). Because
+  `0.0` used to be omitted from the wire, criteria serialized by rc.1/rc.2 (binary or JSON) with a
+  bound of exactly `0` now arrive with that bound unset; rebuild them or persist with
+  `includingDefaultValueFields`. Date ranges are epoch milliseconds.
 - **Flattened keys**: a path below a `flattened` field (a `map` or `Struct` by default), such as
   `labels.env`, needs no mapping entry. It takes `EQUALS`, `ANY_IN`, `EXISTS` and `TEXT_PREFIX`,
   compared as keywords (`labels.count` equal to `3` is the string `"3"`); other operations on a key
@@ -887,9 +895,24 @@ RestClient client = RestClient.builder(HttpHost.create("http://localhost:9200"))
 SearchEngine engine = ElasticsearchEngine.of(client);   // closing the engine closes the client
 ```
 
-`SearchEngine` is the whole SPI: index lifecycle, mappings, aliases, reindex, write blocks, document
-writes, realtime `get` by id, `bulk`, `search`, `count`, point in time, `refresh` and `health`, all
-as JSON-shaped maps. Transport failures are `EngineException`s of kind `IO` that name the request
+`SearchEngine` is the whole SPI: index lifecycle, mappings, settings updates (`putSettings`),
+aliases, reindex, `updateByQuery`, write blocks, document writes, realtime `get` by id, `bulk`,
+`search`, `count`, point in time, `refresh` and `health`, all as JSON-shaped maps.
+
+Writes support optimistic concurrency: `IndexResult` and `Hit` carry the document's `seqNo` and
+`primaryTerm`, and `IndexOptions.ifMatch(seqNo, primaryTerm)` (or `BulkOp.indexIfMatch` /
+`deleteIfMatch`) only writes while the document still has them, failing with `CONFLICT` otherwise.
+`get` always returns `version`, `seqNo` and `primaryTerm` on the hit; `search` returns them when the
+body asks for `"version": true` / `"seq_no_primary_term": true`, and per-field `highlight`
+fragments when it has a `highlight`. `ReindexRequest` takes a source `query`, `VersionType.EXTERNAL`
+(keep source versions and skip documents whose destination version is equal or higher) and
+`proceedOnConflicts`. External versions are compared as numbers, not by time: a document created in
+the destination by an ordinary write starts at version 1, so do not run an external pass once the
+destination takes live writes. `ReindexResult` counts `versionConflicts`, `noops` and `deleted`;
+`accounted()` checks that they add up to `total`, and `complete()` also requires `ok()`. `updateByQuery` rewrites matching documents in place, polled as a task like
+reindex.
+
+Transport failures are `EngineException`s of kind `IO` that name the request
 and the hosts, for example `GET /documents/_alias on http://localhost:9200 failed: No route to host`.
 Engine errors are classified by `EngineException.getKind()`. A `cluster_block_exception` with a 4xx
 status (a write, read or read-only block, answered with 403, or the flood-stage disk watermark's
@@ -1139,7 +1162,6 @@ before 3.3); `pager(...)` always adapts.
   `index.mapping.nested_fields.limit`) at index time; inner maps inside typed map values stay untyped.
 - Plans are not coordinated across processes; concurrent bootstrap is unsupported and can be
   destructive. Run the bootstrap from one place.
-- `NUM_RANGE` has no open-ended bounds (proto3 `double` has no presence).
 - The DSL covers queries, sorting and paging; aggregations, highlighting and the like go into the
   body map by hand.
 

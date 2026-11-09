@@ -5,6 +5,7 @@ import com.google.protobuf.TypeRegistry
 import com.phatjam98.elasticprotos.codec.CodecConfig
 import com.phatjam98.elasticprotos.codec.UnknownFieldPolicy
 import com.phatjam98.elasticprotos.engine.ReindexRequest
+import com.phatjam98.elasticprotos.engine.UpdateByQueryRequest
 import com.phatjam98.elasticprotos.mapping.FieldKind
 import com.phatjam98.elasticprotos.mapping.MappingDefaults
 import com.phatjam98.elasticprotos.migration.FailurePolicy
@@ -447,7 +448,51 @@ class ConfigTypesSpec extends Specification {
     plain.withScriptParams([y: 2]).scriptParams() == [y: 2]
     plain.withScriptParams([y: 2]).script() == null
     !plain.equals('x')
-    plain.toString() == 'ReindexRequest[source=a, dest=b, script=null, scriptParams={}, timeout=PT10M, refresh=true]'
+    plain.toString() == 'ReindexRequest[source=a, dest=b, script=null, scriptParams={}, timeout=PT10M, refresh=true, versionType=INTERNAL, proceedOnConflicts=false, query=null]'
+  }
+
+  def "ReindexRequest: version type, conflicts and query"() {
+    given:
+    def plain = ReindexRequest.of('a', 'b')
+    def query = [ids: [values: ['1']]]
+    def full = ReindexRequest.builder().source('a').dest('b')
+        .versionType(ReindexRequest.VersionType.EXTERNAL).proceedOnConflicts(true).query(query).build()
+
+    expect:
+    plain.versionType() == ReindexRequest.VersionType.INTERNAL
+    !plain.proceedOnConflicts()
+    plain.query() == null
+    full.versionType() == ReindexRequest.VersionType.EXTERNAL
+    full.proceedOnConflicts()
+    full.query() == [ids: [values: ['1']]]
+    full.toBuilder().build() == full
+    full.hashCode() == full.toBuilder().build().hashCode()
+    plain.withVersionType(ReindexRequest.VersionType.EXTERNAL).withProceedOnConflicts(true).withQuery(query) == full
+    full != plain
+    plain != plain.withVersionType(ReindexRequest.VersionType.EXTERNAL)
+    plain != plain.withProceedOnConflicts(true)
+    plain != plain.withQuery(query)
+    full.withQuery(null).query() == null
+    full.toString().endsWith('versionType=EXTERNAL, proceedOnConflicts=true, query={ids={values=[1]}}]')
+
+    when: 'the query is copied and cannot be changed'
+    query.match_all = [:]
+
+    then:
+    full.query() == [ids: [values: ['1']]]
+
+    when:
+    full.query().put('x', 1)
+
+    then:
+    thrown(UnsupportedOperationException)
+
+    when:
+    ReindexRequest.builder().source('a').dest('b').versionType(null).build()
+
+    then:
+    def e = thrown(NullPointerException)
+    e.message == 'versionType'
   }
 
   def "ReindexRequest: script params are copied, may hold null and cannot be changed"() {
@@ -495,5 +540,69 @@ class ConfigTypesSpec extends Specification {
     'null params'      | ReindexRequest.builder().source('a').dest('b').scriptParams(null)     || NullPointerException     | 'scriptParams'
     'a null timeout'   | ReindexRequest.builder().source('a').dest('b').timeout(null)          || NullPointerException     | 'timeout'
     'a zero timeout'   | ReindexRequest.builder().source('a').dest('b').timeout(Duration.ZERO) || IllegalArgumentException | 'timeout must be positive: PT0S'
+  }
+
+  // ---- UpdateByQueryRequest ----------------------------------------------------------------
+
+  def "UpdateByQueryRequest: of, builder, copies and equality"() {
+    given:
+    def plain = UpdateByQueryRequest.of('docs')
+    def query = [ids: [values: ['1', '2']]]
+    def built = UpdateByQueryRequest.builder().index('docs').query(query).proceedOnConflicts(true)
+        .refresh(false).timeout(Duration.ofMinutes(1)).build()
+
+    expect:
+    plain.index() == 'docs'
+    plain.query() == [match_all: [:]]
+    !plain.proceedOnConflicts()
+    plain.refresh()
+    plain.timeout() == Duration.ofMinutes(10)
+    plain == UpdateByQueryRequest.builder().index('docs').build()
+    plain.hashCode() == UpdateByQueryRequest.builder().index('docs').build().hashCode()
+    plain.toBuilder().build() == plain
+    built.toBuilder().build() == built
+    built.query() == query
+    built.proceedOnConflicts()
+    !built.refresh()
+    built.timeout() == Duration.ofMinutes(1)
+    plain.withQuery(query).withProceedOnConflicts(true).withRefresh(false).withTimeout(Duration.ofMinutes(1)) == built
+    plain.withIndex('other').index() == 'other'
+    plain != plain.withIndex('other')
+    plain != plain.withQuery(query)
+    plain != plain.withProceedOnConflicts(true)
+    plain != plain.withRefresh(false)
+    plain != plain.withTimeout(Duration.ofMinutes(1))
+    !plain.equals('x')
+    plain.toString() == 'UpdateByQueryRequest[index=docs, query={match_all={}}, proceedOnConflicts=false, refresh=true, timeout=PT10M]'
+
+    when: 'the query is copied and cannot be changed'
+    query.x = 1
+
+    then:
+    built.query() == [ids: [values: ['1', '2']]]
+
+    when:
+    built.query().clear()
+
+    then:
+    thrown(UnsupportedOperationException)
+  }
+
+  @Unroll
+  def "UpdateByQueryRequest: rejects #name"() {
+    when:
+    builder.build()
+
+    then:
+    def e = thrown(exception)
+    e.message == message
+
+    where:
+    name              | builder                                                                 || exception                | message
+    'a missing index' | UpdateByQueryRequest.builder()                                          || NullPointerException     | 'index'
+    'a null query'    | UpdateByQueryRequest.builder().index('a').query(null)                   || NullPointerException     | 'query'
+    'a null timeout'  | UpdateByQueryRequest.builder().index('a').timeout(null)                 || NullPointerException     | 'timeout'
+    'a zero timeout'  | UpdateByQueryRequest.builder().index('a').timeout(Duration.ZERO)        || IllegalArgumentException | 'timeout must be positive: PT0S'
+    'a negative one'  | UpdateByQueryRequest.builder().index('a').timeout(Duration.ofSeconds(-1)) || IllegalArgumentException | 'timeout must be positive: PT-1S'
   }
 }
