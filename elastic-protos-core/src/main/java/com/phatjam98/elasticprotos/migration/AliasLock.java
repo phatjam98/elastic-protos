@@ -6,6 +6,7 @@ import com.phatjam98.elasticprotos.engine.IndexOptions;
 import com.phatjam98.elasticprotos.engine.IndexResult;
 import com.phatjam98.elasticprotos.engine.SearchEngine;
 import java.net.InetAddress;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
@@ -34,7 +35,14 @@ import org.slf4j.LoggerFactory;
  * once exactly one deletes it, and all of them then race to create it again.
  *
  * <p>The lock index is created on first use with one shard and a strict mapping. Clocks of the
- * processes must agree to well within the TTL.
+ * processes must agree to well within the TTL: an expired lock is taken over only a third of the
+ * TTL after its {@code expires_at}.
+ *
+ * <p>A lease also expires locally: {@link Lease#check()} fails once two thirds of the TTL have
+ * passed since the last successful write was sent, even when no renewal has reported a conflict
+ * (for example while the cluster is unreachable), so the holder stops before another process can
+ * take the lock over. The check is check-then-act: there are no fencing tokens, so a lease can
+ * still be lost between a check and the engine call that follows it.
  */
 final class AliasLock {
 
@@ -48,6 +56,7 @@ final class AliasLock {
   private final Duration ttl;
   private final IntSupplier replicas;
   private final String holder;
+  private final Clock clock;
   private volatile boolean indexReady;
 
   /**
@@ -59,6 +68,21 @@ final class AliasLock {
    * @param replicas the replica count of the lock index, asked for when it is created
    */
   AliasLock(SearchEngine engine, String lockIndex, Duration ttl, IntSupplier replicas) {
+    this(engine, lockIndex, ttl, replicas, Clock.systemUTC());
+  }
+
+  /**
+   * Creates the locks of one process with a clock, for tests.
+   *
+   * @param engine the engine
+   * @param lockIndex the lock index name
+   * @param ttl how long a lock lives without a heartbeat
+   * @param replicas the replica count of the lock index, asked for when it is created
+   * @param clock the clock for expiry
+   */
+  AliasLock(SearchEngine engine, String lockIndex, Duration ttl, IntSupplier replicas,
+      Clock clock) {
+    this.clock = clock;
     this.engine = engine;
     this.lockIndex = lockIndex;
     this.ttl = ttl;
@@ -88,7 +112,7 @@ final class AliasLock {
    * @throws LockException when another holder still has the lock after {@code wait}
    */
   Lease acquire(String alias, String action, String hash, Duration wait) {
-    Instant deadline = Instant.now().plus(wait);
+    Instant deadline = clock.instant().plus(wait);
     int missing = 0;
     while (true) {
       ensureIndex();
@@ -97,7 +121,7 @@ final class AliasLock {
         IndexResult created = engine.index(lockIndex, alias, document(alias, action, hash, now),
             new IndexOptions(true, IndexOptions.Refresh.IMMEDIATE));
         LOG.info("{}: took the migration lock as {}", alias, holder);
-        return new Lease(alias, action, hash, now, created);
+        return new Lease(alias, action, hash, now, created, now);
       } catch (EngineException e) {
         if (e.getKind() == EngineException.Kind.NOT_FOUND && ++missing <= MAX_MISSING) {
           indexReady = false;
@@ -128,7 +152,7 @@ final class AliasLock {
         }
         continue;
       }
-      Duration left = Duration.between(Instant.now(), deadline);
+      Duration left = Duration.between(clock.instant(), deadline);
       if (left.isNegative() || left.isZero()) {
         throw new LockException("the migration lock of " + alias + " is held by " + other
             + " (" + lock.source().get("action") + ", expires at "
@@ -150,7 +174,14 @@ final class AliasLock {
     if (indexReady) {
       return;
     }
-    if (!engine.indexExists(lockIndex)) {
+    if (engine.indexExists(lockIndex)) {
+      Object dynamic = engine.getMappings(lockIndex).get("dynamic");
+      if (!"strict".equals(String.valueOf(dynamic))) {
+        LOG.warn("the migration lock index {} is not strictly mapped (dynamic: {}); it was"
+            + " probably auto-created by a lock write after it had been deleted", lockIndex,
+            dynamic);
+      }
+    } else {
       Map<String, Object> keyword = Map.of("type", "keyword");
       Map<String, Object> date = Map.of("type", "date");
       Map<String, Object> properties = new LinkedHashMap<>();
@@ -176,9 +207,11 @@ final class AliasLock {
     indexReady = true;
   }
 
+  /** A lock is taken over a third of the TTL after it expired, to allow for clock skew. */
   private boolean expired(Hit lock) {
     try {
-      return Instant.parse(string(lock.source().get("expires_at"))).isBefore(Instant.now());
+      return Instant.parse(string(lock.source().get("expires_at"))).plus(ttl.dividedBy(3))
+          .isBefore(clock.instant());
     } catch (DateTimeParseException | NullPointerException e) {
       return true;
     }
@@ -196,8 +229,8 @@ final class AliasLock {
     return doc;
   }
 
-  private static Instant now() {
-    return Instant.now().truncatedTo(ChronoUnit.MILLIS);
+  private Instant now() {
+    return clock.instant().truncatedTo(ChronoUnit.MILLIS);
   }
 
   private static String string(Object value) {
@@ -218,7 +251,8 @@ final class AliasLock {
 
   /**
    * A held lock. It is renewed in the background until it is closed; {@link #check()} throws once
-   * a renewal found the lock taken over or deleted.
+   * a renewal found the lock taken over or deleted, or once two thirds of the TTL have passed
+   * since the last successful write was sent.
    */
   final class Lease implements AutoCloseable {
 
@@ -230,16 +264,23 @@ final class AliasLock {
     private long seqNo;
     private long primaryTerm;
     private volatile String lostReason;
+    private volatile Instant validUntil;
     private boolean closed;
 
     private Lease(String alias, String action, String hash, Instant acquired,
-        IndexResult created) {
+        IndexResult created, Instant sent) {
+      if (created.seqNo() == null || created.primaryTerm() == null) {
+        throw new IllegalStateException("the engine did not return _seq_no and _primary_term"
+            + " when creating the migration lock of " + alias + "; the lock needs them for"
+            + " conditional renewals");
+      }
       this.alias = alias;
       this.action = action;
       this.hash = hash;
       this.acquired = acquired;
-      this.seqNo = created.seqNo() == null ? 0 : created.seqNo();
-      this.primaryTerm = created.primaryTerm() == null ? 1 : created.primaryTerm();
+      this.seqNo = created.seqNo();
+      this.primaryTerm = created.primaryTerm();
+      this.validUntil = sent.plus(ttl);
       this.heartbeat = Executors.newSingleThreadScheduledExecutor(runnable -> {
         Thread thread = new Thread(runnable, "elastic-protos-lock-" + alias);
         thread.setDaemon(true);
@@ -263,12 +304,14 @@ final class AliasLock {
       if (closed || lostReason != null) {
         return;
       }
+      Instant sent = clock.instant();
       try {
         IndexResult renewed = engine.index(lockIndex, alias,
             document(alias, action, hash, acquired),
             IndexOptions.ifMatch(seqNo, primaryTerm).withRefresh(IndexOptions.Refresh.IMMEDIATE));
         seqNo = renewed.seqNo() == null ? seqNo : renewed.seqNo();
         primaryTerm = renewed.primaryTerm() == null ? primaryTerm : renewed.primaryTerm();
+        validUntil = sent.plus(ttl);
       } catch (EngineException e) {
         if (e.getKind() == EngineException.Kind.CONFLICT
             || e.getKind() == EngineException.Kind.NOT_FOUND) {
@@ -283,11 +326,17 @@ final class AliasLock {
     }
 
     /**
-     * Throws when the lock was lost.
+     * Throws when the lock was lost, or may be lost soon: a renewal found it taken over or
+     * deleted, or no renewal has succeeded for two thirds of the TTL.
      *
-     * @throws LockException when a renewal found the lock taken over or deleted
+     * @throws LockException when the lock is lost
      */
     void check() {
+      if (lostReason == null && clock.instant().isAfter(validUntil.minus(ttl.dividedBy(3)))) {
+        lostReason = "no renewal succeeded since " + validUntil.minus(ttl)
+            + " (the lease would expire at " + validUntil + ")";
+        LOG.warn("{}: lost the migration lock: {}", alias, lostReason);
+      }
       if (lostReason != null) {
         throw new LockException("the migration lock of " + alias + " was lost: " + lostReason
             + "; the next run resumes", holder, true);
