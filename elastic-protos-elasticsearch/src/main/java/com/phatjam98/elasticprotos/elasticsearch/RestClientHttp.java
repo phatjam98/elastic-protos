@@ -2,6 +2,7 @@ package com.phatjam98.elasticprotos.elasticsearch;
 
 import com.phatjam98.elasticprotos.engine.rest.RawHttp;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.stream.Collectors;
 import org.apache.http.entity.ContentType;
@@ -39,7 +40,9 @@ final class RestClientHttp implements RawHttp {
 
   private static Response toResponse(org.elasticsearch.client.Response response)
       throws IOException {
-    String body = response.getEntity() == null ? "" : EntityUtils.toString(response.getEntity());
+    String body = response.getEntity() == null
+        ? ""
+        : EntityUtils.toString(response.getEntity(), StandardCharsets.UTF_8);
     return new Response(response.getStatusLine().getStatusCode(), body);
   }
 

@@ -412,7 +412,10 @@ public final class Criteria {
     }
 
     /**
-     * Matches keyword values against a regular expression ({@code TEXT_REGEX}).
+     * Matches keyword values against a regular expression ({@code TEXT_REGEX}). The compiler
+     * rejects it unless {@link QueryCompilerConfig#allowRegex()} is set, and rejects a pattern
+     * that does not start with a literal character unless {@link
+     * QueryCompilerConfig#allowLeadingWildcards()} is also set.
      *
      * @param pattern the Lucene regular expression
      * @return the branch

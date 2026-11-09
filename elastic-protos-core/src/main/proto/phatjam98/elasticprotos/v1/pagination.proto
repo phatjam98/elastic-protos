@@ -14,7 +14,8 @@ message Pagination {
   sint32 size = 1;                           // page size; 0 means engine default
   sint32 from = 2;                           // offset, ignored when cursor is set
   string cursor = 3;                         // point-in-time id returned by the engine
-  sint32 total = 4;                          // total hits, set on responses
+  sint32 total = 4;                          // total hits, set on responses; -1 when hits were
+                                             // not counted (track_total_hits: false)
   repeated PrimitiveValue search_after = 5;  // sort values of the last hit of the previous page
   string keep_alive = 6;                     // point-in-time keep-alive, e.g. "1m"
 }

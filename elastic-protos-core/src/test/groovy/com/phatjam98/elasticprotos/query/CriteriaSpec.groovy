@@ -37,7 +37,7 @@ class CriteriaSpec extends Specification {
   @Shared IndexDefinition firm = mapper.map(Firm)
   @Shared IndexDefinition geo = mapper.map(Geo)
   @Shared QueryCompiler compiler = QueryCompiler.of(
-      QueryCompilerConfig.standard().withAllowLeadingWildcards(true))
+      QueryCompilerConfig.standard().withAllowLeadingWildcards(true).withAllowRegex(true))
 
   static final Instant FROM = Instant.parse('2024-02-01T00:00:00Z')
   static final Instant TO = Instant.parse('2024-04-01T00:00:00Z')

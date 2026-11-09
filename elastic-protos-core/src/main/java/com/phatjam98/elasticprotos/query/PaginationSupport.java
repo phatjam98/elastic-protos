@@ -39,7 +39,9 @@ public final class PaginationSupport {
         next.addSearchAfter(toPrimitive(value));
       }
     }
-    next.setTotal((int) Math.min(Integer.MAX_VALUE, Math.max(0, result.total())));
+    // -1 (SearchResult.NO_TOTAL) passes through: the engine did not count hits
+    next.setTotal((int) Math.min(Integer.MAX_VALUE, Math.max(SearchResult.NO_TOTAL,
+        result.total())));
     if (next.getCursor().isEmpty()) {
       next.setFrom(previous.getFrom() + result.hits().size());
     } else {

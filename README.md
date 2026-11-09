@@ -709,7 +709,7 @@ throw `QueryCompileException` (or are skipped with a warning when lenient). `Val
 | `TEXT_CONTAINS` | `contains(text)` | text; keyword needs `allowLeadingWildcards` | `match_phrase` on text, `*text*` wildcard on keyword |
 | `TEXT_PREFIX` | `startsWith(p)` | keyword or text with `.keyword` | `prefix` |
 | `TEXT_SUFFIX` | `endsWith(s)` | keyword or text with `.keyword`; needs `allowLeadingWildcards` | `*s` wildcard |
-| `TEXT_REGEX` | `regex(pattern)` | keyword or text with `.keyword` | `regexp` |
+| `TEXT_REGEX` | `regex(pattern)` | keyword or text with `.keyword`; needs `allowRegex` | `regexp` |
 | `NUM_RANGE` | `between(min, max)`, `between(Instant, Instant)`, `range(...)` | numeric, date | `range` with both bounds |
 | `ANY_IN` | `anyOf(a, b, ...)` | exact fields | `terms` |
 | `GEO_DISTANCE` | `withinDistance(lat, lon, "10km")` | `geo_point` | `geo_distance` |
@@ -735,6 +735,11 @@ Notes:
   compared as keywords (`labels.count` equal to `3` is the string `"3"`); other operations on a key
   throw `QueryCompileException`. Map the field with `type: OBJECT` for typed ranges or full text.
 - **Leading wildcards** scan every term and are off by default.
+- **Client-supplied criteria**: criteria often come straight from API callers, so the features that
+  run code or can scan a whole field are opt-in. `TEXT_REGEX` needs `allowRegex`, and a pattern
+  whose alternatives do not all start with a literal character (`.*foo`, `[a-z]+`, `(a|b)c`, `~a`)
+  also needs `allowLeadingWildcards`. Script sorts need `allowScriptSort`. Without the flag the
+  compiler throws `QueryCompileException` naming it.
 
 ### Sorting
 
@@ -743,13 +748,14 @@ Notes:
 | `field_sort` | `sortBy(field, order)` | Text fields sort by `.keyword`; fields under `nested` paths get the `nested` sort clause |
 | `score_sort` | `sortByScore(order)` | `_score` |
 | `geo_distance_sort` | `sortByDistance(field, lat, lon, unit, order)` | `geo_point` fields |
-| `script_sort` | generated builder | Inline Painless, `STRING` or `NUMBER` |
+| `script_sort` | generated builder | Needs `allowScriptSort`. `source` is inline Painless, `id` a stored script; `STRING` or `NUMBER` |
 
 ### Pagination
 
 | Case | Behaviour |
 |---|---|
 | `size` 0 / negative | `defaultSize` (10) / 0 |
+| `size` above `maxPageSize` (10 000) | `QueryCompileException`, with or without a point in time; `defaultSize` above it fails when the config is built and a `SearchPager` page size above it fails before the point in time is opened |
 | `from` + `size` within `maxResultWindow` (10 000) | `from`/`size` paging |
 | `from` + `size` beyond the window | `QueryCompileException` that points at point-in-time paging |
 | `cursor` set (a point-in-time id) | `pit` + `search_after`, with a `_shard_doc` tiebreaker appended |
@@ -782,11 +788,17 @@ QueryCompiler compiler = QueryCompiler.of(QueryCompilerConfig.standard()
     .withLenient(true)                    // skip unknown fields with a warning
     .withAllowLeadingWildcards(true)      // enable TEXT_SUFFIX / keyword TEXT_CONTAINS
     .withMaxResultWindow(50_000)          // match index.max_result_window
+    .withMaxPageSize(1_000)               // largest page a caller may ask for
+    .withAllowRegex(true)                 // enable TEXT_REGEX (literal prefix required)
+    .withAllowScriptSort(true)            // enable script sorts: callers run Painless
     .withShardDocTiebreaker(false));      // OpenSearch < 3.3 with your own cursor
 ```
 
 `compiled.body()` is a plain `Map`: copy it to add anything the DSL does not cover, such as `aggs`;
-raw aggregation results come back in `SearchResult.aggregations()`.
+raw aggregation results come back in `SearchResult.aggregations()`. `SearchResult.total()` is exact
+when `totalExact()` is true and a lower bound otherwise. With `track_total_hits: false`
+(`withTrackTotalHits(false)`) the engine counts nothing: `total()` is then
+`SearchResult.NO_TOTAL` (`-1`), `totalExact()` is false and `hasTotal()` is false.
 
 ## Engines
 
@@ -819,7 +831,8 @@ SearchEngine os = OpenSearchEngine.builder()
 ```
 
 Both builders offer `hosts`, `basicAuth`, `apiKey` (sent as `Authorization: ApiKey ...`),
-`sslContext` and `insecureTrustAllCertificates` (local development only). Building does not connect.
+`sslContext` and `insecureTrustAllCertificates` (local development only); `build()` refuses the two
+together, since trusting every certificate would ignore the context. Building does not connect.
 To reuse a client you already configured, wrap it; each adapter brings its engine's low-level REST
 client (`org.elasticsearch.client:elasticsearch-rest-client` or
 `org.opensearch.client:opensearch-rest-client`) transitively, so there is nothing else to declare:
@@ -833,7 +846,12 @@ SearchEngine engine = ElasticsearchEngine.of(client);   // closing the engine cl
 writes, realtime `get` by id, `bulk`, `search`, `count`, point in time, `refresh` and `health`, all
 as JSON-shaped maps. Transport failures are `EngineException`s of kind `IO` that name the request
 and the hosts, for example `GET /documents/_alias on http://localhost:9200 failed: No route to host`.
-`BulkBuffer` batches writes by count, size and interval:
+Engine errors are classified by `EngineException.getKind()`. A `cluster_block_exception` with a 4xx
+status (a write, read or read-only block, answered with 403, or the flood-stage disk watermark's
+`read_only_allow_delete` block, answered with 429) and an `index_closed_exception` are `BLOCKED`, not
+`UNAUTHORIZED` or `TRANSIENT`: retrying does not help until the block is lifted, and the reindex poll
+loop does not retry them. A 5xx `cluster_block_exception` (state not recovered, no master) is
+`TRANSIENT` and is retried.
 
 ```java
 try (BulkBuffer buffer = BulkBuffer.builder()
@@ -841,6 +859,7 @@ try (BulkBuffer buffer = BulkBuffer.builder()
     .maxActions(1000)
     .flushInterval(Duration.ofSeconds(1))
     .listener(result -> result.failures().forEach(System.err::println))
+    .errorListener((batch, error) -> retryLater.addAll(batch))
     .build()) {
   for (Document doc : docs) {
     buffer.add(BulkOp.index(documents.alias(), codec.idOf(doc).orElseThrow(),
@@ -848,6 +867,12 @@ try (BulkBuffer buffer = BulkBuffer.builder()
   }
 }
 ```
+
+Failed items arrive in each `BulkResult`. When a whole bulk request fails (the engine call throws),
+the error listener receives an immutable copy of the batch and the exception; the buffer drops the
+batch from its queue and never retries it, so retry or park the operations there. The default error
+listener logs them. A failure of the final flush in `close()` goes to the error listener and is
+then thrown from `close()` as an `EngineException`.
 
 ### OpenSearch differences
 
@@ -983,7 +1008,7 @@ public class DocumentRepository {
   public void saveAll(List<Document> docs) {
     try (BulkBuffer buffer = elastic.bulkBuffer(
         result -> result.failures().forEach(item -> log.warn("{}: {}", item.id(), item.error())),
-        error -> log.error("bulk request failed", error))) {
+        (batch, error) -> log.error("bulk request of {} operations failed", batch.size(), error))) {
       docs.forEach(doc -> buffer.add(elastic.indexOp(doc)));
     }
   }
@@ -997,9 +1022,11 @@ for example `IndexOptions.refreshed()` to drop the document from searches before
 `delete(id, type)` does not refresh.
 
 `bulkBuffer()` logs failed items and failed requests; `bulkBuffer(listener)` sends every batch's
-`BulkResult` to a `Consumer<BulkResult>`, and `bulkBuffer(listener, errorListener)` also sends the
-exception of a failed bulk request to a `Consumer<Throwable>`. Listeners run on the thread that
-sends the batch: the caller of `add` or `close`, or the flush timer.
+`BulkResult` to a `Consumer<BulkResult>`, and `bulkBuffer(listener, errorListener)` also sends each
+failed bulk request's batch and exception to a `BiConsumer<List<BulkOp>, Throwable>` (the
+`Consumer<Throwable>` overload is deprecated). Failed batches are not retried, and `close()` throws
+when the final batch fails. Listeners run on the thread that sends the batch: the caller of `add` or
+`close`, or the flush timer.
 
 It also offers `bulkIndex`, `definition`, `pager` (a `SearchPager`), `plan`, `bootstrap`,
 `codec()` and `engine()`. `SearchPage` carries the messages, the raw hits, the total and the
@@ -1041,6 +1068,9 @@ It also offers `bulkIndex`, `definition`, `pager` (a `SearchPager`), `plan`, `bo
 | `elastic-protos.query.default-keep-alive` | `1m` | Point-in-time keep-alive |
 | `elastic-protos.query.track-total-hits` | `true` | Count hits exactly |
 | `elastic-protos.query.shard-doc-tiebreaker` | `AUTO` | `_shard_doc` tiebreaker on point-in-time searches: `AUTO`, `ON` or `OFF` |
+| `elastic-protos.query.allow-script-sort` | `false` | Accept script sorts; callers then run Painless on the cluster |
+| `elastic-protos.query.allow-regex` | `false` | Accept `TEXT_REGEX` (a pattern without a literal prefix also needs `allow-leading-wildcards`) |
+| `elastic-protos.query.max-page-size` | `10000` | Largest page size, with or without a point in time |
 | `elastic-protos.bulk.actions` | `500` | `bulkBuffer(...)` sends a batch at this many operations |
 | `elastic-protos.bulk.flush-interval` | `1s` | Also send at this interval; `0s` disables |
 | `elastic-protos.bulk.max-bytes` | `5MB` | Send a batch at about this size |

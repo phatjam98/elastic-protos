@@ -42,7 +42,9 @@ final class RestClientHttp implements RawHttp {
   private static Response toResponse(org.opensearch.client.Response response)
       throws IOException {
     try {
-      String body = response.getEntity() == null ? "" : EntityUtils.toString(response.getEntity());
+      String body = response.getEntity() == null
+          ? ""
+          : EntityUtils.toString(response.getEntity(), StandardCharsets.UTF_8);
       return new Response(response.getStatusLine().getStatusCode(), body);
     } catch (ParseException e) {
       throw new IOException("Unreadable response body", e);

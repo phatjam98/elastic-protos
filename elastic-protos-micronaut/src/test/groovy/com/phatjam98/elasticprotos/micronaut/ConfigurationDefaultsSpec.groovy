@@ -11,6 +11,7 @@ import com.phatjam98.elasticprotos.migration.MigrationScriptProvider
 import com.phatjam98.elasticprotos.proto.example.Firm
 import com.phatjam98.elasticprotos.query.QueryCompilerConfig
 import io.micronaut.context.ApplicationContext
+import io.micronaut.context.exceptions.BeanInstantiationException
 import java.time.Duration
 import spock.lang.AutoCleanup
 import spock.lang.Specification
@@ -19,6 +20,25 @@ class ConfigurationDefaultsSpec extends Specification {
 
   @AutoCleanup
   ApplicationContext ctx
+
+  def "a max-page-size below the default size fails at startup"() {
+    when:
+    ctx = ApplicationContext.run(['test.engine': 'memory', 'elastic-protos.query.max-page-size': '5'])
+    ctx.getBean(QueryCompilerConfig)
+
+    then:
+    def e = thrown(BeanInstantiationException)
+    rootCause(e) instanceof IllegalArgumentException
+    rootCause(e).message == 'defaultSize 10 must not exceed maxPageSize 5'
+  }
+
+  static Throwable rootCause(Throwable error) {
+    Throwable cause = error
+    while (cause.cause != null && cause.cause != cause) {
+      cause = cause.cause
+    }
+    cause
+  }
 
   def "every key has the documented default"() {
     given:
@@ -49,6 +69,9 @@ class ConfigurationDefaultsSpec extends Specification {
     config.naming.prefix == ''
     config.codec.includeDefaults
     config.codec.int64AsNumber
+    !config.query.allowScriptSort
+    !config.query.allowRegex
+    config.query.maxPageSize == 10000
     config.bulk.actions == 500
     config.bulk.flushInterval == Duration.ofSeconds(1)
     config.bulk.maxBytes == 5L * 1024 * 1024

@@ -41,6 +41,8 @@ class QueryCompilerGoldenSpec extends Specification {
   @Shared QueryCompiler strict = QueryCompiler.withDefaults()
   @Shared QueryCompiler wildcards =
       QueryCompiler.of(QueryCompilerConfig.standard().withAllowLeadingWildcards(true))
+  @Shared QueryCompiler permissive = QueryCompiler.of(
+      QueryCompilerConfig.standard().withAllowRegex(true).withAllowScriptSort(true))
   @Shared QueryCompiler ungrouped =
       QueryCompiler.of(QueryCompilerConfig.standard().withGroupNested(false))
 
@@ -69,7 +71,7 @@ class QueryCompilerGoldenSpec extends Specification {
     'text_contains_keyword' | wildcards | document | where(fc('tags', TEXT_CONTAINS, str('urg*nt')))
     'text_prefix'           | strict    | firm     | where(fc('name', TEXT_PREFIX, str('Acm')))
     'text_suffix'           | wildcards | firm     | where(fc('domain', TEXT_SUFFIX, str('.com')))
-    'text_regex'            | strict    | document | where(fc('firm_id', TEXT_REGEX, str('f[0-9]+')))
+    'text_regex'            | permissive | document | where(fc('firm_id', TEXT_REGEX, str('f[0-9]+')))
     'num_range'             | strict    | document | where(fc('size_bytes', NUM_RANGE, range(100, 1000, true, false)))
     'num_range_date'        | strict    | document | where(fc('filed_at', NUM_RANGE, range(1.7e12, 1.8e12)))
     'any_in'                | strict    | document | where(fc('tags', ANY_IN, list('urgent', 'sealed')))
@@ -112,7 +114,7 @@ class QueryCompilerGoldenSpec extends Specification {
   @Unroll
   def "sort #name compiles to its golden body"() {
     expect:
-    Golden.assertMatches("query/sort_${name}", strict.compile(sorted(sort), index).body())
+    Golden.assertMatches("query/sort_${name}", permissive.compile(sorted(sort), index).body())
 
     where:
     name           | index    | sort
@@ -121,7 +123,7 @@ class QueryCompilerGoldenSpec extends Specification {
     'field_nested' | firm     | SortingCriteria.newBuilder().setFieldSort(FieldSort.newBuilder().setFieldName('offices.headcount').setOrder(SortingOrder.ASC)).build()
     'score'        | document | SortingCriteria.newBuilder().setScoreSort(ScoreSort.newBuilder().setOrder(SortingOrder.DESC)).build()
     'geo_distance' | firm     | SortingCriteria.newBuilder().setGeoDistanceSort(GeoDistanceSort.newBuilder().setFieldName('headquarters.location').setPoint(ll(36.17, -115.14)).setDistanceUnit(DistanceUnit.MILES)).build()
-    'script'       | document | SortingCriteria.newBuilder().setScriptSort(ScriptSort.newBuilder().setScriptOrId("doc['size_bytes'].value * 2").setSortType(ScriptSortType.NUMBER).setOrder(SortingOrder.DESC)).build()
+    'script'       | document | SortingCriteria.newBuilder().setScriptSort(ScriptSort.newBuilder().setSource("doc['size_bytes'].value * 2").setSortType(ScriptSortType.NUMBER).setOrder(SortingOrder.DESC)).build()
   }
 
   @Unroll

@@ -48,8 +48,12 @@ public final class SearchPager implements Iterator<SearchResult>, AutoCloseable 
     if (pageSize <= 0) {
       throw new IllegalArgumentException("pageSize must be positive: " + pageSize);
     }
-    this.engine = Objects.requireNonNull(engine, "engine");
     Objects.requireNonNull(compiler, "compiler");
+    if (pageSize > compiler.config().maxPageSize()) {
+      throw new IllegalArgumentException("pageSize " + pageSize + " exceeds the maximum page size"
+          + " of " + compiler.config().maxPageSize() + " (QueryCompilerConfig.maxPageSize)");
+    }
+    this.engine = Objects.requireNonNull(engine, "engine");
     this.compiler = engine.info().supportsShardDoc() || !compiler.config().shardDocTiebreaker()
         ? compiler
         : QueryCompiler.of(compiler.config().withShardDocTiebreaker(false));
@@ -73,7 +77,7 @@ public final class SearchPager implements Iterator<SearchResult>, AutoCloseable 
    * @param indices the indices or aliases to search
    * @param criteria what to search for; its pagination is replaced
    * @param index the definition the criteria are compiled against
-   * @param pageSize hits per page, positive
+   * @param pageSize hits per page, positive and at most the compiler's maxPageSize
    * @return the pager; close it when done
    */
   public static SearchPager open(SearchEngine engine, QueryCompiler compiler, List<String> indices,
@@ -89,7 +93,7 @@ public final class SearchPager implements Iterator<SearchResult>, AutoCloseable 
    * @param indices the indices or aliases to search
    * @param criteria what to search for
    * @param index the definition the criteria are compiled against
-   * @param pageSize hits per page, positive
+   * @param pageSize hits per page, positive and at most the compiler's maxPageSize
    * @param consumer receives each non-empty page in order
    */
   public static void forEachPage(SearchEngine engine, QueryCompiler compiler,

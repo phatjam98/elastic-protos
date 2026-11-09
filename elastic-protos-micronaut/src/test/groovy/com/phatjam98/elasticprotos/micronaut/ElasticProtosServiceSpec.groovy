@@ -1,6 +1,8 @@
 package com.phatjam98.elasticprotos.micronaut
 
+import com.phatjam98.elasticprotos.engine.BulkOp
 import com.phatjam98.elasticprotos.engine.BulkResult
+import com.phatjam98.elasticprotos.engine.EngineException
 import com.phatjam98.elasticprotos.engine.IndexOptions
 import com.phatjam98.elasticprotos.migration.Action
 import com.phatjam98.elasticprotos.proto.example.Document
@@ -13,6 +15,8 @@ import com.phatjam98.elasticprotos.testkit.SampleData
 import io.micronaut.context.annotation.Property
 import io.micronaut.test.extensions.spock.annotation.MicronautTest
 import jakarta.inject.Inject
+import java.util.function.BiConsumer
+import java.util.function.Consumer
 import spock.lang.Specification
 
 @MicronautTest(startApplication = false)
@@ -244,23 +248,69 @@ class ElasticProtosServiceSpec extends Specification {
     results[1].items()*.id() == ['firm-3']
   }
 
-  def "bulkBuffer reports engine failures to an error listener"() {
+  def "bulkBuffer hands failed batches and their errors to an error listener"() {
     given:
     List<BulkResult> results = []
+    List<List<BulkOp>> batches = []
     List<Throwable> errors = []
     String index = service.definition(Firm).name()
     engine.setWriteBlock(index, true)
     def buffer = service.bulkBuffer({ BulkResult result -> results << result },
-        { Throwable error -> errors << error })
+        { List<BulkOp> batch, Throwable error -> batches << batch; errors << error } as BiConsumer)
+    def first = service.indexOp(SampleData.firms()[0])
+    def second = service.indexOp(SampleData.firms()[1])
+
+    when:
+    buffer.add(first)
+    buffer.add(second)
+
+    then:
+    results.isEmpty()
+    batches == [[first, second]]
+    errors.size() == 1
+    errors[0] instanceof EngineException
+
+    cleanup:
+    engine.setWriteBlock(index, false)
+    buffer?.close()
+  }
+
+  def "bulkBuffer close throws when the final batch fails"() {
+    given:
+    List<List<BulkOp>> batches = []
+    String index = service.definition(Firm).name()
+    def buffer = service.bulkBuffer({ BulkResult result -> },
+        { List<BulkOp> batch, Throwable error -> batches << batch } as BiConsumer)
+    def op = service.indexOp(SampleData.firms()[0])
+    buffer.add(op)
+    engine.setWriteBlock(index, true)
+
+    when:
+    buffer.close()
+
+    then:
+    thrown(EngineException)
+    batches == [[op]]
+
+    cleanup:
+    engine.setWriteBlock(index, false)
+  }
+
+  def "the deprecated bulkBuffer overload still reports the exception"() {
+    given:
+    List<Throwable> errors = []
+    String index = service.definition(Firm).name()
+    engine.setWriteBlock(index, true)
+    def buffer = service.bulkBuffer({ BulkResult result -> },
+        { Throwable error -> errors << error } as Consumer)
 
     when:
     buffer.add(service.indexOp(SampleData.firms()[0]))
     buffer.add(service.indexOp(SampleData.firms()[1]))
 
     then:
-    results.isEmpty()
     errors.size() == 1
-    errors[0] instanceof com.phatjam98.elasticprotos.engine.EngineException
+    errors[0] instanceof EngineException
 
     cleanup:
     engine.setWriteBlock(index, false)

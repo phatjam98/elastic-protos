@@ -9,6 +9,7 @@ import java.util.Objects;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,8 +24,11 @@ import org.slf4j.LoggerFactory;
  * gives natural back-pressure.
  *
  * <p>Batch outcomes go to the result listener; item failures are reported there, inside the
- * {@link BulkResult}. When the engine call itself throws, the batch is dropped and the exception
- * goes to the error listener, which by default logs it; operations are never retried.
+ * {@link BulkResult}. When the engine call itself throws, the error listener receives an
+ * immutable copy of the failed batch and the exception, so the caller can retry, park or log the
+ * operations; by default it logs them. The buffer never retries a batch itself and drops it from
+ * its queue. A failure of the final flush in {@link #close()} also goes to the error listener and
+ * is then thrown from {@code close()}.
  *
  * <pre>{@code
  * try (BulkBuffer buffer = BulkBuffer.builder()
@@ -32,6 +36,7 @@ import org.slf4j.LoggerFactory;
  *     .maxActions(1000)
  *     .flushInterval(Duration.ofSeconds(1))
  *     .listener(result -> result.failures().forEach(System.err::println))
+ *     .errorListener((batch, error) -> deadLetters.addAll(batch))
  *     .build()) {
  *   documents.forEach(doc -> buffer.add(BulkOp.index("documents", doc.id(), doc.body())));
  * }
@@ -48,7 +53,7 @@ public final class BulkBuffer implements AutoCloseable {
   private final int maxActions;
   private final long maxBytes;
   private final Consumer<BulkResult> listener;
-  private final Consumer<Throwable> errorListener;
+  private final BiConsumer<List<BulkOp>, Throwable> errorListener;
   private final ScheduledExecutorService scheduler;
   private final Object lock = new Object();
   private List<BulkOp> pending = new ArrayList<>();
@@ -96,7 +101,7 @@ public final class BulkBuffer implements AutoCloseable {
       pending.add(op);
       pendingBytes += estimate(op);
       if (pending.size() >= maxActions || pendingBytes >= maxBytes) {
-        send();
+        send(false);
       }
     }
   }
@@ -111,16 +116,22 @@ public final class BulkBuffer implements AutoCloseable {
   /**
    * Sends the waiting operations now and waits for the engine.
    *
-   * @return the result, or null when nothing was waiting or the engine call failed (the failure
-   *     goes to the error listener)
+   * @return the result, or null when nothing was waiting or the engine call failed (the batch and
+   *     the failure go to the error listener)
    */
   public BulkResult flush() {
     synchronized (lock) {
-      return send();
+      return send(false);
     }
   }
 
-  /** Stops the flush timer and sends the waiting operations. Later {@link #add}s fail. */
+  /**
+   * Stops the flush timer and sends the waiting operations. Later {@link #add}s fail.
+   *
+   * @throws EngineException when the final batch fails; the error listener has already received
+   *     the batch and the failure, which is the cause unless it already was an {@code
+   *     EngineException}
+   */
   @Override
   public void close() {
     synchronized (lock) {
@@ -137,7 +148,9 @@ public final class BulkBuffer implements AutoCloseable {
         Thread.currentThread().interrupt();
       }
     }
-    flush();
+    synchronized (lock) {
+      send(true);
+    }
   }
 
   private void scheduledFlush() {
@@ -149,20 +162,36 @@ public final class BulkBuffer implements AutoCloseable {
     }
   }
 
-  /** Sends the pending batch; callers hold {@code lock}. */
-  private BulkResult send() {
+  /**
+   * Sends the pending batch; callers hold {@code lock}. A failed batch goes to the error listener
+   * and is then dropped, or also thrown when {@code rethrow} is set.
+   */
+  private BulkResult send(boolean rethrow) {
     if (pending.isEmpty()) {
       return null;
     }
-    List<BulkOp> batch = pending;
+    List<BulkOp> batch = List.copyOf(pending);
     pending = new ArrayList<>();
     pendingBytes = 0;
     BulkResult result;
     try {
       result = engine.bulk(batch);
     } catch (RuntimeException e) {
-      errorListener.accept(e);
-      return null;
+      if (!rethrow) {
+        errorListener.accept(batch, e);
+        return null;
+      }
+      EngineException failure = e instanceof EngineException
+          ? (EngineException) e
+          : new EngineException(EngineException.Kind.OTHER, 0,
+              "Bulk request of " + batch.size() + " operations failed: " + e.getMessage(), e);
+      try {
+        errorListener.accept(batch, e);
+      } catch (RuntimeException listenerFailure) {
+        // the bulk failure is what close() reports; keep the listener's own failure with it
+        failure.addSuppressed(listenerFailure);
+      }
+      throw failure;
     }
     listener.accept(result);
     return result;
@@ -189,7 +218,9 @@ public final class BulkBuffer implements AutoCloseable {
         LOG.warn("Bulk request had {} failed items", result.failures().size());
       }
     };
-    private Consumer<Throwable> errorListener = error -> LOG.error("Bulk request failed", error);
+    private BiConsumer<List<BulkOp>, Throwable> errorListener = (batch, error) ->
+        LOG.error("Bulk request of {} operations failed; they were not indexed", batch.size(),
+            error);
 
     private Builder() {}
 
@@ -235,10 +266,25 @@ public final class BulkBuffer implements AutoCloseable {
       return this;
     }
 
-    /** Receives exceptions thrown by the engine for a batch; by default they are logged. */
-    public Builder errorListener(Consumer<Throwable> value) {
+    /**
+     * Receives each batch whose engine call throws, as an immutable list in the order the
+     * operations were added, together with the exception; by default both are logged. The buffer
+     * does not retry the batch, so this is the place to retry, park or record the operations.
+     */
+    public Builder errorListener(BiConsumer<List<BulkOp>, Throwable> value) {
       this.errorListener = Objects.requireNonNull(value, "errorListener");
       return this;
+    }
+
+    /**
+     * Receives only the exception of each failed batch.
+     *
+     * @deprecated the failed operations are lost; use {@link #errorListener(BiConsumer)}
+     */
+    @Deprecated
+    public Builder errorListener(Consumer<Throwable> value) {
+      Objects.requireNonNull(value, "errorListener");
+      return errorListener((batch, error) -> value.accept(error));
     }
 
     /** Builds the buffer and starts its flush timer, if any. */

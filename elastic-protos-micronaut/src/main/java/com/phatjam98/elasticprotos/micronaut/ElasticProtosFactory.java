@@ -109,6 +109,9 @@ public class ElasticProtosFactory {
         .withDefaultSize(query.getDefaultSize())
         .withDefaultKeepAlive(query.getDefaultKeepAlive())
         .withTrackTotalHits(query.isTrackTotalHits())
+        .withAllowScriptSort(query.isAllowScriptSort())
+        .withAllowRegex(query.isAllowRegex())
+        .withMaxPageSize(query.getMaxPageSize())
         .withShardDocTiebreaker(query.getShardDocTiebreaker() != ShardDocTiebreaker.OFF);
   }
 

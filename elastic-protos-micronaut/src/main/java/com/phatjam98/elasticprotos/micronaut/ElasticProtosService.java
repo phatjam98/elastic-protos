@@ -28,6 +28,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
@@ -288,15 +289,33 @@ public class ElasticProtosService {
 
   /**
    * Returns a new bulk buffer like {@link #bulkBuffer()} that reports batch results and engine
-   * failures to listeners. A batch whose engine call throws is dropped, never retried.
+   * failures to listeners. A batch whose engine call throws is handed to the error listener and
+   * is not retried by the buffer; a failure of the final flush is also thrown from {@code
+   * close()}.
+   *
+   * @param listener receives every batch result, on the thread that sent the batch
+   * @param errorListener receives an immutable copy of the batch and the exception when the
+   *     engine call for a batch throws
+   * @return the buffer
+   */
+  public BulkBuffer bulkBuffer(Consumer<BulkResult> listener,
+      BiConsumer<List<BulkOp>, Throwable> errorListener) {
+    return bulkBufferBuilder().listener(listener).errorListener(errorListener).build();
+  }
+
+  /**
+   * Returns a new bulk buffer that reports only the exception of a failed batch.
    *
    * @param listener receives every batch result, on the thread that sent the batch
    * @param errorListener receives the exception when the engine call for a batch throws
    * @return the buffer
+   * @deprecated the failed operations are lost; use {@link #bulkBuffer(Consumer, BiConsumer)}
    */
+  @Deprecated
   public BulkBuffer bulkBuffer(Consumer<BulkResult> listener,
       Consumer<Throwable> errorListener) {
-    return bulkBufferBuilder().listener(listener).errorListener(errorListener).build();
+    Objects.requireNonNull(errorListener, "errorListener");
+    return bulkBuffer(listener, (batch, error) -> errorListener.accept(error));
   }
 
   private BulkBuffer.Builder bulkBufferBuilder() {

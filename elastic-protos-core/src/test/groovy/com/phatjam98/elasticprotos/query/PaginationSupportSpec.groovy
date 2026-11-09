@@ -47,6 +47,14 @@ class PaginationSupportSpec extends Specification {
     next.total == Integer.MAX_VALUE
   }
 
+  def "next passes an untracked total through as -1"() {
+    when:
+    def next = PaginationSupport.next(Pagination.defaultInstance, result(null, SearchResult.NO_TOTAL, []))
+
+    then:
+    next.total == -1
+  }
+
   def "without a cursor next advances from"() {
     expect:
     PaginationSupport.next(Pagination.newBuilder().setFrom(10).setSize(2).build(),
