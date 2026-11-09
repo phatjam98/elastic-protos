@@ -9,8 +9,10 @@ class MigrationModelSpec extends Specification {
 
   def "standard options"() {
     expect:
-    MigrationOptions.standard() == new MigrationOptions(FailurePolicy.FAIL_FAST, true, false,
-        RemovedFieldPolicy.KEEP, 1, ReplicaPolicy.dataNodesMinusOne(1), Duration.ofMinutes(10), false)
+    MigrationOptions.standard() == MigrationOptions.builder().failure(FailurePolicy.FAIL_FAST)
+        .allowReindex(true).deleteOldAfter(false).removedFields(RemovedFieldPolicy.KEEP)
+        .defaultShards(1).replicas(ReplicaPolicy.dataNodesMinusOne(1))
+        .reindexTimeout(Duration.ofMinutes(10)).dryRun(false).build()
     MigrationOptions.standard().clearStaleWriteBlock()
   }
 
@@ -43,7 +45,7 @@ class MigrationModelSpec extends Specification {
     MigrationOptions.standard().withReplicas(null)
 
     then:
-    thrown(IllegalArgumentException)
+    thrown(NullPointerException)
   }
 
   def "replica policies"() {
@@ -63,15 +65,13 @@ class MigrationModelSpec extends Specification {
 
   def "replica policies are validated"() {
     when:
-    new ReplicaPolicy(mode, count)
+    factory(-1)
 
     then:
     thrown(IllegalArgumentException)
 
     where:
-    mode                        | count
-    null                        | 1
-    ReplicaPolicy.Mode.FIXED    | -1
+    factory << [ReplicaPolicy.&fixed, ReplicaPolicy.&dataNodesMinusOne]
   }
 
   def "result ok() fails on FAILED outcomes and on blocked items"() {

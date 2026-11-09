@@ -1,15 +1,24 @@
 package com.phatjam98.elasticprotos.micronaut
 
+import ch.qos.logback.classic.Level
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import com.phatjam98.elasticprotos.engine.EngineException
 import com.phatjam98.elasticprotos.engine.SearchEngine
+import com.phatjam98.elasticprotos.mapping.ProtoMapper
 import com.phatjam98.elasticprotos.migration.Action
 import com.phatjam98.elasticprotos.migration.IndexMigrator
+import com.phatjam98.elasticprotos.migration.IndexPlan
+import com.phatjam98.elasticprotos.migration.MappingDiff
 import com.phatjam98.elasticprotos.migration.MigrationResult
 import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
+import com.phatjam98.elasticprotos.proto.example.InboxItem
 import com.phatjam98.elasticprotos.testkit.InMemorySearchEngine
 import io.micronaut.context.ApplicationContext
 import io.micronaut.context.BeanContext
+import org.slf4j.LoggerFactory
 import spock.lang.Specification
 
 class BootstrapSpec extends Specification {
@@ -182,6 +191,82 @@ class BootstrapSpec extends Specification {
 
     cleanup:
     ctx?.close()
+  }
+
+  ListAppender<ILoggingEvent> capture() {
+    Logger logger = (Logger) LoggerFactory.getLogger(ElasticProtosBootstrap)
+    ListAppender<ILoggingEvent> appender = new ListAppender<>()
+    appender.start()
+    logger.addAppender(appender)
+    appender
+  }
+
+  void release(ListAppender<ILoggingEvent> appender) {
+    ((Logger) LoggerFactory.getLogger(ElasticProtosBootstrap)).detachAppender(appender)
+  }
+
+  static ILoggingEvent finished(ListAppender<ILoggingEvent> appender) {
+    appender.list.find { it.formattedMessage.startsWith('elastic-protos bootstrap finished') }
+  }
+
+  static MigrationResult.Outcome outcome(Class type, Action action, MigrationResult.Status status,
+      List<String> warnings) {
+    def plan = new IndexPlan(ProtoMapper.withDefaults().map(type), action, null, null,
+        MappingDiff.empty(), 'r', [])
+    new MigrationResult.Outcome(plan, status, 'x', [], null, 1L, 1L, warnings)
+  }
+
+  def "a clean run logs the result at INFO"() {
+    given:
+    def ctx = start(['elastic-protos.bootstrap.classes': CLASSES])
+    def appender = capture()
+
+    when:
+    ctx.getBean(ElasticProtosBootstrap).run()
+
+    then:
+    finished(appender).level == Level.INFO
+    finished(appender).formattedMessage == 'elastic-protos bootstrap finished: 2 index(es) ok'
+
+    cleanup:
+    release(appender)
+    ctx?.close()
+  }
+
+  def "outcome warnings turn the success line into a WARN that names them"() {
+    given:
+    def appender = capture()
+    def result = new MigrationResult([
+        outcome(Firm, Action.REINDEX, MigrationResult.Status.APPLIED, ['first']),
+        outcome(InboxItem, Action.NO_OP, MigrationResult.Status.SKIPPED, []),
+        outcome(Document, Action.REINDEX, MigrationResult.Status.APPLIED,
+            ['the migration script left 9 documents in b from 10 in a', 'second']),
+    ])
+
+    when:
+    ElasticProtosBootstrap.logSuccess(result)
+
+    then:
+    result.ok()
+    finished(appender).level == Level.WARN
+    finished(appender).formattedMessage == 'elastic-protos bootstrap finished: 3 index(es) ok,' +
+        ' with warnings: firms: first | documents: the migration script left 9 documents in b' +
+        ' from 10 in a; second'
+
+    cleanup:
+    release(appender)
+  }
+
+  def "the problem description includes outcome warnings"() {
+    given:
+    def result = new MigrationResult([
+        outcome(Firm, Action.BLOCKED, MigrationResult.Status.BLOCKED, []),
+        outcome(Document, Action.REINDEX, MigrationResult.Status.APPLIED, ['count changed']),
+    ])
+
+    expect:
+    ElasticProtosBootstrap.describe(result) ==
+        'firms BLOCKED/BLOCKED: r; warnings: documents: count changed'
   }
 
   static List<String> rootMessages(Throwable e) {

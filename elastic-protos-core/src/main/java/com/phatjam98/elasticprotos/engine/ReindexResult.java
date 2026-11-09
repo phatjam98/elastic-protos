@@ -6,6 +6,9 @@ import java.util.Map;
 /**
  * The outcome of a reindex.
  *
+ * <p>{@code failures} is copied on construction and returned unmodifiable; the copy is shallow, so
+ * the failure maps themselves are shared with the caller.
+ *
  * @param total documents the engine attempted to copy
  * @param created documents created in the destination
  * @param updated documents overwritten in the destination
@@ -20,6 +23,11 @@ public record ReindexResult(
     List<Map<String, Object>> failures,
     long tookMs,
     boolean timedOut) {
+
+  /** Copies the failures. */
+  public ReindexResult {
+    failures = failures == null ? List.of() : Copies.list(failures);
+  }
 
   /** Returns whether every document made it across. */
   public boolean ok() {

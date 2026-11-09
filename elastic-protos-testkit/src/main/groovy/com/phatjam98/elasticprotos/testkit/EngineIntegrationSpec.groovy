@@ -14,6 +14,7 @@ import com.phatjam98.elasticprotos.codec.ProtoDocumentCodec
 import com.phatjam98.elasticprotos.engine.BulkOp
 import com.phatjam98.elasticprotos.engine.EngineException
 import com.phatjam98.elasticprotos.engine.EngineProduct
+import com.phatjam98.elasticprotos.engine.Hit
 import com.phatjam98.elasticprotos.engine.IndexOptions
 import com.phatjam98.elasticprotos.engine.SearchEngine
 import com.phatjam98.elasticprotos.engine.SearchResult
@@ -515,6 +516,45 @@ abstract class EngineIntegrationSpec extends Specification {
 
     then:
     thrown(EngineException)
+  }
+
+  def "SearchPager pages through a keyword sort that some documents lack, which the engine returns as null"() {
+    given: 'inbox items of which only every third carries document.firm_id'
+    ProtoMapper sparseMapper = ProtoMapper.builder().naming(IndexNamingStrategy.prefixed(prefix + '-sparse')).build()
+    IndexDefinition inbox = sparseMapper.map(InboxItem)
+    assert IndexMigrator.builder().engine(engine).mapper(sparseMapper).build().bootstrap(InboxItem).ok()
+    List<InboxItem> items = SampleData.inboxItems(25).withIndex().collect { InboxItem item, int i ->
+      i % 3 == 0
+          ? item.toBuilder().setDocument(Document.newBuilder().setFirmId('firm-' + (9 - i % 9))).build()
+          : item
+    }
+    assert !engine.bulk(items.collect { BulkOp.index(inbox.alias(), codec.idOf(it).get(), codec.toDocument(it)) }).errors()
+    engine.refresh(inbox.alias())
+    def criteria = sorted(fieldSort('document.firm_id', SortingOrder.ASC), fieldSort('id', SortingOrder.ASC))
+    List<Hit> seen = []
+
+    when:
+    SearchPager pager = SearchPager.open(engine, compiler, [inbox.alias()], criteria, inbox, 4)
+    try {
+      while (pager.hasNext()) {
+        seen.addAll(pager.next().hits())
+      }
+    } finally {
+      pager.close()
+    }
+    List<Hit> missing = seen.findAll { !(it.source().document instanceof Map) }
+    println "${engineImage()}: sort values of a document without document.firm_id: ${missing[0].sort()}"
+
+    then: 'every document is seen once, those with the field first in order, the rest after them'
+    seen*.id().toSet().size() == 25
+    seen.size() == 25
+    seen.take(9)*.id() == items.findAll { it.hasDocument() }
+        .sort { a, b -> a.document.firmId <=> b.document.firmId ?: a.id <=> b.id }*.id
+    seen.drop(9)*.id() == items.findAll { !it.hasDocument() }*.id.sort()
+
+    and: 'the missing sort value comes back as null'
+    missing.size() == 16
+    missing.every { it.sort()[0] == null }
   }
 
   // ------------------------------------------------------------------ migrations

@@ -10,6 +10,10 @@ import java.util.Map;
  * then {@link #NO_TOTAL} ({@code -1}) and {@code totalExact} false. Check {@link #hasTotal()}
  * before using {@code total}.
  *
+ * <p>{@code hits} and {@code aggregations} are copied on construction and returned unmodifiable;
+ * the copy is shallow, so the aggregation results nested inside are shared with the caller. A null
+ * list or map becomes empty.
+ *
  * @param total the total hit count, exact or a lower bound, or {@link #NO_TOTAL} when the engine
  *     did not count hits
  * @param totalExact whether {@code total} is exact; false when there is no total
@@ -28,6 +32,12 @@ public record SearchResult(
 
   /** The {@link #total()} of a search that did not count hits. */
   public static final long NO_TOTAL = -1L;
+
+  /** Copies the hits and the aggregations. */
+  public SearchResult {
+    hits = hits == null ? List.of() : Copies.list(hits);
+    aggregations = aggregations == null ? Map.of() : Copies.map(aggregations);
+  }
 
   /** Returns whether the engine counted hits, so that {@link #total()} is meaningful. */
   public boolean hasTotal() {

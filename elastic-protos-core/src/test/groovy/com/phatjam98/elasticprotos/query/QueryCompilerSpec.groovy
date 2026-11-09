@@ -576,13 +576,18 @@ class QueryCompilerSpec extends Specification {
 
   def "size defaults, count-only and track_total_hits"() {
     given:
-    def custom = QueryCompiler.of(QueryCompilerConfig.standard().withDefaultSize(25).withTrackTotalHits(null))
+    def custom = QueryCompiler.of(QueryCompilerConfig.standard().withDefaultSize(25).withTrackTotalHits(TrackTotalHits.engineDefault()))
 
     expect:
     custom.compile(SearchCriteria.defaultInstance, document).body() == [query: [match_all: [:]], size: 25, from: 0]
     compiler.compile(paged(Pagination.newBuilder().setSize(-1).build()), document).body().size == 0
-    QueryCompiler.of(QueryCompilerConfig.standard().withTrackTotalHits(1000))
-        .compile(SearchCriteria.defaultInstance, document).body().track_total_hits == 1000
+    QueryCompiler.of(QueryCompilerConfig.standard().withTrackTotalHits(TrackTotalHits.upTo(1000)))
+        .compile(SearchCriteria.defaultInstance, document).body().track_total_hits == Integer.valueOf(1000)
+    QueryCompiler.of(QueryCompilerConfig.standard().withTrackTotalHits(TrackTotalHits.none()))
+        .compile(SearchCriteria.defaultInstance, document).body().track_total_hits == false
+    compiler.compile(SearchCriteria.defaultInstance, document).body().track_total_hits == true
+    QueryCompiler.of(QueryCompilerConfig.standard().withTrackTotalHits(TrackTotalHits.upTo(1000)))
+        .compile(SearchCriteria.defaultInstance, document).body().track_total_hits instanceof Integer
   }
 
   def "from + size beyond the result window advises a point in time"() {
@@ -825,9 +830,13 @@ class QueryCompilerSpec extends Specification {
     def config = QueryCompilerConfig.standard()
 
     expect:
-    config == new QueryCompilerConfig(false, false, true, 10000, 10, Duration.ofMinutes(1), true)
-    config == new QueryCompilerConfig(false, false, true, 10000, 10, Duration.ofMinutes(1), true, true,
-        false, false, 10000)
+    config == QueryCompilerConfig.builder().build()
+    config.trackTotalHits() == TrackTotalHits.exact()
+    config.maxResultWindow() == 10000
+    config.defaultSize() == 10
+    config.defaultKeepAlive() == Duration.ofMinutes(1)
+    config.groupNested()
+    config.shardDocTiebreaker()
     !config.allowScriptSort()
     !config.allowRegex()
     config.maxPageSize() == QueryCompilerConfig.DEFAULT_MAX_PAGE_SIZE
@@ -840,7 +849,9 @@ class QueryCompilerSpec extends Specification {
     config.withMaxResultWindow(5).maxResultWindow() == 5
     config.withDefaultSize(3).defaultSize() == 3
     config.withDefaultKeepAlive(Duration.ofSeconds(5)).defaultKeepAlive() == Duration.ofSeconds(5)
-    config.withTrackTotalHits(false).trackTotalHits() == false
+    config.withTrackTotalHits(TrackTotalHits.none()).trackTotalHits() == TrackTotalHits.none()
+    config.withTrackTotalHits(TrackTotalHits.engineDefault()).trackTotalHits() == TrackTotalHits.engineDefault()
+    !config.withShardDocTiebreaker(false).shardDocTiebreaker()
     QueryCompiler.of(config).config() == config
   }
 
@@ -854,13 +865,14 @@ class QueryCompilerSpec extends Specification {
 
     where:
     description           | change                                            || exception
-    'string totals'       | { it.withTrackTotalHits('yes') }                  || IllegalArgumentException
+    'negative totals'     | { it.withTrackTotalHits(TrackTotalHits.upTo(-1)) } || IllegalArgumentException
     'zero window'         | { it.withMaxResultWindow(0) }                     || IllegalArgumentException
     'zero max page size'  | { it.withMaxPageSize(0) }                         || IllegalArgumentException
     'negative page cap'   | { it.withMaxPageSize(-1) }                        || IllegalArgumentException
     'default above cap'   | { it.withMaxPageSize(9) }                         || IllegalArgumentException
     'negative size'       | { it.withDefaultSize(-1) }                        || IllegalArgumentException
     'null keep-alive'     | { it.withDefaultKeepAlive(null) }                 || NullPointerException
+    'null totals'         | { it.withTrackTotalHits(null) }                   || NullPointerException
     'zero keep-alive'     | { it.withDefaultKeepAlive(Duration.ZERO) }        || IllegalArgumentException
   }
 

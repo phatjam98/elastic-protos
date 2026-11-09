@@ -438,11 +438,12 @@ Indices without this block (created by other tools) are treated as hash `legacy`
 IndexMigrator migrator = IndexMigrator.builder()
     .engine(engine)
     .mapper(mapper)
-    .options(MigrationOptions.standard()
-        .withFailure(FailurePolicy.CONTINUE)
-        .withRemovedFields(RemovedFieldPolicy.KEEP)
-        .withReplicas(ReplicaPolicy.fixed(1))
-        .withReindexTimeout(Duration.ofMinutes(30)))
+    .options(MigrationOptions.builder()            // starts from MigrationOptions.standard()
+        .failure(FailurePolicy.CONTINUE)
+        .removedFields(RemovedFieldPolicy.KEEP)
+        .replicas(ReplicaPolicy.fixed(1))
+        .reindexTimeout(Duration.ofMinutes(30))
+        .build())
     .scriptProvider(MigrationScriptProvider.classpath("migrations"))
     .build();
 
@@ -631,10 +632,11 @@ run (see [write-block recovery](#reindex-and-the-write-block-window)), but write
 decisions recorded in the `IndexDefinition`.
 
 ```java
-ProtoDocumentCodec codec = ProtoDocumentCodec.of(mapper, CodecConfig.standard()
-    .withIncludeDefaults(true)                       // default: proto3 defaults are written
-    .withInt64AsNumber(true)                         // default: int64 as JSON numbers
-    .withUnknownFields(UnknownFieldPolicy.FAIL));    // default is IGNORE
+ProtoDocumentCodec codec = ProtoDocumentCodec.of(mapper, CodecConfig.builder()
+    .includeDefaults(true)                           // default: proto3 defaults are written
+    .int64AsNumber(true)                             // default: int64 as JSON numbers
+    .unknownFields(UnknownFieldPolicy.FAIL)          // default is IGNORE
+    .build());
 
 Map<String, Object> json = codec.toDocument(Document.getDefaultInstance());
 Document back = codec.fromDocument(source, Document.class);
@@ -784,20 +786,22 @@ To page by hand, `PaginationSupport.next(pagination, result)` returns the pagina
 request. If you set `cursor` yourself on OpenSearch before 3.3, turn the tiebreaker off:
 
 ```java
-QueryCompiler compiler = QueryCompiler.of(QueryCompilerConfig.standard()
-    .withLenient(true)                    // skip unknown fields with a warning
-    .withAllowLeadingWildcards(true)      // enable TEXT_SUFFIX / keyword TEXT_CONTAINS
-    .withMaxResultWindow(50_000)          // match index.max_result_window
-    .withMaxPageSize(1_000)               // largest page a caller may ask for
-    .withAllowRegex(true)                 // enable TEXT_REGEX (literal prefix required)
-    .withAllowScriptSort(true)            // enable script sorts: callers run Painless
-    .withShardDocTiebreaker(false));      // OpenSearch < 3.3 with your own cursor
+QueryCompiler compiler = QueryCompiler.of(QueryCompilerConfig.builder()   // starts from standard()
+    .lenient(true)                        // skip unknown fields with a warning
+    .allowLeadingWildcards(true)          // enable TEXT_SUFFIX / keyword TEXT_CONTAINS
+    .maxResultWindow(50_000)              // match index.max_result_window
+    .maxPageSize(1_000)                   // largest page a caller may ask for
+    .allowRegex(true)                     // enable TEXT_REGEX (literal prefix required)
+    .allowScriptSort(true)                // enable script sorts: callers run Painless
+    .trackTotalHits(TrackTotalHits.upTo(10_000))   // also exact(), none(), engineDefault()
+    .shardDocTiebreaker(false)            // OpenSearch < 3.3 with your own cursor
+    .build());
 ```
 
-`compiled.body()` is a plain `Map`: copy it to add anything the DSL does not cover, such as `aggs`;
+`compiled.body()` is an unmodifiable `Map`; copy it to add aggregations (`aggs`) or anything else the DSL does not cover;
 raw aggregation results come back in `SearchResult.aggregations()`. `SearchResult.total()` is exact
 when `totalExact()` is true and a lower bound otherwise. With `track_total_hits: false`
-(`withTrackTotalHits(false)`) the engine counts nothing: `total()` is then
+(`withTrackTotalHits(TrackTotalHits.none())`) the engine counts nothing: `total()` is then
 `SearchResult.NO_TOTAL` (`-1`), `totalExact()` is false and `hasTotal()` is false.
 
 ## Engines
@@ -1034,6 +1038,11 @@ It also offers `bulkIndex`, `definition`, `pager` (a `SearchPager`), `plan`, `bo
 
 ### Properties
 
+The configuration is bound and checked when the application context starts, before any
+elastic-protos bean is used: an unparseable value such as `track-total-hits: maybe`, or settings
+that do not fit together such as a `max-page-size` below `default-size`, abort
+`ApplicationContext.start()` with the reason.
+
 | Property | Default | Meaning |
 |---|---|---|
 | `elastic-protos.engine` | `elasticsearch` | `elasticsearch` or `opensearch` |
@@ -1066,7 +1075,7 @@ It also offers `bulkIndex`, `definition`, `pager` (a `SearchPager`), `plan`, `bo
 | `elastic-protos.query.max-result-window` | `10000` | Largest `from + size` without a point in time |
 | `elastic-protos.query.default-size` | `10` | Page size when the criteria set none |
 | `elastic-protos.query.default-keep-alive` | `1m` | Point-in-time keep-alive |
-| `elastic-protos.query.track-total-hits` | `true` | Count hits exactly |
+| `elastic-protos.query.track-total-hits` | `true` | `true` counts hits exactly, `false` counts none, a number counts up to that bound, `default` leaves the key out so the engine's default applies |
 | `elastic-protos.query.shard-doc-tiebreaker` | `AUTO` | `_shard_doc` tiebreaker on point-in-time searches: `AUTO`, `ON` or `OFF` |
 | `elastic-protos.query.allow-script-sort` | `false` | Accept script sorts; callers then run Painless on the cluster |
 | `elastic-protos.query.allow-regex` | `false` | Accept `TEXT_REGEX` (a pattern without a literal prefix also needs `allow-leading-wildcards`) |

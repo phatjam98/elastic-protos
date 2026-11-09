@@ -10,6 +10,7 @@ import com.phatjam98.elasticprotos.migration.MigrationOptions
 import com.phatjam98.elasticprotos.migration.MigrationScriptProvider
 import com.phatjam98.elasticprotos.proto.example.Firm
 import com.phatjam98.elasticprotos.query.QueryCompilerConfig
+import com.phatjam98.elasticprotos.query.TrackTotalHits
 import io.micronaut.context.ApplicationContext
 import io.micronaut.context.exceptions.BeanInstantiationException
 import java.time.Duration
@@ -21,15 +22,57 @@ class ConfigurationDefaultsSpec extends Specification {
   @AutoCleanup
   ApplicationContext ctx
 
-  def "a max-page-size below the default size fails at startup"() {
+  def "a max-page-size below the default size fails at startup, before any bean is requested"() {
     when:
-    ctx = ApplicationContext.run(['test.engine': 'memory', 'elastic-protos.query.max-page-size': '5'])
-    ctx.getBean(QueryCompilerConfig)
+    ctx = ApplicationContext.run(['elastic-protos.query.max-page-size': '5'])
 
     then:
     def e = thrown(BeanInstantiationException)
     rootCause(e) instanceof IllegalArgumentException
     rootCause(e).message == 'defaultSize 10 must not exceed maxPageSize 5'
+  }
+
+  def "track-total-hits accepts #value"() {
+    when:
+    ctx = ApplicationContext.run(['test.engine': 'memory', 'elastic-protos.query.track-total-hits': value])
+
+    then:
+    ctx.getBean(ElasticProtosConfiguration).query.trackTotalHits == expected
+    ctx.getBean(QueryCompilerConfig).trackTotalHits() == expected
+
+    where:
+    value     || expected
+    'true'    || TrackTotalHits.exact()
+    true      || TrackTotalHits.exact()
+    false     || TrackTotalHits.none()
+    'FALSE'   || TrackTotalHits.none()
+    1000      || TrackTotalHits.upTo(1000)
+    '250'     || TrackTotalHits.upTo(250)
+    'default' || TrackTotalHits.engineDefault()
+  }
+
+  def "an invalid track-total-hits fails at startup, before any bean is requested"() {
+    when:
+    ApplicationContext.run(['elastic-protos.query.track-total-hits': value]).close()
+
+    then:
+    def e = thrown(RuntimeException)
+    causes(e).any { it.message?.contains(message) }
+
+    where:
+    value          || message
+    'maybe'        || 'trackTotalHits must be true, false, default or a number, got maybe'
+    '+5'           || 'trackTotalHits must be true, false, default or a number, got +5'
+    '-1'           || 'trackTotalHits limit must not be negative: -1'
+    '99999999999'  || 'trackTotalHits limit out of range (0 to 2147483647): 99999999999'
+  }
+
+  static List<Throwable> causes(Throwable error) {
+    List<Throwable> chain = [error]
+    while (chain.last().cause != null && chain.last().cause != chain.last()) {
+      chain << chain.last().cause
+    }
+    chain
   }
 
   static Throwable rootCause(Throwable error) {
@@ -72,6 +115,7 @@ class ConfigurationDefaultsSpec extends Specification {
     !config.query.allowScriptSort
     !config.query.allowRegex
     config.query.maxPageSize == 10000
+    config.query.trackTotalHits == TrackTotalHits.exact()
     config.bulk.actions == 500
     config.bulk.flushInterval == Duration.ofSeconds(1)
     config.bulk.maxBytes == 5L * 1024 * 1024

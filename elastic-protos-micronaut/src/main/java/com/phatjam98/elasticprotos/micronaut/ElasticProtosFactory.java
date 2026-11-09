@@ -40,12 +40,17 @@ public class ElasticProtosFactory {
    */
   @Singleton
   public MappingDefaults mappingDefaults(ElasticProtosConfiguration config) {
+    return mappingDefaultsOf(config);
+  }
+
+  static MappingDefaults mappingDefaultsOf(ElasticProtosConfiguration config) {
     ElasticProtosConfiguration.Mapping mapping = config.getMapping();
-    return MappingDefaults.standard()
-        .withStringsAsText(mapping.isStringsAsText())
-        .withKeywordSubfield(mapping.isKeywordSubfield())
-        .withIgnoreAbove(mapping.getIgnoreAbove())
-        .withMaxDepth(mapping.getMaxDepth());
+    return MappingDefaults.builder()
+        .stringsAsText(mapping.isStringsAsText())
+        .keywordSubfield(mapping.isKeywordSubfield())
+        .ignoreAbove(mapping.getIgnoreAbove())
+        .maxDepth(mapping.getMaxDepth())
+        .build();
   }
 
   /**
@@ -84,11 +89,16 @@ public class ElasticProtosFactory {
   @Singleton
   public ProtoDocumentCodec protoDocumentCodec(ElasticProtosConfiguration config,
       ProtoMapper mapper) {
+    return ProtoDocumentCodec.of(mapper, codecConfigOf(config));
+  }
+
+  static CodecConfig codecConfigOf(ElasticProtosConfiguration config) {
     ElasticProtosConfiguration.Codec codec = config.getCodec();
-    return ProtoDocumentCodec.of(mapper, CodecConfig.standard()
-        .withIncludeDefaults(codec.isIncludeDefaults())
-        .withInt64AsNumber(codec.isInt64AsNumber())
-        .withUnknownFields(codec.getUnknownFields()));
+    return CodecConfig.builder()
+        .includeDefaults(codec.isIncludeDefaults())
+        .int64AsNumber(codec.isInt64AsNumber())
+        .unknownFields(codec.getUnknownFields())
+        .build();
   }
 
   /**
@@ -101,18 +111,23 @@ public class ElasticProtosFactory {
    */
   @Singleton
   public QueryCompilerConfig queryCompilerConfig(ElasticProtosConfiguration config) {
+    return queryCompilerConfigOf(config);
+  }
+
+  static QueryCompilerConfig queryCompilerConfigOf(ElasticProtosConfiguration config) {
     ElasticProtosConfiguration.Query query = config.getQuery();
-    return QueryCompilerConfig.standard()
-        .withAllowLeadingWildcards(query.isAllowLeadingWildcards())
-        .withLenient(query.isLenient())
-        .withMaxResultWindow(query.getMaxResultWindow())
-        .withDefaultSize(query.getDefaultSize())
-        .withDefaultKeepAlive(query.getDefaultKeepAlive())
-        .withTrackTotalHits(query.isTrackTotalHits())
-        .withAllowScriptSort(query.isAllowScriptSort())
-        .withAllowRegex(query.isAllowRegex())
-        .withMaxPageSize(query.getMaxPageSize())
-        .withShardDocTiebreaker(query.getShardDocTiebreaker() != ShardDocTiebreaker.OFF);
+    return QueryCompilerConfig.builder()
+        .allowLeadingWildcards(query.isAllowLeadingWildcards())
+        .lenient(query.isLenient())
+        .maxResultWindow(query.getMaxResultWindow())
+        .defaultSize(query.getDefaultSize())
+        .defaultKeepAlive(query.getDefaultKeepAlive())
+        .trackTotalHits(query.getTrackTotalHits())
+        .allowScriptSort(query.isAllowScriptSort())
+        .allowRegex(query.isAllowRegex())
+        .maxPageSize(query.getMaxPageSize())
+        .shardDocTiebreaker(query.getShardDocTiebreaker() != ShardDocTiebreaker.OFF)
+        .build();
   }
 
   /**
@@ -135,21 +150,26 @@ public class ElasticProtosFactory {
    */
   @Singleton
   public MigrationOptions migrationOptions(ElasticProtosConfiguration config) {
+    return migrationOptionsOf(config);
+  }
+
+  static MigrationOptions migrationOptionsOf(ElasticProtosConfiguration config) {
     ElasticProtosConfiguration.Bootstrap bootstrap = config.getBootstrap();
     ElasticProtosConfiguration.Defaults defaults = config.getDefaults();
     ReplicaPolicy replicas = defaults.getReplicas() < 0
         ? ReplicaPolicy.dataNodesMinusOne(1)
         : ReplicaPolicy.fixed(defaults.getReplicas());
-    return new MigrationOptions(
-        bootstrap.getFailurePolicy(),
-        bootstrap.isAllowReindex(),
-        bootstrap.isDeleteOld(),
-        bootstrap.getRemovedFields(),
-        defaults.getShards(),
-        replicas,
-        bootstrap.getReindexTimeout(),
-        bootstrap.isDryRun(),
-        bootstrap.isClearStaleWriteBlock());
+    return MigrationOptions.builder()
+        .failure(bootstrap.getFailurePolicy())
+        .allowReindex(bootstrap.isAllowReindex())
+        .deleteOldAfter(bootstrap.isDeleteOld())
+        .removedFields(bootstrap.getRemovedFields())
+        .defaultShards(defaults.getShards())
+        .replicas(replicas)
+        .reindexTimeout(bootstrap.getReindexTimeout())
+        .dryRun(bootstrap.isDryRun())
+        .clearStaleWriteBlock(bootstrap.isClearStaleWriteBlock())
+        .build();
   }
 
   /**

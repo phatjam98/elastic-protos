@@ -36,6 +36,8 @@ testing.suites.test {
         implementation project(':elastic-protos-testkit')
         implementation project(':elastic-protos-elasticsearch')
         implementation project(':elastic-protos-opensearch')
+        // Captures log events in BootstrapSpec.
+        implementation libs.logback.classic
     }
 }
 

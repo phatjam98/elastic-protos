@@ -3,6 +3,9 @@
 - Status: Accepted
 - Date: 2026-11-01
 
+Status note (2026-11): the configuration types became builder-backed classes in R2; results stay
+records.
+
 ## Context
 
 The pre-1.0 build was split: the utilities targeted Java 11 and the Micronaut module Java 17.
