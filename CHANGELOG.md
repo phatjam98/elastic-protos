@@ -42,6 +42,14 @@ arrive with that `min` or `max` unset and therefore open. Rebuild producers agai
 persist criteria with `includingDefaultValueFields`. A range with no bound, a NaN bound or an empty
 range is rejected with `QueryCompileException`.
 
+Settings before 1.0.0: dynamic index settings the proto declares are applied to existing indices
+in place (the new `UPDATE_SETTINGS` action, or before a `PUT_MAPPING`/`BACKFILL`), so
+proto-declared replicas, refresh intervals and limits are now enforced on existing indices; static
+settings warn, or reindex into the next generation with `StaticSettingsPolicy.REINDEX`
+(`MigrationOptions.staticSettings`, `extraDynamicSettings`; Micronaut
+`elastic-protos.bootstrap.static-settings`, `extra-dynamic-settings`). Settings stay outside the
+content hash (ADR 0006 addendum).
+
 Concurrent bootstrap before 1.0.0 ([ADR 0008](docs/adr/0008-migration-lock-index.md)): `apply`
 and `rollback` take a per-alias lock in a lock index (`IndexNamingStrategy.lockIndex()`), plan the
 item again under it and check the lease before every irreversible step, so several instances can

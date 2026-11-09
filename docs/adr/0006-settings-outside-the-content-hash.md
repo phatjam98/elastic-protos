@@ -54,3 +54,14 @@ reindex at the next bootstrap, including changes made only to suit one environme
   the plan rather than a migration. The README's migration section documents the rename path.
 - Indices created before a settings change keep their old settings until the next reindex; the
   `settings differ; not applied` warning in `plan(...)` output is the signal that they diverge.
+
+## Addendum (2026-11-09): settings applied through a settings diff
+
+Settings remain outside the content hash. Instead of only warning, the migrator now compares the
+settings the proto declares with the live index on every plan and applies them through a settings
+diff: dynamic settings in place (`UPDATE_SETTINGS`, or before a `PUT_MAPPING` / `BACKFILL`), static
+settings by a warning (default) or, with `StaticSettingsPolicy.REINDEX`, by a reindex into the next
+generation of the same index name. Only declared keys are compared, so environment-specific replica
+policies still never change an index name or trigger a reindex; a removed setting is never reset.
+The rename path above remains the way to roll out an analyzer change without a static-settings
+policy.
