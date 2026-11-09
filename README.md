@@ -543,6 +543,7 @@ message Document {
 | `reindexMode` | `ZERO_DOWNTIME`; `BLOCKING` write-blocks the old index for the whole copy |
 | `swapGrace` | 5 seconds: how long a zero-downtime reindex waits after the alias swap before it write-blocks the old index |
 | `backfill` | `true`: apply unindexed additions with `BACKFILL`; `false` reindexes them |
+| `degradedReconcile` | `REPORT`: when the snapshot is lost after the swap, write nothing and end `INCOMPLETE`; `CREATE_MISSING` creates the missing documents (and so brings back documents deleted since the swap) |
 
 ### Dry run
 
@@ -565,13 +566,14 @@ records the phase in `_meta.elastic_protos.pending`, which is how an interrupted
 
 | Phase | What happens | `pending` on the new index |
 |---|---|---|
-| Prepare | Creates the new index without the alias (naming below), or reuses a leftover | `{"action": "reindex", "from": "<old>", "phase": "copying"}` |
+| Prepare | Creates the new index without the alias (naming below), or reuses a leftover; records the old index's sequence number checkpoint (the lowest `seq_no.max_seq_no` over its shards, from `_stats`) | `{"action": "reindex", "from": "<old>", "phase": "copying", "checkpoint": <n>}` |
 | Copy | `_reindex` old to new with `version_type: external` and `conflicts: proceed`, with the migration script if one is found | `copying` |
 | Catch up | The same `_reindex` again: under external versioning it copies only documents written during the copy | `copying` |
-| Snapshot | Refreshes the new index and opens a point in time over it (keep-alive `max(1h, reindexTimeout)`) | `phase: swapping`, `pit: <id>` |
+| Probe | With a migration script: runs it over the first 1,000 documents of the old index into the staging index and fails the item, before anything moves, if it changed an id | `copying` |
+| Snapshot | Refreshes the new index and opens a point in time over it (keep-alive `max(1h, reindexTimeout)`, at most 24 h) | `phase: swapping`, `pit: <id>` |
 | Swap | Moves the alias atomically | `swapping` |
-| Freeze | Waits `swapGrace`, then write-blocks and refreshes the old index | `reconciling` |
-| Reconcile | Pages through the frozen old index (1,000 per page) and looks each page up in the snapshot. A document the snapshot lacks is `create`d in the new index; one whose version differs is written with `if_seq_no`/`if_primary_term` from the snapshot. Either fails with 409 when a write through the alias after the swap got there first, and that write is kept | `reconciling` |
+| Freeze | Waits `swapGrace`, then write-blocks the old index with `PUT /<old>/_block/write`, which waits for writes in flight, and refreshes it | `reconciling` |
+| Reconcile | Hot pass first: the documents of the frozen old index written after the checkpoint (`range` on `_seq_no`), which may have changed after the copy whatever their version says (a version restarts at 1 once a delete's tombstone is gone after `index.gc_deletes`). Then the rest, compared by version. Pages of 1,000 are scanned without sources and looked up in the snapshot; a document the snapshot lacks is `create`d in the new index, one that differs (hot: by version or source; with a script: always) is written with `if_seq_no`/`if_primary_term` from the snapshot, and only those documents' sources are fetched. Either write fails with 409 when a write through the alias after the swap got there first, and that write is kept | `reconciling` |
 | Sweep | Pages through the snapshot; a document the old index no longer has (deleted after the copy) is deleted from the new index on its snapshot sequence number, so a document rewritten after the swap is kept | `reconciling` |
 | Finish | Closes the point in time, deletes the staging index, removes `pending`; then deletes the old index if `deleteOldAfter`, otherwise retains it write-blocked (`Outcome.retainedIndices()`) | none |
 
@@ -591,15 +593,28 @@ What writers and readers see:
 - **Reads** see the old index until the swap, then the new index. Between the catch-up and the end
   of the reconcile, the new index can lack writes made to the old index after the catch-up pass.
 - **Last writer wins per document**: a write through the alias after the swap is never overwritten
-  by the reconcile, and a document deleted after the swap is not resurrected.
+  by the reconcile, and a document the new index held at the swap and that was deleted through the
+  alias after it is not brought back. A document created in the old index after the catch-up and
+  deleted through the alias after the swap, before the reconcile reached it, is created again: the
+  new index never held it, so there is no delete to compare with. The hot pass reaches such
+  documents first, which keeps this window to seconds.
 - **Partial updates** (`_update`) after the swap apply to the document as the new index holds it.
   If that copy is stale, field changes made to the old index between the catch-up and the swap are
-  lost for that document; full-document writes are not affected.
+  lost for that document; full-document writes are not affected. An `_update` of a document
+  created in the old index after the catch-up gets 404 from the new index until the reconcile has
+  created it; an `_update` with `upsert` (or `doc_as_upsert`) creates a partial document, and the
+  reconcile's `create` then gets 409 and keeps it, losing the fields the old index had.
+- **Optimistic concurrency**: a write with `if_seq_no`/`if_primary_term` (or a version) read
+  before the swap, or before the reconcile rewrote the document, gets 409, since the document now
+  lives in another index or was rewritten; re-read and retry.
 
 **Migration scripts** run on every copy, and on reconciled documents through a staging index
 `<new index>-reconcile` (target mappings, no alias): the changed ids are copied with `_reindex` and
 an `ids` query, then written into the new index with the conditional writes above. A script must
-not change `_id`; one that does fails the item with the advice to use `BLOCKING`.
+not change `_id`. The probe before the swap fails the item ("the migration script changes _id;
+use BLOCKING or fix the script") when it changes the id of any of the first 1,000 documents; a
+script that changes the ids of only some documents can get past the probe, and is then caught by
+the reconcile, after the swap (`FAILED`, resumable once the script is fixed).
 
 **Recovery.** Planning finds an interrupted run from the alias and the marker alone:
 
@@ -607,12 +622,13 @@ not change `_id`; one that does fails the item with the advice to use `BLOCKING`
 |---|---|---|
 | Before the swap (marker on the new index, alias on the old one) | `REINDEX`, `resume.swapped() == false` | Reuses the new index and starts again from the copy; external versioning makes it idempotent |
 | After the swap (marker on the index the alias points at) | `REINDEX` with `resume` (`from`, `pitId`, `phase`, `swapped`), even when the hash is current | Freezes the old index if needed, reconciles and sweeps. Conditional writes make this idempotent; `_reindex` never runs again, since external versioning compares version numbers and the new index takes live writes |
-| After the swap, point in time expired | as above | Degraded reconcile: creates missing documents only, no sweep; `APPLIED` with a warning that counts the documents that differ (`staleSkipped`) and those only in the new index |
+| After the swap, point in time expired | as above | Writes nothing by default (`degradedReconcile = REPORT`): counts the documents missing from the new index, those that differ (`staleSkipped`) and those only in the new index, reports them as a warning and ends `INCOMPLETE` (not ok), with the marker left at `phase: reconciling`. The operator then applies again with `DegradedReconcile.CREATE_MISSING`, which creates the missing documents and finishes, **bringing back every document deleted through the alias since the swap**, or removes the marker by hand |
 | While finishing (`phase: finishing`) | as above | Removes the marker |
 
 `IndexMigrator.Builder.listener(MigrationListener)` is told about every phase, for metrics and
-logs; an exception from the listener stops the run where it stands, without cleanup, which is how
-the tests simulate crashes.
+logs. Exceptions from the listener are logged and ignored, except `MigrationListener.Abort`, which
+stops the run where it stands, without cleanup; that is how the tests simulate crashes. A
+resumed run closes the point in time an interrupted run recorded before it opens a new one.
 
 A failure before the swap deletes the new index if this run created it and the alias does not
 point at it; the old index was never blocked. A failure after the swap leaves the alias on the new
@@ -623,7 +639,8 @@ alias already points at an index with the target name, or when an index with tha
 is write-blocked: that is an old index retained by an earlier reindex, kept for rollback, and it
 is never reused or deleted. An unblocked index with the target name is a leftover from an earlier
 run that did not finish: it is reused when its `_meta` records the target hash and the alias does
-not point at it, and otherwise deleted and recreated (logged as a warning). If the alias already
+not point at it, and otherwise deleted and recreated (logged as a warning). A blocking reindex
+also recreates a leftover that carries a zero-downtime marker. If the alias already
 points at it, the item fails without touching anything (another migration ran in the meantime;
 plan again).
 
@@ -685,12 +702,14 @@ for (MigrationResult.Outcome outcome : result.outcomes()) {
 ```
 
 `rollback(item, previousIndex, mode)` returns an `Outcome` (`index` is the restored index,
-`retainedIndices` the new one) and never throws for engine errors; the alias must point at the
-plan's target index only.
+`retainedIndices` the new one) and never throws for engine errors; `rollback(item)` and
+`rollback(item, previousIndex)` use `REVERSE_DELTA` and throw `MigrationException` when it does not
+apply. The alias must point at the plan's target index only.
 
 | `RollbackMode` | What it does |
 |---|---|
-| `REVERSE_DELTA` (default) | Unblocks the previous index and runs the zero-downtime procedure from the new index into it, without a script: copy, catch up, swap the alias, freeze the new index, reconcile, sweep. Versions are not comparable in this direction, so the reconcile compares sources: documents that differ, including those a migration script changed, are copied back in their new form. Writes made after the reindex are carried back. Any failure before the swap aborts the rollback: the previous index is write-blocked again, the alias stays on the new index, and the outcome is `FAILED`, advising `ALIAS_ONLY`. The new index is retained write-blocked |
+| `REVERSE_DELTA` (default) | Unblocks the previous index and runs the zero-downtime procedure from the new index into it, without a script: copy, catch up, swap the alias, freeze the new index, reconcile, sweep. Versions are not comparable in this direction, so the reconcile compares sources: documents that differ, including those a migration script changed, are copied back in their new form. Writes made after the reindex are carried back. Any failure before the swap aborts the rollback: the previous index is write-blocked again, the alias stays on the new index, and the outcome is `FAILED`, advising `ALIAS_ONLY`; the previous index may already hold some of the copied documents. A rollback that dies before its swap leaves a note on the new index, which the next `plan` reports as a warning. Refused (`FAILED`) when a migration script exists for the reindex, since its transformed documents would be copied back. The new index is retained write-blocked |
+| `REVERSE_DELTA_FORCE` | `REVERSE_DELTA` even when a migration script exists |
 | `ALIAS_ONLY` | Unblocks the previous index, swaps the alias, waits `swapGrace` and write-blocks the new index. Writes made to the new index since the reindex are not carried back |
 
 ### Run the bootstrap from one place
@@ -937,8 +956,11 @@ SearchEngine engine = ElasticsearchEngine.of(client);   // closing the engine cl
 ```
 
 `SearchEngine` is the whole SPI: index lifecycle, mappings, settings updates (`putSettings`),
-aliases, reindex, `updateByQuery`, write blocks, document writes, realtime `get` by id, `bulk`,
-`search`, `count`, point in time, `refresh` and `health`, all as JSON-shaped maps.
+aliases, reindex, `updateByQuery`, write blocks (`setWriteBlock(index, true)` is `PUT
+/<index>/_block/write`, which waits for writes in flight), the sequence number checkpoint
+(`seqNoCheckpoint`, from `_stats?level=shards`; the default returns -1, "unknown"), document writes,
+realtime `get` by id, `bulk`, `search`, `count`, point in time, `refresh` and `health`, all as
+JSON-shaped maps.
 
 Writes support optimistic concurrency: `IndexResult` and `Hit` carry the document's `seqNo` and
 `primaryTerm`, and `IndexOptions.ifMatch(seqNo, primaryTerm)` (or `BulkOp.indexIfMatch` /
@@ -1205,7 +1227,7 @@ before 3.3); `pager(...)` always adapts.
   the whole copy instead.
 - A document created after the catch-up pass and deleted through the alias after the swap,
   before the reconcile reached it, is created again by the reconcile: the new index never held it,
-  so there is nothing to compare the delete with.
+  so there is nothing to compare the delete with. The hot pass keeps this window short.
 - Settings of existing indices (shards, replicas, analysis) are never changed by a migration;
   settings-only changes need a mapping-visible step (see [Settings changes](#settings-changes)).
 - Keys of a `flattened` map are keywords: no numeric ranges, full text or per-key types unless the

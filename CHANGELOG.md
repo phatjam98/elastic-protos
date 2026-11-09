@@ -25,8 +25,12 @@ catch up, swap, freeze, reconcile with conditional writes, resumable after a cra
 `ReindexMode.BLOCKING` keeps the old behaviour); additions existing documents were never indexed
 into are applied in place with the new `BACKFILL` action; `rollback` copies the writes made since
 the reindex back by default (`RollbackMode.REVERSE_DELTA`) and returns an `Outcome` instead of
-`void`; the in-memory test engine's points in time are snapshots and a mapping update replaces
-`_meta`, like the engines.
+`void` (the one- and two-argument overloads throw when it fails); without the snapshot of the new
+index the reconcile reports and ends `INCOMPLETE` unless `DegradedReconcile.CREATE_MISSING` is set;
+`SearchEngine.seqNoCheckpoint` is new, and `setWriteBlock(index, true)` uses `_block/write`; only
+`MigrationListener.Abort` stops a run; the in-memory test engine's points in time are snapshots, a
+mapping update replaces `_meta`, like the engines, and `gcDeletes`/`expireTombstones` model
+`index.gc_deletes`.
 
 `RangeValue.min` and `max` are now proto3 `optional`, so `NUM_RANGE` supports open-ended ranges
 (`Values.atLeast`, `greaterThan`, `atMost`, `lessThan`, `onOrAfter`, `after`, `onOrBefore`,

@@ -70,6 +70,13 @@ comparing sources instead of versions, since versions are not comparable in that
   document updated once in the new index after the swap, so the delta would overwrite the newer
   write. Conditional writes against a snapshot taken before the swap order them correctly.
 
+Review refinements (same decision): the old index's sequence number checkpoint is recorded before
+the first copy, and documents written after it are reconciled first and compared regardless of
+version, since a version restarts at 1 once a delete's tombstone is gone (`index.gc_deletes`); a
+script is probed for `_id` changes before the swap; the freeze uses `_block/write`, which waits for
+writes in flight; and without the snapshot the reconcile only reports (`INCOMPLETE`) unless the
+operator asks it to create missing documents, which would bring back deletes made after the swap.
+
 ## Consequences
 
 - Writes through the alias never fail during a reindex, except a straggler that resolved the alias
