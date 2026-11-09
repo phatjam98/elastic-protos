@@ -516,8 +516,8 @@ abstract class EngineIntegrationSpec extends Specification {
         Aggs.range('bands', 'size_bytes', Aggs.bucket('small', null, 50_000d),
             Aggs.bucket('medium', 50_000d, 500_000d), Aggs.bucket('large', 500_000d, null)),
         Aggs.range('quarters', 'filed_at', Aggs.bucket('q1_2024',
-            SampleData.ts('2024-01-01T00:00:00Z').seconds * 1000d,
-            SampleData.ts('2024-04-01T00:00:00Z').seconds * 1000d))))
+            Instant.parse('2024-01-01T00:00:00Z'), Instant.parse('2024-04-01T00:00:00Z')),
+            Aggs.bucket('later', SampleData.ts('2024-04-01T00:00:00Z').seconds * 1000d, (Double) null))))
 
     then:
     aggs.buckets('sizes')*.key() == [0d, 100_000d, 200_000d, 2_500_000d]
@@ -531,7 +531,8 @@ abstract class EngineIntegrationSpec extends Specification {
     aggs.buckets('bands')[0].from() == null
 
     and:
-    aggs.buckets('quarters')*.key() == ['q1_2024']
+    aggs.buckets('quarters')*.key() == ['q1_2024', 'later']
+    aggs.buckets('quarters')*.docCount() == [3L, 3L]
     aggs.buckets('quarters')[0].docCount() == 3L
     aggs.buckets('quarters')[0].from() == SampleData.ts('2024-01-01T00:00:00Z').seconds * 1000d
   }
@@ -540,7 +541,7 @@ abstract class EngineIntegrationSpec extends Specification {
     when:
     def compiled = compiler.compile(Criteria.builder().aggregate(Aggs.sub(
         Aggs.terms('roles', 'parties.role').setTerms(TermsAggregation.newBuilder()
-            .setOrder(TermsOrder.newBuilder().setBy(TermsOrderBy.BY_METRIC).setMetric('firms'))),
+            .addOrder(TermsOrder.newBuilder().setBy(TermsOrderBy.BY_METRIC).setMetric('firms'))),
         Aggs.cardinality('firms', 'firm_id'))).aggregationsOnly().build(), documents)
     def result = engine.search([documents.alias()], compiled.body())
     def aggs = AggregationResults.of(result)
@@ -567,17 +568,14 @@ abstract class EngineIntegrationSpec extends Specification {
     aggs.metric('docs').asLong() == 3L
   }
 
-  def "terms on a key of a flattened field: buckets on Elasticsearch, buckets or a bad request on OpenSearch"() {
-    when:
-    def outcome = outcome { aggregate(firms, Criteria.builder().aggregate(Aggs.terms('tiers', 'labels.tier'))) }
+  def "terms on a key of a flattened field return buckets on every engine, flat_object on OpenSearch included"() {
+    when: 'verified on Elasticsearch 8.19 and 9.5 and OpenSearch 2.19 and 3.9'
+    def aggs = aggregate(firms, Criteria.builder().aggregate(Aggs.terms('tiers', 'labels.tier'),
+        Aggs.cardinality('tier_count', 'labels.tier')))
 
     then:
-    if (outcome instanceof AggregationResults) {
-      assert outcome.buckets('tiers').collectEntries { [(it.key()): it.docCount()] } == [gold: 1L]
-    } else {
-      assert engine.info().product() == EngineProduct.OPENSEARCH
-      assert outcome == EngineException.Kind.BAD_REQUEST
-    }
+    aggs.buckets('tiers').collectEntries { [(it.key()): it.docCount()] } == [gold: 1L]
+    aggs.metric('tier_count').asLong() == 1L
   }
 
   def "highlighting marks the matched terms of text fields"() {
@@ -594,7 +592,7 @@ abstract class EngineIntegrationSpec extends Specification {
     when: 'custom tags and HTML encoding'
     def custom = compiler.compile(Criteria.where('name').matches('Dewey').end().highlight {
       it.addFields(com.phatjam98.elasticprotos.proto.HighlightField.newBuilder().setField('name'))
-          .setPreTag('[').setPostTag(']').setHtmlEncode(true)
+          .addPreTags('[').addPostTags(']').setHtmlEncode(true)
     }.build(), firms)
     def firmHits = engine.search([firms.alias()], custom.body()).hits()
 
