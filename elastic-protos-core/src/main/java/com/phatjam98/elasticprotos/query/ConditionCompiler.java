@@ -96,7 +96,7 @@ final class ConditionCompiler {
       case TEXT_SUFFIX:
         return suffix(condition, field);
       case TEXT_REGEX:
-        return exactText(condition, field, "regexp", text(condition, field));
+        return regex(condition, field);
       case NUM_RANGE:
         return range(condition, field);
       case ANY_IN:
@@ -233,6 +233,67 @@ final class ConditionCompiler {
     requireExact(field, condition.getOperation());
     return clause(condition, field, Occur.FILTER,
         object(type, object(field.exactMatchPath(), object("value", value))));
+  }
+
+  /**
+   * Compiles {@code TEXT_REGEX}, which must be enabled by {@link
+   * QueryCompilerConfig#allowRegex()}. A pattern with an alternative that does not start with a
+   * literal character, such as {@code .*foo}, {@code [a-z]+} or {@code (a|b)c}, can match from
+   * any term and is a leading wildcard, so it also needs {@link
+   * QueryCompilerConfig#allowLeadingWildcards()}.
+   */
+  private Clause regex(FieldCondition condition, FieldInfo field) {
+    if (!config.allowRegex()) {
+      throw new QueryCompileException(
+          "TEXT_REGEX on '" + field.path() + "' is disabled: a regular expression can scan every"
+              + " term of the field; enable QueryCompilerConfig.allowRegex to accept it",
+          field.path());
+    }
+    String pattern = text(condition, field);
+    if (!config.allowLeadingWildcards() && !startsWithLiteral(pattern)) {
+      throw new QueryCompileException(
+          "TEXT_REGEX pattern '" + pattern + "' on '" + field.path() + "' does not start with a"
+              + " literal character, so it scans every term like a leading wildcard; start each"
+              + " alternative with a literal prefix or enable"
+              + " QueryCompilerConfig.allowLeadingWildcards",
+          field.path());
+    }
+    return exactText(condition, field, "regexp", pattern);
+  }
+
+  /**
+   * Returns whether every top-level alternative of a Lucene regular expression starts with a
+   * literal character, so that the engine can seek to a prefix instead of scanning every term.
+   * An escaped character counts as literal; an operator such as {@code .}, {@code [}, {@code (},
+   * {@code ~}, {@code <}, {@code #}, a quantifier or the any-string operator does not.
+   */
+  static boolean startsWithLiteral(String pattern) {
+    int depth = 0;
+    boolean inClass = false;
+    boolean branchStart = true;
+    for (int i = 0; i < pattern.length(); i++) {
+      char c = pattern.charAt(i);
+      if (branchStart) {
+        if (c != '\\' && ".[(~@<#\"*+?{|}])&".indexOf(c) >= 0) {
+          return false;
+        }
+        branchStart = false;
+      }
+      if (c == '\\') {
+        i++;
+      } else if (inClass) {
+        inClass = c != ']';
+      } else if (c == '[') {
+        inClass = true;
+      } else if (c == '(') {
+        depth++;
+      } else if (c == ')') {
+        depth--;
+      } else if (c == '|' && depth == 0) {
+        branchStart = true;
+      }
+    }
+    return !branchStart;
   }
 
   private String leadingWildcard(FieldInfo field, SearchOperationType operation, String pattern) {

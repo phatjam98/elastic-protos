@@ -47,6 +47,9 @@ class QueryCompilerSpec extends Specification {
   @Shared IndexDefinition geo = mapper.map(Geo)
   @Shared IndexDefinition annotated = mapper.map(Annotated)
   @Shared QueryCompiler compiler = QueryCompiler.withDefaults()
+  @Shared QueryCompiler regexAllowed = QueryCompiler.of(QueryCompilerConfig.standard().withAllowRegex(true))
+  @Shared QueryCompiler scriptsAllowed =
+      QueryCompiler.of(QueryCompilerConfig.standard().withAllowScriptSort(true))
 
   /** The single filter clause of a one-condition query. */
   Map filter(IndexDefinition index, FieldCondition... conditions) {
@@ -164,7 +167,7 @@ class QueryCompilerSpec extends Specification {
   @Unroll
   def "#op on text without keyword sub-field points at the option"() {
     when:
-    def e = failure { compiler.compile(where(fc('body', op, str('x'))), document) }
+    def e = failure { regexAllowed.compile(where(fc('body', op, str('x'))), document) }
 
     then:
     e.field == 'body'
@@ -527,10 +530,10 @@ class QueryCompilerSpec extends Specification {
     def unset = SortingCriteria.newBuilder().setGeoDistanceSort(GeoDistanceSort.newBuilder()
         .setFieldName('offices.address.location').setOrder(SortingOrder.DESC)).build()
     def script = SortingCriteria.newBuilder().setScriptSort(ScriptSort.newBuilder()
-        .setScriptOrId('x').setSortType(ScriptSortType.STRING)).build()
+        .setSource('x').setSortType(ScriptSortType.STRING)).build()
 
     when:
-    List sort = compiler.compile(sorted(fieldSort('_id'), unset, script), firm).body().sort
+    List sort = scriptsAllowed.compile(sorted(fieldSort('_id'), unset, script), firm).body().sort
 
     then:
     sort[0] == [_id: [order: 'asc']]
@@ -558,8 +561,14 @@ class QueryCompilerSpec extends Specification {
           GeoDistanceSort.newBuilder().setFieldName('domain')).build()), firm)
     }.message.contains('needs a GEO_POINT')
     failure {
-      compiler.compile(sorted(SortingCriteria.newBuilder().setScriptSort(ScriptSort.defaultInstance).build()), firm)
-    }.message.contains('script_or_id')
+      scriptsAllowed.compile(sorted(SortingCriteria.newBuilder().setScriptSort(ScriptSort.defaultInstance).build()), firm)
+    }.message.contains('set source (inline Painless) or id (stored script)')
+    failure {
+      scriptsAllowed.compile(sorted(scriptSort(ScriptSort.newBuilder().setSource(''))), firm)
+    }.message.contains('empty source')
+    failure {
+      scriptsAllowed.compile(sorted(scriptSort(ScriptSort.newBuilder().setId(''))), firm)
+    }.message.contains('empty stored script id')
     failure { compiler.compile(sorted(SortingCriteria.defaultInstance), firm) }.message.contains('no sort type')
   }
 
@@ -641,6 +650,159 @@ class QueryCompilerSpec extends Specification {
     QueryCompilerConfig.standard().shardDocTiebreaker()
   }
 
+  // ---- opt-in features ---------------------------------------------------------------------
+
+  def "script sorts are rejected by default"() {
+    when:
+    compiler.compile(sorted(scriptSort(ScriptSort.newBuilder().setSource('1'))), document)
+
+    then:
+    def e = thrown(QueryCompileException)
+    e.message.contains('Script sorts are disabled')
+    e.message.contains('QueryCompilerConfig.allowScriptSort')
+  }
+
+  def "an allowed inline script sort compiles to Painless source"() {
+    when:
+    List sort = scriptsAllowed.compile(sorted(scriptSort(ScriptSort.newBuilder()
+        .setSource("doc['size_bytes'].value").setSortType(ScriptSortType.NUMBER)
+        .setOrder(SortingOrder.DESC))), document).body().sort
+
+    then:
+    sort == [[_script: [order: 'desc', type: 'number',
+                        script: [lang: 'painless', source: "doc['size_bytes'].value"]]]]
+  }
+
+  def "an allowed stored script sort compiles to its id without a language"() {
+    when:
+    List sort = scriptsAllowed.compile(sorted(scriptSort(ScriptSort.newBuilder()
+        .setId('by-size').setSortType(ScriptSortType.STRING))), document).body().sort
+
+    then:
+    sort == [[_script: [order: 'asc', type: 'string', script: [id: 'by-size']]]]
+  }
+
+  def "TEXT_REGEX is rejected by default"() {
+    when:
+    compiler.compile(where(fc('firm_id', TEXT_REGEX, str('f[0-9]+'))), document)
+
+    then:
+    def e = thrown(QueryCompileException)
+    e.field == 'firm_id'
+    e.message.contains('QueryCompilerConfig.allowRegex')
+  }
+
+  def "an allowed TEXT_REGEX with a literal prefix compiles to regexp"() {
+    expect:
+    regexAllowed.compileQuery(where(fc('firm_id', TEXT_REGEX, str('f[0-9]+|g.*'))), document)
+        .bool.filter[0] == [regexp: [firm_id: [value: 'f[0-9]+|g.*']]]
+  }
+
+  @Unroll
+  def "TEXT_REGEX '#pattern' needs allowLeadingWildcards too"() {
+    when:
+    regexAllowed.compile(where(fc('firm_id', TEXT_REGEX, str(pattern))), document)
+
+    then:
+    def e = thrown(QueryCompileException)
+    e.message.contains('allowLeadingWildcards')
+
+    when:
+    def both = QueryCompiler.of(QueryCompilerConfig.standard().withAllowRegex(true)
+        .withAllowLeadingWildcards(true))
+
+    then:
+    both.compileQuery(where(fc('firm_id', TEXT_REGEX, str(pattern))), document)
+        .bool.filter[0] == [regexp: [firm_id: [value: pattern]]]
+
+    where:
+    pattern << ['.*foo', '.+foo', '.?foo', '[a-z]+', '(a|b)c', '~a', 'f.*|.*g']
+  }
+
+  @Unroll
+  def "'#pattern' starts with a literal: #expected"() {
+    expect:
+    ConditionCompiler.startsWithLiteral(pattern) == expected
+
+    where:
+    pattern       || expected
+    'abc'         || true
+    'f[0-9]+'     || true
+    '\\.foo'      || true
+    'a|b'         || true
+    'a(b|.*)c'    || true
+    'a[|]|b'      || true
+    ''            || false
+    'a|'          || false
+    '.*foo'       || false
+    '@'           || false
+    '<1-5>'       || false
+    '#'           || false
+    '"quoted"'    || false
+    'a|[bc]'      || false
+    'a\\|b|(c)'   || false
+  }
+
+  // ---- page size ---------------------------------------------------------------------------
+
+  def "size above maxPageSize is rejected with from/size"() {
+    given:
+    def small = QueryCompiler.of(QueryCompilerConfig.standard().withMaxPageSize(100))
+
+    when:
+    small.compile(paged(Pagination.newBuilder().setSize(101).build()), document)
+
+    then:
+    def e = thrown(QueryCompileException)
+    e.message.contains('exceeds the maximum page size of 100')
+
+    expect:
+    small.compile(paged(Pagination.newBuilder().setSize(100).build()), document).body().size == 100
+  }
+
+  def "size above maxPageSize is rejected with a point in time"() {
+    given:
+    def small = QueryCompiler.of(QueryCompilerConfig.standard().withMaxPageSize(100))
+
+    when:
+    small.compile(paged(Pagination.newBuilder().setCursor('p1').setSize(101).build()), document)
+
+    then:
+    def e = thrown(QueryCompileException)
+    e.message.contains('QueryCompilerConfig.maxPageSize')
+
+    expect:
+    small.compile(paged(Pagination.newBuilder().setCursor('p1').setSize(100).build()), document)
+        .body().size == 100
+  }
+
+  def "the default maxPageSize is 10000 in both modes"() {
+    when:
+    compiler.compile(paged(Pagination.newBuilder().setCursor('p1').setSize(10_001).build()), document)
+
+    then:
+    thrown(QueryCompileException)
+
+    when:
+    compiler.compile(paged(Pagination.newBuilder().setSize(10_001).build()), document)
+
+    then:
+    thrown(QueryCompileException)
+
+    expect:
+    compiler.compile(paged(Pagination.newBuilder().setCursor('p1').setSize(10_000).build()), document)
+        .body().size == 10_000
+  }
+
+  def "a default size above maxPageSize is rejected at compile time"() {
+    when:
+    QueryCompiler.of(QueryCompilerConfig.standard().withDefaultSize(50).withMaxPageSize(20))
+        .compile(SearchCriteria.defaultInstance, document)
+
+    then:
+    thrown(QueryCompileException)
+  }
+
   // ---- config ------------------------------------------------------------------------------
 
   def "config copies and validation"() {
@@ -649,6 +811,14 @@ class QueryCompilerSpec extends Specification {
 
     expect:
     config == new QueryCompilerConfig(false, false, true, 10000, 10, Duration.ofMinutes(1), true)
+    config == new QueryCompilerConfig(false, false, true, 10000, 10, Duration.ofMinutes(1), true, true,
+        false, false, 10000)
+    !config.allowScriptSort()
+    !config.allowRegex()
+    config.maxPageSize() == QueryCompilerConfig.DEFAULT_MAX_PAGE_SIZE
+    config.withAllowScriptSort(true).allowScriptSort()
+    config.withAllowRegex(true).allowRegex()
+    config.withMaxPageSize(7).maxPageSize() == 7
     config.withLenient(true).lenient()
     config.withAllowLeadingWildcards(true).allowLeadingWildcards()
     !config.withGroupNested(false).groupNested()
@@ -671,6 +841,7 @@ class QueryCompilerSpec extends Specification {
     description           | change                                            || exception
     'string totals'       | { it.withTrackTotalHits('yes') }                  || IllegalArgumentException
     'zero window'         | { it.withMaxResultWindow(0) }                     || IllegalArgumentException
+    'zero max page size'  | { it.withMaxPageSize(0) }                         || IllegalArgumentException
     'negative size'       | { it.withDefaultSize(-1) }                        || IllegalArgumentException
     'null keep-alive'     | { it.withDefaultKeepAlive(null) }                 || NullPointerException
     'zero keep-alive'     | { it.withDefaultKeepAlive(Duration.ZERO) }        || IllegalArgumentException
@@ -686,6 +857,10 @@ class QueryCompilerSpec extends Specification {
 
     then:
     compiled.warnings() == ['a']
+  }
+
+  static SortingCriteria scriptSort(ScriptSort.Builder sort) {
+    SortingCriteria.newBuilder().setScriptSort(sort).build()
   }
 
   static SortingCriteria fieldSort(String name) {

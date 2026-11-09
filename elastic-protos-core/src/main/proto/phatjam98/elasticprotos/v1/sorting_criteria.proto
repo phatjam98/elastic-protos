@@ -45,9 +45,15 @@ message GeoDistanceSort {
   LatLon point = 5;
 }
 
-// Sort by an inline Painless script.
+// Sort by a Painless script, inline or stored. Rejected unless the query compiler allows script
+// sorts (QueryCompilerConfig.allowScriptSort).
 message ScriptSort {
-  string script_or_id = 1;
+  oneof script {
+    // Inline Painless source, sent as _script.script.source.
+    string source = 1;
+    // Id of a stored script, sent as _script.script.id.
+    string id = 4;
+  }
   ScriptSortType sort_type = 2;
   SortingOrder order = 3;
 }

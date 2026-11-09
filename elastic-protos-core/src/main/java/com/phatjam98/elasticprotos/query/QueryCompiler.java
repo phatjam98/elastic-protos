@@ -56,7 +56,9 @@ public final class QueryCompiler {
 
   /**
    * Compiles a full search body: {@code query}, {@code sort}, paging ({@code from}/{@code size} or
-   * {@code pit}/{@code search_after}) and {@code track_total_hits}.
+   * {@code pit}/{@code search_after}) and {@code track_total_hits}. A page larger than {@link
+   * QueryCompilerConfig#maxPageSize()}, or, without a point in time, a {@code from + size} beyond
+   * {@link QueryCompilerConfig#maxResultWindow()}, is rejected.
    *
    * @param criteria what to search for
    * @param index the index searched
@@ -121,6 +123,14 @@ public final class QueryCompiler {
       size = config.defaultSize();
     } else if (size < 0) {
       size = 0;
+    }
+    if (size > config.maxPageSize()) {
+      throw new QueryCompileException(
+          "pagination.size = " + size + " exceeds the maximum page size of "
+              + config.maxPageSize() + " (QueryCompilerConfig.maxPageSize); fetch more hits page"
+              + " by page with a point in time (pagination.cursor and search_after, see"
+              + " SearchPager)",
+          null);
     }
     body.put("size", size);
     if (!pagination.getCursor().isEmpty()) {

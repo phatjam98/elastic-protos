@@ -662,7 +662,7 @@ throw `QueryCompileException` (or are skipped with a warning when lenient). `Val
 | `TEXT_CONTAINS` | `contains(text)` | text; keyword needs `allowLeadingWildcards` | `match_phrase` on text, `*text*` wildcard on keyword |
 | `TEXT_PREFIX` | `startsWith(p)` | keyword or text with `.keyword` | `prefix` |
 | `TEXT_SUFFIX` | `endsWith(s)` | keyword or text with `.keyword`; needs `allowLeadingWildcards` | `*s` wildcard |
-| `TEXT_REGEX` | `regex(pattern)` | keyword or text with `.keyword` | `regexp` |
+| `TEXT_REGEX` | `regex(pattern)` | keyword or text with `.keyword`; needs `allowRegex` | `regexp` |
 | `NUM_RANGE` | `between(min, max)`, `between(Instant, Instant)`, `range(...)` | numeric, date | `range` with both bounds |
 | `ANY_IN` | `anyOf(a, b, ...)` | exact fields | `terms` |
 | `GEO_DISTANCE` | `withinDistance(lat, lon, "10km")` | `geo_point` | `geo_distance` |
@@ -688,6 +688,11 @@ Notes:
   compared as keywords (`labels.count` equal to `3` is the string `"3"`); other operations on a key
   throw `QueryCompileException`. Map the field with `type: OBJECT` for typed ranges or full text.
 - **Leading wildcards** scan every term and are off by default.
+- **Client-supplied criteria**: criteria often come straight from API callers, so the features that
+  run code or can scan a whole field are opt-in. `TEXT_REGEX` needs `allowRegex`, and a pattern
+  whose alternatives do not all start with a literal character (`.*foo`, `[a-z]+`, `(a|b)c`, `~a`)
+  also needs `allowLeadingWildcards`. Script sorts need `allowScriptSort`. Without the flag the
+  compiler throws `QueryCompileException` naming it.
 
 ### Sorting
 
@@ -696,13 +701,14 @@ Notes:
 | `field_sort` | `sortBy(field, order)` | Text fields sort by `.keyword`; fields under `nested` paths get the `nested` sort clause |
 | `score_sort` | `sortByScore(order)` | `_score` |
 | `geo_distance_sort` | `sortByDistance(field, lat, lon, unit, order)` | `geo_point` fields |
-| `script_sort` | generated builder | Inline Painless, `STRING` or `NUMBER` |
+| `script_sort` | generated builder | Needs `allowScriptSort`. `source` is inline Painless, `id` a stored script; `STRING` or `NUMBER` |
 
 ### Pagination
 
 | Case | Behaviour |
 |---|---|
 | `size` 0 / negative | `defaultSize` (10) / 0 |
+| `size` above `maxPageSize` (10 000) | `QueryCompileException`, with or without a point in time |
 | `from` + `size` within `maxResultWindow` (10 000) | `from`/`size` paging |
 | `from` + `size` beyond the window | `QueryCompileException` that points at point-in-time paging |
 | `cursor` set (a point-in-time id) | `pit` + `search_after`, with a `_shard_doc` tiebreaker appended |
@@ -735,6 +741,9 @@ QueryCompiler compiler = QueryCompiler.of(QueryCompilerConfig.standard()
     .withLenient(true)                    // skip unknown fields with a warning
     .withAllowLeadingWildcards(true)      // enable TEXT_SUFFIX / keyword TEXT_CONTAINS
     .withMaxResultWindow(50_000)          // match index.max_result_window
+    .withMaxPageSize(1_000)               // largest page a caller may ask for
+    .withAllowRegex(true)                 // enable TEXT_REGEX (literal prefix required)
+    .withAllowScriptSort(true)            // enable script sorts: callers run Painless
     .withShardDocTiebreaker(false));      // OpenSearch < 3.3 with your own cursor
 ```
 

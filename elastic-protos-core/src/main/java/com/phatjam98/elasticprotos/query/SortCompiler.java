@@ -108,13 +108,37 @@ final class SortCompiler {
     return object("_geo_distance", spec);
   }
 
-  private static Map<String, Object> script(ScriptSort sort) {
-    if (sort.getScriptOrId().isEmpty()) {
-      throw new QueryCompileException("A script sort needs script_or_id", null);
+  /**
+   * Compiles a script sort: inline {@code source} as Painless, or a stored script by {@code id},
+   * which carries its own language.
+   */
+  private Map<String, Object> script(ScriptSort sort) {
+    if (!config.allowScriptSort()) {
+      throw new QueryCompileException(
+          "Script sorts are disabled: they run a client-supplied script on the cluster; enable"
+              + " QueryCompilerConfig.allowScriptSort to accept them",
+          null);
     }
     Map<String, Object> script = new TreeMap<>();
-    script.put("lang", "painless");
-    script.put("source", sort.getScriptOrId());
+    switch (sort.getScriptCase()) {
+      case SOURCE:
+        if (sort.getSource().isEmpty()) {
+          throw new QueryCompileException("A script sort has an empty source", null);
+        }
+        script.put("lang", "painless");
+        script.put("source", sort.getSource());
+        break;
+      case ID:
+        if (sort.getId().isEmpty()) {
+          throw new QueryCompileException("A script sort has an empty stored script id", null);
+        }
+        script.put("id", sort.getId());
+        break;
+      default:
+        throw new QueryCompileException(
+            "A script sort needs a script: set source (inline Painless) or id (stored script)",
+            null);
+    }
     Map<String, Object> spec = order(sort.getOrder());
     spec.put("type", sort.getSortType() == ScriptSortType.STRING ? "string" : "number");
     spec.put("script", script);

@@ -73,7 +73,7 @@ enum SearchOperationType {
   TEXT_CONTAINS = 12;// match_phrase on text, wildcard on keyword
   TEXT_PREFIX = 13;  // prefix on a keyword field
   TEXT_SUFFIX = 14;  // leading-wildcard on a keyword field; disabled unless allowed by the compiler
-  TEXT_REGEX = 15;   // regexp on a keyword field
+  TEXT_REGEX = 15;   // regexp on a keyword field; needs QueryCompilerConfig.allowRegex
 
   NUM_RANGE = 21;    // range on numeric or date fields
 
