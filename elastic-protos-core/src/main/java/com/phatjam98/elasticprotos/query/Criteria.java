@@ -444,7 +444,95 @@ public final class Criteria {
      * @return the branch
      */
     public Branch between(Instant from, Instant to) {
-      return between(from.toEpochMilli(), to.toEpochMilli());
+      return add(SearchOperationType.NUM_RANGE, Values.between(from, to));
+    }
+
+    /**
+     * Matches numbers or dates at or above the bound ({@code NUM_RANGE}, open on the
+     * other side). Dates take epoch milliseconds.
+     *
+     * @param value the bound
+     * @return the branch
+     */
+    public Branch atLeast(double value) {
+      return add(SearchOperationType.NUM_RANGE, Values.atLeast(value));
+    }
+
+    /**
+     * Matches numbers or dates strictly above the bound ({@code NUM_RANGE}, open on the
+     * other side). Dates take epoch milliseconds.
+     *
+     * @param value the bound
+     * @return the branch
+     */
+    public Branch greaterThan(double value) {
+      return add(SearchOperationType.NUM_RANGE, Values.greaterThan(value));
+    }
+
+    /**
+     * Matches numbers or dates at or below the bound ({@code NUM_RANGE}, open on the
+     * other side). Dates take epoch milliseconds.
+     *
+     * @param value the bound
+     * @return the branch
+     */
+    public Branch atMost(double value) {
+      return add(SearchOperationType.NUM_RANGE, Values.atMost(value));
+    }
+
+    /**
+     * Matches numbers or dates strictly below the bound ({@code NUM_RANGE}, open on the
+     * other side). Dates take epoch milliseconds.
+     *
+     * @param value the bound
+     * @return the branch
+     */
+    public Branch lessThan(double value) {
+      return add(SearchOperationType.NUM_RANGE, Values.lessThan(value));
+    }
+
+    /**
+     * Matches dates at or after the bound ({@code NUM_RANGE}, open on the
+     * other side).
+     *
+     * @param value the bound
+     * @return the branch
+     */
+    public Branch onOrAfter(Instant value) {
+      return add(SearchOperationType.NUM_RANGE, Values.onOrAfter(value));
+    }
+
+    /**
+     * Matches dates strictly after the bound ({@code NUM_RANGE}, open on the
+     * other side).
+     *
+     * @param value the bound
+     * @return the branch
+     */
+    public Branch after(Instant value) {
+      return add(SearchOperationType.NUM_RANGE, Values.after(value));
+    }
+
+    /**
+     * Matches dates at or before the bound ({@code NUM_RANGE}, open on the
+     * other side).
+     *
+     * @param value the bound
+     * @return the branch
+     */
+    public Branch onOrBefore(Instant value) {
+      return add(SearchOperationType.NUM_RANGE, Values.onOrBefore(value));
+    }
+
+    /**
+     * Matches dates strictly before the bound ({@code NUM_RANGE}, open on the
+     * other side).
+     *
+     * @param value the bound
+     * @return the branch
+     */
+    public Branch before(Instant value) {
+      return add(SearchOperationType.NUM_RANGE, Values.before(value));
     }
 
     /**

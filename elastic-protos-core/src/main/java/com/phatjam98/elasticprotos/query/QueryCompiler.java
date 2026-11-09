@@ -24,8 +24,10 @@ import java.util.TreeMap;
  * {@code minimum_should_match: 1}. Predicates on fields inside nested objects are wrapped by
  * {@link NestedPathResolver}.
  *
- * <p>{@code NUM_RANGE} always emits both bounds, because proto3 cannot express an unset
- * {@code double}; use very small or very large values for an open-ended range.
+ * <p>{@code NUM_RANGE} emits only the bounds that are present ({@code RangeValue.min} and
+ * {@code max} are proto3 {@code optional}), so a range may be open at either end; an infinite
+ * bound counts as absent. A range with no bound, a NaN bound or {@code min > max} fails with a
+ * {@link QueryCompileException} in strict and lenient mode alike.
  *
  * <p>Instances are immutable and thread-safe.
  */

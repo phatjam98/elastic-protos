@@ -36,10 +36,13 @@ message FlatValue {
   }
 }
 
-// A numeric range. Bounds are optional and inclusivity is explicit.
+// A numeric range. Either bound may be left unset: an absent bound is open (no limit on that
+// side), and at least one bound must be set. Date fields take epoch milliseconds. Inclusivity is
+// explicit and defaults to false (exclusive), so set min_inclusive / max_inclusive for a closed
+// bound. Setting only `min` with the default min_inclusive therefore means "greater than min".
 message RangeValue {
-  double min = 1;
-  double max = 2;
+  optional double min = 1;
+  optional double max = 2;
   bool min_inclusive = 3;
   bool max_inclusive = 4;
 }

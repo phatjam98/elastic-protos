@@ -18,3 +18,9 @@ adapters for Elasticsearch 8.x/9.x and OpenSearch 2.x/3.x on the official low-le
 an optional Micronaut 4 module and a BOM, and requires Java 17. It is not API-compatible with the
 pre-1.0 `com.phatjam98.elasticsearch.*` packages, and the private geobuf dependency is gone. A
 `1.0.0-rc.1` pre-release precedes it.
+
+`RangeValue.min` and `max` are now proto3 `optional`, so `NUM_RANGE` supports open-ended ranges
+(`Values.atLeast`, `greaterThan`, `atMost`, `lessThan`, `onOrAfter`, `after`, `onOrBefore`,
+`before`; the same steps on `Criteria`). Only the bounds that are set are compiled. A client that
+left `min` unset and relied on an implicit 0 now gets an open lower bound, and a range with no
+bound, a NaN bound or `min > max` is rejected with `QueryCompileException`.

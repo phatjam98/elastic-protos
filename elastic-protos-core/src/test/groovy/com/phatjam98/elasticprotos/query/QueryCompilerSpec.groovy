@@ -13,6 +13,7 @@ import com.phatjam98.elasticprotos.proto.FieldBoost
 import com.phatjam98.elasticprotos.proto.FieldCondition
 import com.phatjam98.elasticprotos.proto.FieldSort
 import com.phatjam98.elasticprotos.proto.FlatValue
+import com.phatjam98.elasticprotos.proto.RangeValue
 import com.phatjam98.elasticprotos.proto.FullTextOptions
 import com.phatjam98.elasticprotos.proto.GeoBoundingBoxValue
 import com.phatjam98.elasticprotos.proto.GeoDistanceSort
@@ -134,6 +135,49 @@ class QueryCompilerSpec extends Specification {
     expect:
     filter(document, fc('filed_at', NUM_RANGE, range(1000, 2000.5, false, true))).range.filed_at ==
         [gt: 1000L, lte: 2000.5d, format: 'epoch_millis']
+  }
+
+  def "a range emits only the bounds that are present"() {
+    given:
+    def min = FlatValue.newBuilder().setRangeValue(RangeValue.newBuilder().setMin(5).setMinInclusive(true)).build()
+    def max = FlatValue.newBuilder().setRangeValue(RangeValue.newBuilder().setMax(9)).build()
+    def infinite = FlatValue.newBuilder().setRangeValue(RangeValue.newBuilder()
+        .setMin(Double.NEGATIVE_INFINITY).setMax(9).setMaxInclusive(true)).build()
+
+    expect:
+    filter(document, fc('size_bytes', NUM_RANGE, min)).range.size_bytes == [gte: 5L]
+    filter(document, fc('size_bytes', NUM_RANGE, max)).range.size_bytes == [lt: 9L]
+    filter(document, fc('size_bytes', NUM_RANGE, infinite)).range.size_bytes == [lte: 9L]
+    filter(document, fc('filed_at', NUM_RANGE, min)).range.filed_at == [gte: 5L, format: 'epoch_millis']
+  }
+
+  @Unroll
+  def "an invalid range (#description) fails in strict and lenient mode"() {
+    given:
+    def lenient = QueryCompiler.of(QueryCompilerConfig.standard().withLenient(true))
+    def criteria = where(fc('size_bytes', NUM_RANGE, FlatValue.newBuilder().setRangeValue(range).build()))
+
+    when:
+    compiler.compile(criteria, document)
+
+    then:
+    def strictFailure = thrown(QueryCompileException)
+    strictFailure.message.contains(message)
+    strictFailure.field == 'size_bytes'
+
+    when:
+    lenient.compile(criteria, document)
+
+    then:
+    thrown(QueryCompileException)
+
+    where:
+    description | range                                                                              || message
+    'no bounds' | RangeValue.newBuilder().setMinInclusive(true)                                      || 'needs a min or a max'
+    'infinite'  | RangeValue.newBuilder().setMin(Double.NEGATIVE_INFINITY).setMax(Double.POSITIVE_INFINITY) || 'needs a min or a max'
+    'min > max' | RangeValue.newBuilder().setMin(9).setMax(1)                                        || 'above max'
+    'NaN min'   | RangeValue.newBuilder().setMin(Double.NaN).setMax(1)                               || 'NaN'
+    'NaN max'   | RangeValue.newBuilder().setMax(Double.NaN)                                         || 'NaN'
   }
 
   def "an out of range timestamp is reported"() {

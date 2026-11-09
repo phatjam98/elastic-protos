@@ -712,7 +712,7 @@ throw `QueryCompileException` (or are skipped with a warning when lenient). `Val
 | `TEXT_PREFIX` | `startsWith(p)` | keyword or text with `.keyword` | `prefix` |
 | `TEXT_SUFFIX` | `endsWith(s)` | keyword or text with `.keyword`; needs `allowLeadingWildcards` | `*s` wildcard |
 | `TEXT_REGEX` | `regex(pattern)` | keyword or text with `.keyword`; needs `allowRegex` | `regexp` |
-| `NUM_RANGE` | `between(min, max)`, `between(Instant, Instant)`, `range(...)` | numeric, date | `range` with both bounds |
+| `NUM_RANGE` | `between(min, max)`, `between(Instant, Instant)`, `range(...)`; open-ended: `atLeast`, `greaterThan`, `atMost`, `lessThan`, `onOrAfter`, `after`, `onOrBefore`, `before` | numeric, date | `range` with the bounds that are set |
 | `ANY_IN` | `anyOf(a, b, ...)` | exact fields | `terms` |
 | `GEO_DISTANCE` | `withinDistance(lat, lon, "10km")` | `geo_point` | `geo_distance` |
 | `GEO_BOUNDING_BOX` | `inBoundingBox(top, left, bottom, right)`, `inBoundingBox(wkt)` | `geo_point` | `geo_bounding_box` |
@@ -730,8 +730,12 @@ Notes:
   level. Predicates of one condition on the same nested path are grouped so they must match the same
   element (`QueryCompilerConfig.groupNested`, default on). Full-text fields are grouped per nested
   path.
-- **Ranges**: proto3 cannot express an unset `double`, so `NUM_RANGE` always emits both bounds; use
-  very small or large values for open ranges. Date ranges are epoch milliseconds.
+- **Ranges**: `RangeValue.min` and `max` are proto3 `optional`, so a range may have only a lower or
+  only an upper bound (`atLeast(n)`, `lessThan(n)`, `after(instant)`, ...; the same helpers exist on
+  `Values`). Only the bounds that are set are emitted, and an infinite bound counts as unset.
+  `min_inclusive` / `max_inclusive` default to `false`, so a hand-built range is exclusive unless you
+  set them. A range with no bound, a NaN bound or `min > max` throws `QueryCompileException`, also
+  when lenient. Date ranges are epoch milliseconds.
 - **Flattened keys**: a path below a `flattened` field (a `map` or `Struct` by default), such as
   `labels.env`, needs no mapping entry. It takes `EQUALS`, `ANY_IN`, `EXISTS` and `TEXT_PREFIX`,
   compared as keywords (`labels.count` equal to `3` is the string `"3"`); other operations on a key
@@ -1097,7 +1101,6 @@ before 3.3); `pager(...)` always adapts.
   field is mapped with `type: OBJECT`.
 - Plans are not coordinated across processes; concurrent bootstrap is unsupported and can be
   destructive. Run the bootstrap from one place.
-- `NUM_RANGE` has no open-ended bounds (proto3 `double` has no presence).
 - The DSL covers queries, sorting and paging; aggregations, highlighting and the like go into the
   body map by hand.
 

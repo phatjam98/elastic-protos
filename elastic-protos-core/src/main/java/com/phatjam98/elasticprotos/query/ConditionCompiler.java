@@ -387,11 +387,32 @@ final class ConditionCompiler {
           field.path());
     }
     RangeValue range = value.getRangeValue();
+    boolean hasMin = range.hasMin() && !Double.isInfinite(range.getMin());
+    boolean hasMax = range.hasMax() && !Double.isInfinite(range.getMax());
+    if ((range.hasMin() && Double.isNaN(range.getMin()))
+        || (range.hasMax() && Double.isNaN(range.getMax()))) {
+      throw new QueryCompileException(
+          "NUM_RANGE on '" + field.path() + "' has a NaN bound", field.path());
+    }
+    if (!hasMin && !hasMax) {
+      throw new QueryCompileException(
+          "NUM_RANGE on '" + field.path() + "' needs a min or a max bound", field.path());
+    }
+    if (hasMin && hasMax && range.getMin() > range.getMax()) {
+      throw new QueryCompileException(
+          "NUM_RANGE on '" + field.path() + "' has min " + range.getMin() + " above max "
+              + range.getMax(),
+          field.path());
+    }
     Map<String, Object> bounds = new TreeMap<>();
-    bounds.put(range.getMinInclusive() ? "gte" : "gt",
-        ValueConversions.number(kind, range.getMin()));
-    bounds.put(range.getMaxInclusive() ? "lte" : "lt",
-        ValueConversions.number(kind, range.getMax()));
+    if (hasMin) {
+      bounds.put(range.getMinInclusive() ? "gte" : "gt",
+          ValueConversions.number(kind, range.getMin()));
+    }
+    if (hasMax) {
+      bounds.put(range.getMaxInclusive() ? "lte" : "lt",
+          ValueConversions.number(kind, range.getMax()));
+    }
     if (kind.isDate()) {
       bounds.put("format", "epoch_millis");
     }
