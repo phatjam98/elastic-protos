@@ -13,13 +13,13 @@ import com.phatjam98.elasticprotos.proto.FieldBoost
 import com.phatjam98.elasticprotos.proto.FieldCondition
 import com.phatjam98.elasticprotos.proto.FieldSort
 import com.phatjam98.elasticprotos.proto.FlatValue
-import com.phatjam98.elasticprotos.proto.RangeValue
 import com.phatjam98.elasticprotos.proto.FullTextOptions
 import com.phatjam98.elasticprotos.proto.GeoBoundingBoxValue
 import com.phatjam98.elasticprotos.proto.GeoDistanceSort
 import com.phatjam98.elasticprotos.proto.GeoDistanceValue
 import com.phatjam98.elasticprotos.proto.GeoShape
 import com.phatjam98.elasticprotos.proto.Pagination
+import com.phatjam98.elasticprotos.proto.RangeValue
 import com.phatjam98.elasticprotos.proto.ScriptSort
 import com.phatjam98.elasticprotos.proto.ScriptSortType
 import com.phatjam98.elasticprotos.proto.SearchCriteria
@@ -175,7 +175,13 @@ class QueryCompilerSpec extends Specification {
     description | range                                                                              || message
     'no bounds' | RangeValue.newBuilder().setMinInclusive(true)                                      || 'needs a min or a max'
     'infinite'  | RangeValue.newBuilder().setMin(Double.NEGATIVE_INFINITY).setMax(Double.POSITIVE_INFINITY) || 'needs a min or a max'
-    'min > max' | RangeValue.newBuilder().setMin(9).setMax(1)                                        || 'above max'
+    'min > max' | RangeValue.newBuilder().setMin(9).setMax(1)                                        || 'is empty'
+    '+Inf min'  | RangeValue.newBuilder().setMin(Double.POSITIVE_INFINITY).setMax(5)                  || 'is empty'
+    '+Inf min only' | RangeValue.newBuilder().setMin(Double.POSITIVE_INFINITY)                       || 'is empty'
+    '-Inf max'  | RangeValue.newBuilder().setMin(5).setMax(Double.NEGATIVE_INFINITY)                 || 'is empty'
+    '-Inf max only' | RangeValue.newBuilder().setMax(Double.NEGATIVE_INFINITY)                       || 'is empty'
+    'equal exclusive' | RangeValue.newBuilder().setMin(5).setMax(5)                                  || 'is empty'
+    'equal half open' | RangeValue.newBuilder().setMin(5).setMax(5).setMinInclusive(true)            || 'is empty'
     'NaN min'   | RangeValue.newBuilder().setMin(Double.NaN).setMax(1)                               || 'NaN'
     'NaN max'   | RangeValue.newBuilder().setMax(Double.NaN)                                         || 'NaN'
   }

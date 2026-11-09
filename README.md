@@ -732,10 +732,14 @@ Notes:
   path.
 - **Ranges**: `RangeValue.min` and `max` are proto3 `optional`, so a range may have only a lower or
   only an upper bound (`atLeast(n)`, `lessThan(n)`, `after(instant)`, ...; the same helpers exist on
-  `Values`). Only the bounds that are set are emitted, and an infinite bound counts as unset.
+  `Values`). Only the bounds that are set are emitted, and only the natural-side infinity (`-Infinity` min, `+Infinity` max) counts as unset.
   `min_inclusive` / `max_inclusive` default to `false`, so a hand-built range is exclusive unless you
-  set them. A range with no bound, a NaN bound or `min > max` throws `QueryCompileException`, also
-  when lenient. Date ranges are epoch milliseconds.
+  set them. A range with no bound, a NaN bound, or an empty range (`min > max`, equal bounds that are not
+  both inclusive, `+Infinity` min, `-Infinity` max) throws `QueryCompileException`, also when
+  lenient. Instant helpers use millisecond precision (sub-millisecond parts are truncated). Because
+  `0.0` used to be omitted from the wire, criteria serialized by rc.1/rc.2 (binary or JSON) with a
+  bound of exactly `0` now arrive with that bound unset; rebuild them or persist with
+  `includingDefaultValueFields`. Date ranges are epoch milliseconds.
 - **Flattened keys**: a path below a `flattened` field (a `map` or `Struct` by default), such as
   `labels.env`, needs no mapping entry. It takes `EQUALS`, `ANY_IN`, `EXISTS` and `TEXT_PREFIX`,
   compared as keywords (`labels.count` equal to `3` is the string `"3"`); other operations on a key

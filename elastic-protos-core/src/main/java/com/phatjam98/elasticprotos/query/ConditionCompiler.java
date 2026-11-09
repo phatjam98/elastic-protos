@@ -387,21 +387,28 @@ final class ConditionCompiler {
           field.path());
     }
     RangeValue range = value.getRangeValue();
-    boolean hasMin = range.hasMin() && !Double.isInfinite(range.getMin());
-    boolean hasMax = range.hasMax() && !Double.isInfinite(range.getMax());
     if ((range.hasMin() && Double.isNaN(range.getMin()))
         || (range.hasMax() && Double.isNaN(range.getMax()))) {
       throw new QueryCompileException(
           "NUM_RANGE on '" + field.path() + "' has a NaN bound", field.path());
     }
+    // Only the natural-side infinity means "unset"; the other describes an empty range.
+    boolean hasMin = range.hasMin() && range.getMin() != Double.NEGATIVE_INFINITY;
+    boolean hasMax = range.hasMax() && range.getMax() != Double.POSITIVE_INFINITY;
     if (!hasMin && !hasMax) {
       throw new QueryCompileException(
           "NUM_RANGE on '" + field.path() + "' needs a min or a max bound", field.path());
     }
-    if (hasMin && hasMax && range.getMin() > range.getMax()) {
+    boolean empty = (hasMin && range.getMin() == Double.POSITIVE_INFINITY)
+        || (hasMax && range.getMax() == Double.NEGATIVE_INFINITY)
+        || (hasMin && hasMax && (range.getMin() > range.getMax()
+            || (range.getMin() == range.getMax()
+                && !(range.getMinInclusive() && range.getMaxInclusive()))));
+    if (empty) {
       throw new QueryCompileException(
-          "NUM_RANGE on '" + field.path() + "' has min " + range.getMin() + " above max "
-              + range.getMax(),
+          "NUM_RANGE on '" + field.path() + "' is empty: min " + (hasMin ? range.getMin() : "-")
+              + ", max " + (hasMax ? range.getMax() : "-")
+              + " (equal bounds need both inclusive)",
           field.path());
     }
     Map<String, Object> bounds = new TreeMap<>();

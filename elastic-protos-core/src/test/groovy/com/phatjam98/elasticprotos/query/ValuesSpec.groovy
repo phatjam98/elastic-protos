@@ -128,4 +128,25 @@ class ValuesSpec extends Specification {
     expect:
     Values.from(value).is(value)
   }
+
+  def "Instant helpers reject instants beyond epoch milliseconds: #description"() {
+    when:
+    call()
+
+    then:
+    def e = thrown(IllegalArgumentException)
+    e.message.contains('epoch milliseconds')
+
+    where:
+    description | call
+    'after'     | { Values.after(Instant.MAX) }
+    'before'    | { Values.before(Instant.MIN) }
+    'between'   | { Values.between(Instant.MIN, Instant.EPOCH) }
+  }
+
+  def "Instant helpers truncate sub-millisecond precision"() {
+    expect:
+    Values.atLeast(1.0d) != null
+    Values.onOrAfter(Instant.ofEpochSecond(1, 999_999)).rangeValue.min == 1000d
+  }
 }

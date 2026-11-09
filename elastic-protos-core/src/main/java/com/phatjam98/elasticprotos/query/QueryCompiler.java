@@ -25,9 +25,11 @@ import java.util.TreeMap;
  * {@link NestedPathResolver}.
  *
  * <p>{@code NUM_RANGE} emits only the bounds that are present ({@code RangeValue.min} and
- * {@code max} are proto3 {@code optional}), so a range may be open at either end; an infinite
- * bound counts as absent. A range with no bound, a NaN bound or {@code min > max} fails with a
- * {@link QueryCompileException} in strict and lenient mode alike.
+ * {@code max} are proto3 {@code optional}), so a range may be open at either end; only the
+ * natural-side infinity ({@code -Infinity} min, {@code +Infinity} max) counts as unset. A range
+ * with no bound, a NaN bound, an empty range ({@code min > max}, equal bounds that are not both
+ * inclusive, {@code +Infinity} min or {@code -Infinity} max) fails with a {@link
+ * QueryCompileException} in strict and lenient mode alike.
  *
  * <p>Instances are immutable and thread-safe.
  */

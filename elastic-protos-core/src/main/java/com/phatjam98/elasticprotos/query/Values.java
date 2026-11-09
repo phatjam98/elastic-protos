@@ -131,12 +131,14 @@ public final class Values {
   /**
    * Returns an inclusive date range for {@code NUM_RANGE} in epoch milliseconds.
    *
+   * <p>Millisecond precision; sub-millisecond parts are truncated.
+   *
    * @param from the inclusive start
    * @param to the inclusive end
    * @return {@code range_value}
    */
   public static FlatValue between(Instant from, Instant to) {
-    return between(from.toEpochMilli(), to.toEpochMilli());
+    return between(millis(from), millis(to));
   }
 
   /**
@@ -186,45 +188,53 @@ public final class Values {
   /**
    * Returns a range matching dates at or after an instant for {@code NUM_RANGE}.
    *
+   * <p>Millisecond precision; sub-millisecond parts are truncated.
+   *
    * @param value the inclusive start
    * @return {@code range_value} with only a lower bound
    */
   public static FlatValue onOrAfter(Instant value) {
     return FlatValue.newBuilder().setRangeValue(RangeValue.newBuilder()
-        .setMin(value.toEpochMilli()).setMinInclusive(true)).build();
+        .setMin(millis(value)).setMinInclusive(true)).build();
   }
 
   /**
    * Returns a range matching dates strictly after an instant for {@code NUM_RANGE}.
+   *
+   * <p>Millisecond precision; sub-millisecond parts are truncated.
    *
    * @param value the exclusive start
    * @return {@code range_value} with only a lower bound
    */
   public static FlatValue after(Instant value) {
     return FlatValue.newBuilder().setRangeValue(RangeValue.newBuilder()
-        .setMin(value.toEpochMilli()).setMinInclusive(false)).build();
+        .setMin(millis(value)).setMinInclusive(false)).build();
   }
 
   /**
    * Returns a range matching dates at or before an instant for {@code NUM_RANGE}.
+   *
+   * <p>Millisecond precision; sub-millisecond parts are truncated.
    *
    * @param value the inclusive end
    * @return {@code range_value} with only an upper bound
    */
   public static FlatValue onOrBefore(Instant value) {
     return FlatValue.newBuilder().setRangeValue(RangeValue.newBuilder()
-        .setMax(value.toEpochMilli()).setMaxInclusive(true)).build();
+        .setMax(millis(value)).setMaxInclusive(true)).build();
   }
 
   /**
    * Returns a range matching dates strictly before an instant for {@code NUM_RANGE}.
+   *
+   * <p>Millisecond precision; sub-millisecond parts are truncated.
    *
    * @param value the exclusive end
    * @return {@code range_value} with only an upper bound
    */
   public static FlatValue before(Instant value) {
     return FlatValue.newBuilder().setRangeValue(RangeValue.newBuilder()
-        .setMax(value.toEpochMilli()).setMaxInclusive(false)).build();
+        .setMax(millis(value)).setMaxInclusive(false)).build();
   }
 
   /**
@@ -379,5 +389,14 @@ public final class Values {
 
   private static LatLon point(double lat, double lon) {
     return LatLon.newBuilder().setLat(lat).setLon(lon).build();
+  }
+
+  private static long millis(Instant instant) {
+    try {
+      return instant.toEpochMilli();
+    } catch (ArithmeticException e) {
+      throw new IllegalArgumentException(
+          "Instant " + instant + " is outside the range of epoch milliseconds", e);
+    }
   }
 }

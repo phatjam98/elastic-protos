@@ -439,6 +439,8 @@ public final class Criteria {
     /**
      * Matches dates within inclusive bounds ({@code NUM_RANGE} in epoch milliseconds).
      *
+     * <p>Millisecond precision; sub-millisecond parts are truncated.
+     *
      * @param from the inclusive start
      * @param to the inclusive end
      * @return the branch
@@ -495,6 +497,8 @@ public final class Criteria {
      * Matches dates at or after the bound ({@code NUM_RANGE}, open on the
      * other side).
      *
+     * <p>Millisecond precision; sub-millisecond parts are truncated.
+     *
      * @param value the bound
      * @return the branch
      */
@@ -505,6 +509,8 @@ public final class Criteria {
     /**
      * Matches dates strictly after the bound ({@code NUM_RANGE}, open on the
      * other side).
+     *
+     * <p>Millisecond precision; sub-millisecond parts are truncated.
      *
      * @param value the bound
      * @return the branch
@@ -517,6 +523,8 @@ public final class Criteria {
      * Matches dates at or before the bound ({@code NUM_RANGE}, open on the
      * other side).
      *
+     * <p>Millisecond precision; sub-millisecond parts are truncated.
+     *
      * @param value the bound
      * @return the branch
      */
@@ -527,6 +535,8 @@ public final class Criteria {
     /**
      * Matches dates strictly before the bound ({@code NUM_RANGE}, open on the
      * other side).
+     *
+     * <p>Millisecond precision; sub-millisecond parts are truncated.
      *
      * @param value the bound
      * @return the branch
