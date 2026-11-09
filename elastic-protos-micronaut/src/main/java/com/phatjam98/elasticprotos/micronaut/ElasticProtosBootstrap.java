@@ -22,7 +22,9 @@ import org.slf4j.LoggerFactory;
  * Creates or migrates the indices of the classes listed in {@code
  * elastic-protos.bootstrap.classes} when the application starts.
  *
- * <p>The plan report is logged at INFO. When {@code elastic-protos.bootstrap.fail-on-error} is
+ * <p>The plan report is logged at INFO, and so is the result when every index is ok, unless an
+ * outcome carries warnings (for example a migration script that changed the document count): the
+ * result is then logged at WARN with them. When {@code elastic-protos.bootstrap.fail-on-error} is
  * true (the default) and an index failed or was blocked, or planning or applying threw (for
  * example because the cluster is unreachable or rejects the credentials), a {@link
  * BootstrapException} is thrown from the startup event, which aborts {@code
@@ -97,7 +99,7 @@ public class ElasticProtosBootstrap implements ApplicationEventListener<StartupE
       return null;
     }
     if (result.ok()) {
-      LOG.info("elastic-protos bootstrap finished: {} index(es) ok", result.outcomes().size());
+      logSuccess(result);
       return result;
     }
     String problems = describe(result);
@@ -130,6 +132,30 @@ public class ElasticProtosBootstrap implements ApplicationEventListener<StartupE
     return types;
   }
 
+  /**
+   * Logs a successful run: at INFO, or at WARN with the warnings of every outcome that carries
+   * some, for example a migration script that changed the document count.
+   */
+  static void logSuccess(MigrationResult result) {
+    String warnings = describeWarnings(result.outcomes());
+    if (warnings.isEmpty()) {
+      LOG.info("elastic-protos bootstrap finished: {} index(es) ok", result.outcomes().size());
+    } else {
+      LOG.warn("elastic-protos bootstrap finished: {} index(es) ok, with warnings: {}",
+          result.outcomes().size(), warnings);
+    }
+  }
+
+  private static String describeWarnings(List<MigrationResult.Outcome> outcomes) {
+    List<String> parts = new ArrayList<>();
+    for (MigrationResult.Outcome outcome : outcomes) {
+      if (!outcome.warnings().isEmpty()) {
+        parts.add(outcome.plan().alias() + ": " + String.join("; ", outcome.warnings()));
+      }
+    }
+    return String.join(", ", parts);
+  }
+
   private static String describe(MigrationResult result) {
     List<String> parts = new ArrayList<>();
     for (MigrationResult.Outcome outcome : result.problems()) {
@@ -147,7 +173,10 @@ public class ElasticProtosBootstrap implements ApplicationEventListener<StartupE
       }
       parts.add(part.toString());
     }
-    return String.join(", ", parts);
+    String warnings = describeWarnings(result.outcomes());
+    return warnings.isEmpty()
+        ? String.join(", ", parts)
+        : String.join(", ", parts) + "; warnings: " + warnings;
   }
 
   private static Throwable firstError(MigrationResult result) {
