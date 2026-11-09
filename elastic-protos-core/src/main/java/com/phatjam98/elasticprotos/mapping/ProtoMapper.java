@@ -14,12 +14,15 @@ import com.phatjam98.elasticprotos.util.Names;
 import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 /**
@@ -50,6 +53,10 @@ public final class ProtoMapper {
   private static final Set<String> LON_NAMES = Set.of("lon", "lng", "longitude");
   private static final Set<String> STRUCT_LIKE =
       Set.of("google.protobuf.Struct", "google.protobuf.Value", "google.protobuf.ListValue");
+  private static final Set<String> UNTYPED_VALUES =
+      Set.of("google.protobuf.Any", "google.protobuf.FieldMask", "google.protobuf.Empty");
+  private static final Set<String> SINGLE_VALUE_MESSAGES =
+      Set.of(TIMESTAMP, "google.protobuf.Duration", LAT_LON, GEO_SHAPE);
   private static final Set<String> WRAPPERS =
       Set.of(
           "google.protobuf.StringValue",
@@ -211,12 +218,15 @@ public final class ProtoMapper {
     private final Descriptor root;
     private final MappingOverrides runOverrides;
     private final MessageOpts messageOpts;
-    private final Map<String, FieldInfo> fields = new TreeMap<>();
-    private final Set<String> nestedPaths = new TreeSet<>();
-    private final Map<String, Float> fullTextFields = new TreeMap<>();
     private final Set<String> ignoredPaths = new TreeSet<>();
     private final List<String> warnings = new ArrayList<>();
     private final Deque<Descriptor> ancestors = new ArrayDeque<>();
+    private final Map<String, FieldInfo> dynamicFields = new TreeMap<>();
+    private final Map<String, Map<String, Object>> templates = new TreeMap<>();
+    // Swapped for scratch collectors while the values of a typed map are mapped.
+    private Map<String, FieldInfo> fields = new TreeMap<>();
+    private Set<String> nestedPaths = new TreeSet<>();
+    private Map<String, Float> fullTextFields = new TreeMap<>();
     private String idField;
 
     Run(Descriptor root, MappingOverrides runOverrides) {
@@ -255,6 +265,9 @@ public final class ProtoMapper {
       Map<String, Object> mappings = new TreeMap<>();
       mappings.put("dynamic", dynamicValue(messageOpts.getDynamic()));
       mappings.put("properties", properties);
+      if (!templates.isEmpty()) {
+        mappings.put("dynamic_templates", dynamicTemplates());
+      }
       String hash = Json.sha256Hex(mappings).substring(0, 8);
       Map<String, Object> meta = new TreeMap<>();
       meta.put("hash", hash);
@@ -275,7 +288,26 @@ public final class ProtoMapper {
           fullTextFields,
           ignoredPaths,
           idField,
-          warnings);
+          warnings,
+          dynamicFields);
+    }
+
+    /**
+     * Returns the dynamic templates in the order the engines must try them: the engines apply the
+     * first template that matches and {@code *} in {@code path_match} also matches dots, so deeper
+     * patterns come first; ties are ordered by name, which keeps the content hash stable.
+     */
+    private List<Object> dynamicTemplates() {
+      List<String> names = new ArrayList<>(templates.keySet());
+      names.sort(Comparator.comparingInt((String name) -> -segments(name))
+          .thenComparing(Comparator.naturalOrder()));
+      List<Object> list = new ArrayList<>();
+      for (String name : names) {
+        Map<String, Object> template = new TreeMap<>();
+        template.put(name, templates.get(name));
+        list.add(template);
+      }
+      return list;
     }
 
     /**
@@ -402,7 +434,10 @@ public final class ProtoMapper {
           break;
         case OBJECT:
         case NESTED:
-          if (field.isMapField() || isStructLike(field)) {
+          if (field.isMapField()) {
+            property.put("dynamic", true);
+            typedMap(field, options, path, protoPath);
+          } else if (isStructLike(field)) {
             property.put("dynamic", true);
           } else {
             Map<String, Object> children = descend(field.getMessageType(), path, protoPath);
@@ -421,6 +456,16 @@ public final class ProtoMapper {
           break;
       }
       property.put("type", kind.esType());
+      boolean typedMap = field.isMapField() && kind.isContainer();
+      if (options.getValueType() != EsType.AUTO && !typedMap) {
+        warnings.add(path + ": value_type applies only to map fields mapped as OBJECT or NESTED"
+            + " and is ignored");
+      }
+      if (typedMap) {
+        // index, doc_values, null_value, copy_to and full_text describe the values
+        options = options.toBuilder().clearIndex().clearDocValues().clearNullValue().clearCopyTo()
+            .clearFullText().build();
+      }
 
       if (options.getIndex() == Bool3.FALSE) {
         property.put("index", false);
@@ -459,6 +504,167 @@ public final class ProtoMapper {
       return property;
     }
 
+    /**
+     * Maps the values of a map field mapped as {@code OBJECT} or {@code NESTED} to dynamic
+     * templates, so that every key takes the value type. The value is mapped by the ordinary rules
+     * into scratch collectors with {@code *} for the key; the resulting fields become {@link
+     * #dynamicFields} and the resulting properties become templates.
+     */
+    private void typedMap(FieldDescriptor field, FieldOpts options, String path,
+        String protoPath) {
+      FieldDescriptor value = field.getMessageType().findFieldByName("value");
+      EsType valueType = options.getValueType();
+      if (valueType == EsType.IGNORE) {
+        throw new MappingException(path, "value_type IGNORE is not supported; set type: IGNORE to"
+            + " leave the map out");
+      }
+      if (valueType != EsType.AUTO) {
+        try {
+          validate(FieldKind.fromEsType(valueType), value, path);
+        } catch (MappingException e) {
+          throw new MappingException(path,
+              "value_type " + e.getMessage().substring(path.length() + 2));
+        }
+      }
+      FieldOpts valueOptions = options.toBuilder().setType(valueType).clearValueType().clearName()
+          .clearId().clearCopyTo().clearRawMappingJson().clearFullText().build();
+      String valuePath = path + ".*";
+      String valueProtoPath = protoPath + ".*";
+      float boost = options.getBoost() > 0 ? options.getBoost() : 1.0f;
+      boolean fullText = options.getFullText() == Bool3.TRUE;
+
+      if (!isMessageValue(value, valueType)) {
+        if (value.getType() == FieldDescriptor.Type.MESSAGE
+            && (UNTYPED_VALUES.contains(value.getMessageType().getFullName())
+                || STRUCT_LIKE.contains(value.getMessageType().getFullName()))) {
+          untyped(path, value.getMessageType());
+          return;
+        }
+        Scratch scratch = scratch(() -> property(value, valueOptions, valuePath, valueProtoPath));
+        template(valuePath, false, scratch.mapping());
+        scratch.fields().forEach((pattern, info) -> dynamicFields.put(pattern, dynamic(info)));
+        FieldKind kind = scratch.fields().get(valuePath).kind();
+        if (fullText && (kind.isText() || kind == FieldKind.KEYWORD)) {
+          fullTextFields.put(valuePath, boost);
+        }
+        keyWarning(path, 1 + subFieldCount(scratch.mapping()), 0);
+        return;
+      }
+
+      Descriptor message = value.getMessageType();
+      if (containsUntyped(message, new HashSet<>())) {
+        untyped(path, message);
+        return;
+      }
+      Scratch scratch = scratch(() -> descend(message, valuePath, valueProtoPath));
+      if (scratch.mapping() == null) {
+        Map<String, Object> disabled = new TreeMap<>();
+        disabled.put("type", FieldKind.OBJECT.esType());
+        disabled.put("enabled", false);
+        template(valuePath, false, disabled);
+        dynamicFields.put(valuePath, new FieldInfo(valuePath, valueProtoPath, FieldKind.OBJECT,
+            false, false, boost, value, valuePath));
+        keyWarning(path, 1, 0);
+        return;
+      }
+      FieldKind rootKind = valueType == EsType.NESTED ? FieldKind.NESTED : FieldKind.OBJECT;
+      template(valuePath, true, container(rootKind.esType()));
+      dynamicFields.put(valuePath, new FieldInfo(valuePath, valueProtoPath, rootKind, false, false,
+          boost, value, valuePath));
+      scratch.fields().forEach((pattern, info) -> dynamicFields.put(pattern, dynamic(info)));
+      // the object (or nested) field of the key itself, then everything inside the value
+      int[] counts = {1, rootKind == FieldKind.NESTED ? 1 : 0};
+      templates(scratch.mapping(), valuePath, counts);
+      if (fullText && rootKind != FieldKind.NESTED) {
+        scratch.fullText().forEach((pattern, fieldBoost) -> {
+          boolean underNested = scratch.fields().values().stream()
+              .anyMatch(info -> info.kind() == FieldKind.NESTED
+                  && pattern.startsWith(info.path() + "."));
+          if (!underNested) {
+            fullTextFields.put(pattern, fieldBoost);
+          }
+        });
+      }
+      keyWarning(path, counts[0], counts[1]);
+    }
+
+    /**
+     * Turns the properties of a map value into templates, counting the fields they add per key the
+     * way the engines count them.
+     *
+     * @param counts {@code [fields, nested fields]}, incremented in place
+     */
+    @SuppressWarnings("unchecked")
+    private void templates(Map<String, Object> properties, String prefix, int[] counts) {
+      for (Map.Entry<String, Object> entry : properties.entrySet()) {
+        String pattern = prefix + "." + entry.getKey();
+        Map<String, Object> property = (Map<String, Object>) entry.getValue();
+        if (property.get("properties") instanceof Map) {
+          String type = String.valueOf(property.get("type"));
+          template(pattern, true, container(type));
+          counts[0]++;
+          if (FieldKind.NESTED.esType().equals(type)) {
+            counts[1]++;
+          }
+          templates((Map<String, Object>) property.get("properties"), pattern, counts);
+        } else {
+          template(pattern, false, property);
+          counts[0] += 1 + subFieldCount(property);
+        }
+      }
+    }
+
+    private void template(String pathMatch, boolean objectsOnly, Map<String, Object> mapping) {
+      Map<String, Object> template = new TreeMap<>();
+      template.put("path_match", pathMatch);
+      if (objectsOnly) {
+        template.put("match_mapping_type", "object");
+      }
+      template.put("mapping", mapping);
+      templates.put("ep:" + pathMatch, template);
+    }
+
+    private void untyped(String path, Descriptor message) {
+      warnings.add("values of " + path + " are untyped: " + message.getFullName()
+          + " is or contains a map, Struct or Any");
+      template(path + ".*", true, container(FieldKind.OBJECT.esType()));
+    }
+
+    private void keyWarning(String path, int count, int nested) {
+      warnings.add("each distinct key of " + path + " adds " + count
+          + " field(s) at index time (index.mapping.total_fields.limit)"
+          + (nested == 0 ? "" : ", " + nested + " of them nested"
+              + " (index.mapping.nested_fields.limit, default 50)"));
+    }
+
+    /**
+     * Runs a mapping step with empty field, nested-path, full-text and id collectors, so that the
+     * values of a typed map do not land among the declared fields.
+     */
+    private Scratch scratch(Supplier<Map<String, Object>> step) {
+      final Map<String, FieldInfo> savedFields = fields;
+      final Set<String> savedNested = nestedPaths;
+      final Map<String, Float> savedFullText = fullTextFields;
+      final String savedId = idField;
+      fields = new TreeMap<>();
+      nestedPaths = new TreeSet<>();
+      fullTextFields = new TreeMap<>();
+      idField = null;
+      try {
+        Map<String, Object> mapping = step.get();
+        if (idField != null) {
+          warnings.add(idField + ": a field inside the values of a map cannot be the document id;"
+              + " ignored");
+        }
+        return new Scratch(mapping, fields, fullTextFields);
+      } finally {
+        fields = savedFields;
+        nestedPaths = savedNested;
+        fullTextFields = savedFullText;
+        idField = savedId;
+      }
+    }
+
     private Map<String, Object> descend(Descriptor child, String path, String protoPath) {
       if (ancestors.contains(child)) {
         warnings.add(
@@ -492,7 +698,7 @@ public final class ProtoMapper {
     private FieldKind defaultKind(FieldDescriptor field, String path) {
       if (field.isMapField()) {
         // Keys are data, not schema: flattened indexes them without growing the mapping.
-        // EsType.OBJECT on the field opts in to an object with dynamic: true.
+        // EsType.OBJECT on the field opts in to a typed map (dynamic templates from the value).
         return FieldKind.FLATTENED;
       }
       switch (field.getType()) {
@@ -637,6 +843,70 @@ public final class ProtoMapper {
         count((Map<String, Object>) property.get("fields"), counts);
       }
     }
+  }
+
+  /** The mapping, fields and full-text fields of one scratch mapping step. */
+  private record Scratch(
+      Map<String, Object> mapping, Map<String, FieldInfo> fields, Map<String, Float> fullText) {}
+
+  private static FieldInfo dynamic(FieldInfo info) {
+    return new FieldInfo(info.path(), info.protoPath(), info.kind(), info.repeated(),
+        info.keywordSubfield(), info.boost(), info.field(), info.path());
+  }
+
+  private static Map<String, Object> container(String type) {
+    Map<String, Object> mapping = new TreeMap<>();
+    mapping.put("type", type);
+    mapping.put("dynamic", true);
+    return mapping;
+  }
+
+  @SuppressWarnings("unchecked")
+  private static int subFieldCount(Map<String, Object> property) {
+    Object subFields = property.get("fields");
+    return subFields instanceof Map ? ((Map<String, Object>) subFields).size() : 0;
+  }
+
+  private static int segments(String templateName) {
+    return templateName.split("\\.", -1).length;
+  }
+
+  /**
+   * Returns whether the value of a typed map is a message whose fields become templates, rather
+   * than one value: any message but a wrapper, {@code Struct}-like or {@code Any}-like type, and
+   * with {@code value_type} {@code AUTO} also not a {@code Timestamp}, {@code Duration} or geo
+   * message.
+   */
+  private static boolean isMessageValue(FieldDescriptor value, EsType valueType) {
+    if (value.getType() != FieldDescriptor.Type.MESSAGE || isWrapper(value)) {
+      return false;
+    }
+    String name = value.getMessageType().getFullName();
+    if (STRUCT_LIKE.contains(name) || UNTYPED_VALUES.contains(name)) {
+      return false;
+    }
+    return valueType == EsType.OBJECT || valueType == EsType.NESTED
+        || (valueType == EsType.AUTO && !SINGLE_VALUE_MESSAGES.contains(name));
+  }
+
+  /** Returns whether a message holds a map, a {@code Struct}-like or {@code Any} at any depth. */
+  private static boolean containsUntyped(Descriptor message, Set<String> seen) {
+    if (!seen.add(message.getFullName())) {
+      return false;
+    }
+    for (FieldDescriptor field : message.getFields()) {
+      if (field.isMapField()) {
+        return true;
+      }
+      if (field.getType() == FieldDescriptor.Type.MESSAGE) {
+        String name = field.getMessageType().getFullName();
+        if (STRUCT_LIKE.contains(name) || UNTYPED_VALUES.contains(name)
+            || containsUntyped(field.getMessageType(), seen)) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   private static boolean isStructLike(FieldDescriptor field) {

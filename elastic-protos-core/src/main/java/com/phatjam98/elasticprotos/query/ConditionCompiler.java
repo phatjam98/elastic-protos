@@ -2,6 +2,7 @@ package com.phatjam98.elasticprotos.query;
 
 import static com.phatjam98.elasticprotos.query.NestedPathResolver.object;
 
+import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.phatjam98.elasticprotos.mapping.FieldInfo;
 import com.phatjam98.elasticprotos.mapping.FieldKind;
 import com.phatjam98.elasticprotos.mapping.IndexDefinition;
@@ -74,7 +75,7 @@ final class ConditionCompiler {
           "A field name is required for " + operation + "; only FULL_TEXT may leave it empty",
           name);
     }
-    FieldInfo field = index.fields().get(name);
+    FieldInfo field = index.resolve(name).orElse(null);
     if (field == null) {
       field = flattenedKey(name, operation);
     }
@@ -155,12 +156,28 @@ final class ConditionCompiler {
 
   private void unknown(String name, String what) {
     if (!config.lenient()) {
+      FieldInfo values = index.typedMapValues(name).orElse(null);
+      if (values != null) {
+        String map = values.path().substring(0, values.path().length() - 2);
+        throw new QueryCompileException(
+            "Unknown field '" + name + "' in " + what + "; the values of map '" + map
+                + "' in index " + index.alias() + " are " + valueType(values)
+                + ", which does not map it",
+            name);
+      }
       throw new QueryCompileException(
           "Unknown field '" + name + "' in " + what + "; index " + index.alias()
               + " does not map it",
           name);
     }
     warnings.add("Skipped " + what + " on unknown field '" + name + "'");
+  }
+
+  /** Names the value type of a typed map: its message, or its mapped kind for other values. */
+  private static String valueType(FieldInfo values) {
+    return values.field().getJavaType() == FieldDescriptor.JavaType.MESSAGE
+        ? values.field().getMessageType().getFullName()
+        : values.kind().name();
   }
 
   private Clause clause(FieldCondition condition, FieldInfo field, Occur occur,
@@ -195,7 +212,7 @@ final class ConditionCompiler {
    */
   private Map<String, Object> exists(FieldInfo field) {
     if (field.kind() == FieldKind.NESTED) {
-      return NestedPathResolver.wrap(List.of(field.path()), object("match_all", new TreeMap<>()));
+      return resolver.wrapPaths(List.of(field.path()), object("match_all", new TreeMap<>()));
     }
     return object("exists", object("field", field.path()));
   }
@@ -462,6 +479,7 @@ final class ConditionCompiler {
     query.put("distance", distance.getDistance());
     query.put("distance_type", distance.getDistanceType().name().toLowerCase(Locale.ROOT));
     query.put(field.path(), point(distance.getPoint()));
+    ignoreUnmapped(query, field);
     return clause(condition, field, Occur.FILTER, object("geo_distance", query));
   }
 
@@ -483,8 +501,9 @@ final class ConditionCompiler {
               + "both top_left and bottom_right, got " + ValueConversions.kindName(value),
           field.path());
     }
-    return clause(condition, field, Occur.FILTER,
-        object("geo_bounding_box", object(field.path(), corners)));
+    Map<String, Object> query = object(field.path(), corners);
+    ignoreUnmapped(query, field);
+    return clause(condition, field, Occur.FILTER, object("geo_bounding_box", query));
   }
 
   private Clause geoShape(FieldCondition condition, FieldInfo field, String relation) {
@@ -508,8 +527,20 @@ final class ConditionCompiler {
     Map<String, Object> spec = new TreeMap<>();
     spec.put("shape", shape);
     spec.put("relation", relation);
-    return clause(condition, field, Occur.FILTER,
-        object("geo_shape", object(field.path(), spec)));
+    Map<String, Object> query = object(field.path(), spec);
+    ignoreUnmapped(query, field);
+    return clause(condition, field, Occur.FILTER, object("geo_shape", query));
+  }
+
+  /**
+   * Adds {@code ignore_unmapped} to a geo query on a key of a typed map: the key is mapped only
+   * once a document uses it, and unlike term-level queries the geo queries fail on an unmapped
+   * field.
+   */
+  private static void ignoreUnmapped(Map<String, Object> query, FieldInfo field) {
+    if (field.isDynamic()) {
+      query.put("ignore_unmapped", true);
+    }
   }
 
   private static Object shape(FieldInfo field, GeoShape shape) {
@@ -599,7 +630,7 @@ final class ConditionCompiler {
     }
     List<Object> should = new ArrayList<>();
     for (Map.Entry<String, List<String>> group : groups.entrySet()) {
-      should.add(NestedPathResolver.wrap(groupAncestors.get(group.getKey()),
+      should.add(resolver.wrapPaths(groupAncestors.get(group.getKey()),
           multiMatch(value.getStringValue(), group.getValue(), options)));
     }
     Map<String, Object> bool = new TreeMap<>();
@@ -608,8 +639,16 @@ final class ConditionCompiler {
     return new Clause(occur, List.of(), object("bool", bool));
   }
 
+  /**
+   * Checks a {@code FULL_TEXT} field: a declared field, a key of a typed map such as {@code
+   * notes.summary}, or a typed map pattern such as {@code notes.*}, which the engine expands to the
+   * keys it has mapped.
+   */
   private boolean fullTextField(String name) {
-    FieldInfo field = index.fields().get(name);
+    FieldInfo field = index.dynamicFields().get(name);
+    if (field == null) {
+      field = index.resolve(name).orElse(null);
+    }
     if (field == null) {
       unknown(name, "FULL_TEXT");
       return false;

@@ -647,6 +647,12 @@ public final class JsonRestEngine implements SearchEngine {
           return true;
         }
       }
+    } else if (node instanceof List) {
+      for (Object item : (List<?>) node) {
+        if (usesType(item, type)) {
+          return true;
+        }
+      }
     }
     return false;
   }
@@ -664,6 +670,13 @@ public final class JsonRestEngine implements SearchEngine {
         value = to;
       } else if (value instanceof Map && !"_meta".equals(entry.getKey())) {
         value = renameType(map(value), from, to);
+      } else if (value instanceof List) {
+        // dynamic_templates: a list of single-entry objects
+        List<Object> items = new ArrayList<>();
+        for (Object item : (List<?>) value) {
+          items.add(item instanceof Map ? renameType(map(item), from, to) : item);
+        }
+        value = items;
       }
       copy.put(entry.getKey(), value);
     }
