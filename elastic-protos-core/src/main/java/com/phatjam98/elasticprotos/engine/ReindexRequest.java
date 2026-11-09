@@ -32,8 +32,11 @@ import java.util.Objects;
  *   <li>{@code timeout}: how long to wait for the reindex task to finish; default ten minutes
  *   <li>{@code refresh}: whether to refresh the destination when done; default true
  *   <li>{@code versionType}: {@link VersionType#INTERNAL} (default) overwrites destination
- *       documents; {@link VersionType#EXTERNAL} copies the source version and only writes a
- *       document whose destination version is older, so a reindex never overwrites a newer write
+ *       documents; {@link VersionType#EXTERNAL} copies the source version and skips documents
+ *       whose destination version is equal or higher. It compares version numbers, not time: a
+ *       document created in the destination by an ordinary write starts at version 1 and is
+ *       overwritten by a source document at version 2 or more, so an external pass must not run
+ *       once the destination takes live writes
  *   <li>{@code proceedOnConflicts}: count version conflicts instead of aborting on the first one
  *       ({@code "conflicts": "proceed"}); default false
  *   <li>{@code query}: an optional query that selects the source documents, or null for all; a
@@ -51,7 +54,9 @@ public final class ReindexRequest {
     INTERNAL,
     /**
      * The destination keeps the source version and skips (as a version conflict) any document
-     * whose destination version is the same or newer.
+     * whose destination version is equal or higher. Versions are numbers, not timestamps, so do
+     * not run an external pass once the destination takes live writes: documents created there by
+     * ordinary writes have low versions and would be overwritten.
      */
     EXTERNAL
   }

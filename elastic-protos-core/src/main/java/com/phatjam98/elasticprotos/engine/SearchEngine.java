@@ -99,8 +99,23 @@ public interface SearchEngine extends AutoCloseable {
    * @param document the document body
    * @param options write options
    * @return what happened, with the sequence number and primary term of the write
+   * @throws IllegalArgumentException when the write is conditional but has no id
    */
   IndexResult index(String index, String id, Map<String, Object> document, IndexOptions options);
+
+  /**
+   * Rejects a conditional write without a document id, for implementations of {@link #index}.
+   *
+   * @param id the document id, or null
+   * @param options the write options
+   * @throws IllegalArgumentException when {@code options} is conditional and {@code id} is null
+   */
+  static void checkConditionalId(String id, IndexOptions options) {
+    if (id == null && options.conditional()) {
+      throw new IllegalArgumentException(
+          "a conditional write (ifSeqNo/ifPrimaryTerm) needs a document id");
+    }
+  }
 
   /** Merges a partial document into an existing document. */
   IndexResult update(String index, String id, Map<String, Object> partial);
@@ -137,9 +152,10 @@ public interface SearchEngine extends AutoCloseable {
    * @param id the document id
    * @param options {@link IndexOptions#refresh()}: when the deletion becomes visible to search;
    *     {@link IndexOptions#ifSeqNo()} and {@link IndexOptions#ifPrimaryTerm()}: delete only
-   *     while the document has them, else fail with {@link EngineException.Kind#CONFLICT};
-   *     {@code createOnly} is ignored
-   * @return true if it existed
+   *     while the document has them, else fail with {@link EngineException.Kind#CONFLICT}, which
+   *     includes a conditional delete of a missing document (Elasticsearch and OpenSearch both
+   *     answer 409 rather than 404); {@code createOnly} is ignored
+   * @return true if it existed; a conditional delete never returns false
    */
   boolean delete(String index, String id, IndexOptions options);
 

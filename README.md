@@ -856,9 +856,11 @@ Writes support optimistic concurrency: `IndexResult` and `Hit` carry the documen
 `get` always returns `version`, `seqNo` and `primaryTerm` on the hit; `search` returns them when the
 body asks for `"version": true` / `"seq_no_primary_term": true`, and per-field `highlight`
 fragments when it has a `highlight`. `ReindexRequest` takes a source `query`, `VersionType.EXTERNAL`
-(keep source versions, never overwrite a newer destination document) and `proceedOnConflicts`;
-`ReindexResult` counts `versionConflicts`, `noops` and `deleted`, and `accounted()` checks that
-they add up to `total`. `updateByQuery` rewrites matching documents in place, polled as a task like
+(keep source versions and skip documents whose destination version is equal or higher) and
+`proceedOnConflicts`. External versions are compared as numbers, not by time: a document created in
+the destination by an ordinary write starts at version 1, so do not run an external pass once the
+destination takes live writes. `ReindexResult` counts `versionConflicts`, `noops` and `deleted`;
+`accounted()` checks that they add up to `total`, and `complete()` also requires `ok()`. `updateByQuery` rewrites matching documents in place, polled as a task like
 reindex.
 
 Transport failures are `EngineException`s of kind `IO` that name the request

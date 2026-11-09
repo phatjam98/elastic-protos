@@ -60,8 +60,16 @@ public record ReindexResult(
    * Returns whether every document the engine looked at is accounted for: {@code created + updated
    * + deleted + noops + versionConflicts == total}. A run that proceeds on conflicts and is
    * accounted for skipped nothing silently.
+   *
+   * <p>It ignores failures and timeouts: use it together with {@link #ok()}, or call {@link
+   * #complete()}.
    */
   public boolean accounted() {
     return created + updated + deleted + noops + versionConflicts == total;
+  }
+
+  /** Returns {@code ok() && accounted()}: no failures, no timeout, and every document counted. */
+  public boolean complete() {
+    return ok() && accounted();
   }
 }

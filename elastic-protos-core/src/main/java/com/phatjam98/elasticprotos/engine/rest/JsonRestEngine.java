@@ -57,7 +57,7 @@ public final class JsonRestEngine implements SearchEngine {
   private static final String FLAT_OBJECT = "flat_object";
 
   private final RawHttp http;
-  private final Duration reindexPoll;
+  private final Duration taskPoll;
   private final Duration cancelWait;
   private volatile EngineInfo info;
 
@@ -67,8 +67,8 @@ public final class JsonRestEngine implements SearchEngine {
   }
 
   /** Creates an engine over a transport with a custom reindex poll interval. */
-  public JsonRestEngine(RawHttp http, Duration reindexPoll) {
-    this(http, reindexPoll, DEFAULT_CANCEL_WAIT);
+  public JsonRestEngine(RawHttp http, Duration taskPoll) {
+    this(http, taskPoll, DEFAULT_CANCEL_WAIT);
   }
 
   /**
@@ -76,22 +76,22 @@ public final class JsonRestEngine implements SearchEngine {
    * cancelled reindex task is awaited.
    *
    * @param http the transport
-   * @param reindexPoll the interval between polls of a running reindex task
+   * @param taskPoll the interval between polls of a running reindex or update-by-query task
    * @param cancelWait how long to wait for a cancelled reindex task to stop
    */
-  public JsonRestEngine(RawHttp http, Duration reindexPoll, Duration cancelWait) {
+  public JsonRestEngine(RawHttp http, Duration taskPoll, Duration cancelWait) {
     this.http = http;
-    this.reindexPoll = reindexPoll;
+    this.taskPoll = taskPoll;
     this.cancelWait = cancelWait;
   }
 
   /**
-   * Returns the interval between polls of a running reindex task.
+   * Returns the interval between polls of a running reindex or update-by-query task.
    *
    * @return the reindex poll interval
    */
   public Duration reindexPollInterval() {
-    return reindexPoll;
+    return taskPoll;
   }
 
   @Override
@@ -261,7 +261,7 @@ public final class JsonRestEngine implements SearchEngine {
           pollFailures++;
           LOG.warn("polling {} task {} failed (attempt {} of {}), retrying: {}", label, task,
               pollFailures, POLL_RETRIES + 1, e.getMessage());
-          pauseOrCancel(task, reindexPoll.multipliedBy(pollFailures), label);
+          pauseOrCancel(task, taskPoll.multipliedBy(pollFailures), label);
           continue;
         }
         throw new EngineException(e.getKind(), e.getStatus(),
@@ -278,11 +278,28 @@ public final class JsonRestEngine implements SearchEngine {
       }
       if (System.nanoTime() > deadline) {
         throw new EngineException(Kind.TIMEOUT, 0,
-            label + " task " + task + " did not finish within " + timeout + "; "
-                + cancelTask(task, label));
+            label + " task " + task + " did not finish within " + timeout + progress(status)
+                + "; " + cancelTask(task, label));
       }
-      pauseOrCancel(task, reindexPoll, label);
+      pauseOrCancel(task, taskPoll, label);
     }
+  }
+
+  /**
+   * Describes the counters of a running task's {@code task.status}, for a timeout message, or
+   * returns an empty string when the engine reported none.
+   */
+  private static String progress(Map<String, Object> status) {
+    Map<String, Object> counters = map(map(status.get("task")).get("status"));
+    StringBuilder out = new StringBuilder();
+    for (String key : List.of("total", "created", "updated", "deleted", "noops",
+        "version_conflicts")) {
+      if (counters.get(key) instanceof Number value) {
+        out.append(out.length() == 0 ? "" : ", ").append(key).append('=')
+            .append(value.longValue());
+      }
+    }
+    return out.length() == 0 ? "" : " (last status: " + out + ")";
   }
 
   private static ReindexResult taskResult(Map<String, Object> response) {
@@ -351,7 +368,7 @@ public final class JsonRestEngine implements SearchEngine {
         return "the task was asked to cancel but had not stopped within " + cancelWait;
       }
       try {
-        pause(reindexPoll);
+        pause(taskPoll);
       } catch (EngineException interrupted) {
         return "the task was asked to cancel; interrupted while waiting for it to stop";
       }
@@ -380,6 +397,7 @@ public final class JsonRestEngine implements SearchEngine {
   @Override
   public IndexResult index(
       String index, String id, Map<String, Object> document, IndexOptions options) {
+    SearchEngine.checkConditionalId(id, options);
     Map<String, String> params = writeParams(options);
     String path;
     String method;

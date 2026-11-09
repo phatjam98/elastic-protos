@@ -26,7 +26,8 @@ class EngineRequestsSpec extends Specification {
     options.refresh() == IndexOptions.Refresh.NONE
     options.withRefresh(IndexOptions.Refresh.WAIT_FOR) ==
         new IndexOptions(false, IndexOptions.Refresh.WAIT_FOR, 4L, 1L)
-    options.withCreateOnly(true) == new IndexOptions(true, IndexOptions.Refresh.NONE, 4L, 1L)
+    options.withCreateOnly(false) == options
+    IndexOptions.defaults().withCreateOnly(true) == new IndexOptions(true, IndexOptions.Refresh.NONE)
   }
 
   @Unroll
@@ -48,6 +49,52 @@ class EngineRequestsSpec extends Specification {
     seqNo | term
     1L    | null
     null  | 1L
+  }
+
+  @Unroll
+  def "index options reject #name"() {
+    when:
+    new IndexOptions(createOnly, IndexOptions.Refresh.NONE, seqNo, term)
+
+    then:
+    def e = thrown(IllegalArgumentException)
+    e.message == message
+
+    where:
+    name                          | createOnly | seqNo | term || message
+    'a negative sequence number'  | false      | -1L   | 1L   || 'ifSeqNo must not be negative: -1'
+    'a primary term of 0'         | false      | 0L    | 0L   || 'ifPrimaryTerm must be at least 1: 0'
+    'a conditional create'        | true       | 0L    | 1L   || 'create operations do not support compare and set: use ifSeqNo/ifPrimaryTerm or createOnly, not both'
+  }
+
+  def "a conditional write with createOnly cannot be made through withCreateOnly either"() {
+    when:
+    IndexOptions.ifMatch(1, 1).withCreateOnly(true)
+
+    then:
+    thrown(IllegalArgumentException)
+  }
+
+  @Unroll
+  def "bulk operations reject #name"() {
+    when:
+    new BulkOp(type, 'i', '1', [:], seqNo, term)
+
+    then:
+    def e = thrown(IllegalArgumentException)
+    e.message == message
+
+    where:
+    name                         | type             | seqNo | term || message
+    'a negative sequence number' | BulkOp.Type.INDEX  | -5L | 1L   || 'ifSeqNo must not be negative: -5'
+    'a primary term of 0'        | BulkOp.Type.DELETE | 1L  | 0L   || 'ifPrimaryTerm must be at least 1: 0'
+    'a conditional create'       | BulkOp.Type.CREATE | 1L  | 1L   || 'create operations do not support compare and set: use INDEX with ifSeqNo'
+  }
+
+  def "a sequence number of 0 and a primary term of 1 are the smallest valid values"() {
+    expect:
+    IndexOptions.ifMatch(0, 1).conditional()
+    BulkOp.deleteIfMatch('i', '1', 0, 1).ifSeqNo() == 0L
   }
 
   def "bulk factories are unconditional, the IfMatch ones are conditional"() {

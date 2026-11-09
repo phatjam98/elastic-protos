@@ -326,6 +326,34 @@ class JsonRestEngineSpec extends Specification {
         'POST /docs/_update_by_query', 'GET /_tasks/n:8', 'POST /_tasks/n:8/_cancel', 'GET /_tasks/n:8']
   }
 
+  def "a timeout names the last counters the task reported"() {
+    given:
+    http.enqueue(200, [task: 'n:9'])
+        .enqueue(200, [completed: false, task: [status: [total: 100, created: 40, updated: 2, deleted: 0, noops: 1,
+            version_conflicts: 3, batches: 5]]])
+        .enqueue(200, [nodes: [:]])
+        .enqueue(200, [completed: true])
+
+    when:
+    engine.reindex(ReindexRequest.of('a', 'b').withTimeout(Duration.ofNanos(1)))
+
+    then:
+    def e = thrown(EngineException)
+    e.kind == EngineException.Kind.TIMEOUT
+    e.message.startsWith('reindex task n:9 did not finish within PT0.000000001S (last status: total=100, created=40,'
+        + ' updated=2, deleted=0, noops=1, version_conflicts=3); ')
+  }
+
+  def "a conditional write without an id is refused before anything is sent"() {
+    when:
+    engine.index('docs', null, [a: 1], IndexOptions.ifMatch(1, 1))
+
+    then:
+    def e = thrown(IllegalArgumentException)
+    e.message == 'a conditional write (ifSeqNo/ifPrimaryTerm) needs a document id'
+    http.requests.isEmpty()
+  }
+
   def "a failing updateByQuery poll cancels the task, and a task error is reported"() {
     given:
     def failing = new FakeHttp().enqueue(200, [task: 'n:1'])

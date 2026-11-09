@@ -6,7 +6,8 @@ package com.phatjam98.elasticprotos.engine;
  * <p>{@code ifSeqNo} and {@code ifPrimaryTerm} make the write conditional (optimistic
  * concurrency): it only succeeds while the document still has that sequence number and primary
  * term, as read from {@link IndexResult} or {@link Hit}, and otherwise fails with {@link
- * EngineException.Kind#CONFLICT}. Set both or neither.
+ * EngineException.Kind#CONFLICT}. Set both or neither; a conditional write needs a document id and
+ * cannot be create-only.
  *
  * @param createOnly fail if a document with the id already exists
  * @param refresh when the write becomes visible to search
@@ -24,14 +25,18 @@ public record IndexOptions(boolean createOnly, Refresh refresh, Long ifSeqNo,
   }
 
   /**
-   * Checks that the sequence number and primary term are both set or both null.
+   * Checks the conditional-write settings the engines would reject.
    *
-   * @throws IllegalArgumentException when only one of them is set
+   * @throws IllegalArgumentException when only one of the sequence number and primary term is
+   *     set, when the sequence number is negative or the primary term below 1, or when a
+   *     conditional write is also create-only, which the engines do not support
    */
   public IndexOptions {
-    if ((ifSeqNo == null) != (ifPrimaryTerm == null)) {
+    checkIfMatch(ifSeqNo, ifPrimaryTerm);
+    if (createOnly && ifSeqNo != null) {
       throw new IllegalArgumentException(
-          "ifSeqNo and ifPrimaryTerm must be set together: " + ifSeqNo + ", " + ifPrimaryTerm);
+          "create operations do not support compare and set: use ifSeqNo/ifPrimaryTerm or"
+              + " createOnly, not both");
     }
   }
 
@@ -43,6 +48,20 @@ public record IndexOptions(boolean createOnly, Refresh refresh, Long ifSeqNo,
    */
   public IndexOptions(boolean createOnly, Refresh refresh) {
     this(createOnly, refresh, null, null);
+  }
+
+  /** Validates a sequence number and primary term pair; shared with {@link BulkOp}. */
+  static void checkIfMatch(Long ifSeqNo, Long ifPrimaryTerm) {
+    if ((ifSeqNo == null) != (ifPrimaryTerm == null)) {
+      throw new IllegalArgumentException(
+          "ifSeqNo and ifPrimaryTerm must be set together: " + ifSeqNo + ", " + ifPrimaryTerm);
+    }
+    if (ifSeqNo != null && ifSeqNo < 0) {
+      throw new IllegalArgumentException("ifSeqNo must not be negative: " + ifSeqNo);
+    }
+    if (ifPrimaryTerm != null && ifPrimaryTerm < 1) {
+      throw new IllegalArgumentException("ifPrimaryTerm must be at least 1: " + ifPrimaryTerm);
+    }
   }
 
   /** Overwrite, no refresh. */

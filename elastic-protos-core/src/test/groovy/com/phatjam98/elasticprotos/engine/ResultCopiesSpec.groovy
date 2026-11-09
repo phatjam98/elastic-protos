@@ -121,6 +121,15 @@ class ResultCopiesSpec extends Specification {
     !new ReindexResult(4, 3, 0, [], 0, false).accounted()
   }
 
+  def "complete needs no failures, no timeout and every document accounted for"() {
+    expect:
+    new ReindexResult(2, 2, 0, [], 0, false).complete()
+    !new ReindexResult(3, 2, 0, [], 0, false).complete()
+    !new ReindexResult(2, 2, 0, [], 0, true).complete()
+    !new ReindexResult(2, 1, 0, [[id: '2']], 0, false, 0, 0, 1).complete()
+    new ReindexResult(2, 1, 0, [[id: '2']], 0, false, 0, 0, 1).accounted()
+  }
+
   def "a search result copies its hits and aggregations"() {
     given:
     def hits = [new Hit('i', '1', null, [:], [1])]

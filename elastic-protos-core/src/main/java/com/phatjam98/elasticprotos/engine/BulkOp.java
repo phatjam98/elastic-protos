@@ -28,14 +28,18 @@ public record BulkOp(Type type, String index, String id, Map<String, Object> sou
   }
 
   /**
-   * Checks that the sequence number and primary term are both set or both null.
+   * Checks the conditional settings the engines would reject; in a bulk request one such item
+   * fails the whole request.
    *
-   * @throws IllegalArgumentException when only one of them is set
+   * @throws IllegalArgumentException when only one of the sequence number and primary term is
+   *     set, when the sequence number is negative or the primary term below 1, or when a {@code
+   *     CREATE} is conditional
    */
   public BulkOp {
-    if ((ifSeqNo == null) != (ifPrimaryTerm == null)) {
+    IndexOptions.checkIfMatch(ifSeqNo, ifPrimaryTerm);
+    if (type == Type.CREATE && ifSeqNo != null) {
       throw new IllegalArgumentException(
-          "ifSeqNo and ifPrimaryTerm must be set together: " + ifSeqNo + ", " + ifPrimaryTerm);
+          "create operations do not support compare and set: use INDEX with ifSeqNo");
     }
   }
 

@@ -63,19 +63,26 @@ import java.util.regex.Pattern;
  *   <li>{@link #reindex} copies from a snapshot of the source taken when the call starts, honours
  *       {@code source.query} (the same queries as search), and with {@link
  *       ReindexRequest.VersionType#EXTERNAL} keeps the source versions and skips documents whose
- *       destination version is the same or newer: counted as {@code versionConflicts} when the
- *       request proceeds on conflicts, otherwise the copy stops at the first conflict and reports
- *       it as a failure, like the real engines.
- *   <li>{@link #updateByQuery} rewrites every matching document, bumping version and sequence
- *       number. {@link #putSettings} merges into the stored settings ({@code blocks.write} sets
- *       the write block).
+ *       destination version (or tombstone version) is equal or higher: counted as {@code
+ *       versionConflicts} when the request proceeds on conflicts, otherwise the copy stops at the
+ *       first conflict and reports it as a failure. {@code total} is then still the number of
+ *       snapshot documents, so {@code accounted()} is false, as on the engines; unlike them, which
+ *       finish writing the current batch, the copy stops right there.
+ *   <li>A delete bumps the version and keeps it as a tombstone, so a later write of the same id
+ *       continues from it and an external-version copy onto it is a version conflict.
+ *   <li>{@link #updateByQuery} snapshots the sequence numbers of the matching documents and
+ *       rewrites each one, bumping version and sequence number; a document changed or deleted
+ *       since the snapshot is a version conflict, counted when the request proceeds on conflicts
+ *       and otherwise reported as one 409 failure that stops the run. {@link #putSettings} merges
+ *       into the stored settings ({@code blocks.write} sets the write block).
  * </ul>
  *
  * <p>Test hooks: {@link #duringReindex} runs after a reindex took its snapshot and before it
- * copies, so a spec can write to the source concurrently; {@link #afterAliasUpdate} runs after
- * {@link #updateAliases} applied its actions.
+ * copies, and {@link #duringUpdateByQuery} likewise for an update by query, so a spec can write
+ * concurrently; {@link #afterAliasUpdate} runs after {@link #updateAliases} applied its actions.
  *
- * <p>Limits: documents are never validated against mappings; every write is immediately visible
+ * <p>Limits: documents are never validated against mappings; tombstones never expire (there is no
+ * {@code index.gc_deletes}); every write is immediately visible
  * (refresh is a no-op); writes to unknown indices fail instead of auto-creating them; {@link
  * #reindex} requires the destination to exist and supports only a tiny stand-in for Painless
  * (one statement per line, {@code ;} optional, blank and {@code //} lines ignored):
@@ -113,6 +120,7 @@ public class InMemorySearchEngine implements SearchEngine {
   private long seqNo = -1;
   private Consumer<ReindexRequest> duringReindex = request -> {};
   private Runnable afterAliasUpdate = () -> {};
+  private Consumer<UpdateByQueryRequest> duringUpdateByQuery = request -> {};
 
   /** Creates an empty engine. */
   public InMemorySearchEngine() {}
@@ -144,6 +152,24 @@ public class InMemorySearchEngine implements SearchEngine {
   public InMemorySearchEngine duringReindex(Consumer<ReindexRequest> hook) {
     this.duringReindex = hook == null ? request -> {} : hook;
     return this;
+  }
+
+  /**
+   * Sets a hook that {@link #updateByQuery} runs after it took the sequence numbers of the
+   * matching documents and before it rewrites them, for example to change one of them so that it
+   * conflicts; null removes it.
+   */
+  public InMemorySearchEngine duringUpdateByQuery(Consumer<UpdateByQueryRequest> hook) {
+    this.duringUpdateByQuery = hook == null ? request -> {} : hook;
+    return this;
+  }
+
+  /**
+   * Returns the version a deleted document left behind as its tombstone, or null when the id has
+   * none (it was never deleted, or was written again since).
+   */
+  public Long tombstoneVersion(String index, String id) {
+    return concrete(index).tombstones.get(id);
   }
 
   /**
@@ -416,11 +442,14 @@ public class InMemorySearchEngine implements SearchEngine {
     long conflicts = 0;
     List<Map<String, Object>> failures = new ArrayList<>();
     for (Snapshot doc : snapshot) {
-      Long current = dest.versions.get(doc.id());
+      Long current = dest.versions.containsKey(doc.id())
+          ? dest.versions.get(doc.id()) : dest.tombstones.get(doc.id());
       if (external && current != null && current >= doc.version()) {
         conflicts++;
         if (!request.proceedOnConflicts()) {
-          failures.add(versionConflict(request.dest(), doc.id(), doc.version(), current));
+          failures.add(conflictFailure(request.dest(), doc.id(), "version conflict, current"
+              + " version [" + current + "] is higher or equal to the one provided ["
+              + doc.version() + "]"));
           break;
         }
         continue;
@@ -434,26 +463,51 @@ public class InMemorySearchEngine implements SearchEngine {
       }
       stamp(dest, doc.id(), external ? doc.version() : null);
     }
-    long total = failures.isEmpty() ? snapshot.size() : created + updated + conflicts;
-    return new ReindexResult(total, created, updated, failures, 0, false, 0, 0, conflicts);
+    return new ReindexResult(snapshot.size(), created, updated, failures, 0, false, 0, 0,
+        conflicts);
   }
 
-  /** Rewrites every matching document in place, bumping its version and sequence number. */
+  /**
+   * Rewrites every matching document in place, bumping its version and sequence number; a
+   * document changed since the sequence numbers were taken is a version conflict.
+   */
   @Override
   public ReindexResult updateByQuery(UpdateByQueryRequest request) {
     record("updateByQuery", request.index());
-    long updated = 0;
+    List<Taken> snapshot = new ArrayList<>();
     for (String name : existingNames(request.index())) {
       IndexState state = indices.get(name);
       checkWritable(name, state);
       for (Map.Entry<String, Map<String, Object>> doc : state.docs.entrySet()) {
         if (matches(request.query(), doc.getKey(), doc.getValue())) {
-          stamp(state, doc.getKey(), null);
-          updated++;
+          snapshot.add(new Taken(name, doc.getKey(), state.seqNos.get(doc.getKey())));
         }
       }
     }
-    return new ReindexResult(updated, 0, updated, List.of(), 0, false);
+    duringUpdateByQuery.accept(request);
+    long updated = 0;
+    long conflicts = 0;
+    List<Map<String, Object>> failures = new ArrayList<>();
+    for (Taken entry : snapshot) {
+      String name = entry.index();
+      String id = entry.id();
+      IndexState state = indices.get(name);
+      Long now = state == null ? null : state.seqNos.get(id);
+      if (!Objects.equals(now, entry.seqNo())) {
+        conflicts++;
+        if (!request.proceedOnConflicts()) {
+          failures.add(conflictFailure(name, id, "version conflict, required seqNo ["
+              + entry.seqNo() + "], primary term [" + PRIMARY_TERM + "], "
+              + (now == null ? "but no document was found" : "current document has seqNo [" + now
+                  + "] and primary term [" + PRIMARY_TERM + "]")));
+          break;
+        }
+        continue;
+      }
+      stamp(state, id, null);
+      updated++;
+    }
+    return new ReindexResult(snapshot.size(), 0, updated, failures, 0, false, 0, 0, conflicts);
   }
 
   // ---------------------------------------------------------------- documents
@@ -462,6 +516,7 @@ public class InMemorySearchEngine implements SearchEngine {
   public IndexResult index(
       String index, String id, Map<String, Object> document, IndexOptions options) {
     record("index", index + "/" + id);
+    SearchEngine.checkConditionalId(id, options);
     String name = writeTarget(index);
     IndexState state = indices.get(name);
     checkWritable(name, state);
@@ -684,14 +739,21 @@ public class InMemorySearchEngine implements SearchEngine {
    * given (external versioning), else one more than before.
    */
   private long stamp(IndexState state, String id, Long version) {
-    long next = version != null ? version : state.versions.getOrDefault(id, 0L) + 1;
+    Long previous = state.versions.containsKey(id)
+        ? state.versions.get(id) : state.tombstones.get(id);
+    long next = version != null ? version : (previous == null ? 0L : previous) + 1;
+    state.tombstones.remove(id);
     state.versions.put(id, next);
     state.seqNos.put(id, ++seqNo);
     return next;
   }
 
+  /** Deletes a document, leaving its bumped version behind as a tombstone. */
   private boolean remove(IndexState state, String id) {
-    state.versions.remove(id);
+    Long version = state.versions.remove(id);
+    if (version != null) {
+      state.tombstones.put(id, version + 1);
+    }
     state.seqNos.remove(id);
     seqNo++;
     return state.docs.remove(id) != null;
@@ -720,12 +782,10 @@ public class InMemorySearchEngine implements SearchEngine {
     return null;
   }
 
-  private static Map<String, Object> versionConflict(String index, String id, long version,
-      long current) {
+  private static Map<String, Object> conflictFailure(String index, String id, String reason) {
     Map<String, Object> cause = new TreeMap<>();
     cause.put("type", "version_conflict_engine_exception");
-    cause.put("reason", "[" + id + "]: version conflict, current version [" + current
-        + "] is higher or equal to the one provided [" + version + "]");
+    cause.put("reason", "[" + id + "]: " + reason);
     Map<String, Object> failure = new TreeMap<>();
     failure.put("index", index);
     failure.put("id", id);
@@ -1050,9 +1110,13 @@ public class InMemorySearchEngine implements SearchEngine {
     private final Map<String, Map<String, Object>> docs = new LinkedHashMap<>();
     private final Map<String, Long> versions = new TreeMap<>();
     private final Map<String, Long> seqNos = new TreeMap<>();
+    private final Map<String, Long> tombstones = new TreeMap<>();
     private boolean writeBlocked;
   }
 
   /** A source document as a reindex saw it when it started. */
   private record Snapshot(String id, Map<String, Object> source, long version) {}
+
+  /** A document an update by query matched, with its sequence number at that time. */
+  private record Taken(String index, String id, Long seqNo) {}
 }

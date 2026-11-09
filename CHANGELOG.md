@@ -18,3 +18,11 @@ adapters for Elasticsearch 8.x/9.x and OpenSearch 2.x/3.x on the official low-le
 an optional Micronaut 4 module and a BOM, and requires Java 17. It is not API-compatible with the
 pre-1.0 `com.phatjam98.elasticsearch.*` packages, and the private geobuf dependency is gone. A
 `1.0.0-rc.1` pre-release precedes it.
+
+Engine SPI additions before 1.0.0 (conditional writes, `updateByQuery`, `putSettings`, hit
+metadata):
+
+- Hits read by id (`SearchEngine.get`) now carry `version`, `seqNo` and `primaryTerm`, so they no
+  longer equal a `Hit` built with the five-argument constructor.
+- The in-memory test engine copies a reindex from a snapshot of the source taken when the call
+  starts, and a delete consumes a sequence number and leaves a version tombstone.
