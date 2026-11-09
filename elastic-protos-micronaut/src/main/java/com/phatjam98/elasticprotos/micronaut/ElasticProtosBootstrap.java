@@ -27,7 +27,10 @@ import org.slf4j.LoggerFactory;
  * example because the cluster is unreachable or rejects the credentials), a {@link
  * BootstrapException} is thrown from the startup event, which aborts {@code
  * ApplicationContext.start()}. With {@code fail-on-error: false} those problems are logged at WARN
- * and startup continues. A class that cannot be loaded always aborts startup. Disable the bootstrap
+ * and startup continues. That includes every planning error, also deterministic ones such as a
+ * {@code MappingException} from invalid proto options: the application then starts without the
+ * index and writes to it fail later. Keep the default {@code true} in deployments. A class that
+ * cannot be loaded always aborts startup. Disable the bootstrap
  * with {@code elastic-protos.bootstrap.enabled: false}, for example on all but one instance.
  */
 @Singleton
@@ -87,7 +90,8 @@ public class ElasticProtosBootstrap implements ApplicationEventListener<StartupE
       result = migrator.apply(plan);
     } catch (RuntimeException e) {
       if (bootstrap.isFailOnError()) {
-        throw new BootstrapException("elastic-protos bootstrap failed: " + e.getMessage(), e);
+        String reason = e.getMessage() != null ? e.getMessage() : e.toString();
+        throw new BootstrapException("elastic-protos bootstrap failed: " + reason, e);
       }
       LOG.warn("elastic-protos bootstrap failed (fail-on-error is false), startup continues", e);
       return null;
