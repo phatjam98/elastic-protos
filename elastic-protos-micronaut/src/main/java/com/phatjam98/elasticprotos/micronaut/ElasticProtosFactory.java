@@ -126,6 +126,7 @@ public class ElasticProtosFactory {
         .allowScriptSort(query.isAllowScriptSort())
         .allowRegex(query.isAllowRegex())
         .maxPageSize(query.getMaxPageSize())
+        .maxTermsSize(query.getMaxTermsSize())
         .shardDocTiebreaker(query.getShardDocTiebreaker() != ShardDocTiebreaker.OFF)
         .build();
   }

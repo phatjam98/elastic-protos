@@ -16,7 +16,9 @@ import com.phatjam98.elasticprotos.mapping.ProtoMapper;
 import com.phatjam98.elasticprotos.migration.IndexMigrator;
 import com.phatjam98.elasticprotos.migration.MigrationPlan;
 import com.phatjam98.elasticprotos.migration.MigrationResult;
+import com.phatjam98.elasticprotos.proto.Pagination;
 import com.phatjam98.elasticprotos.proto.SearchCriteria;
+import com.phatjam98.elasticprotos.query.AggregationResults;
 import com.phatjam98.elasticprotos.query.CompiledSearch;
 import com.phatjam98.elasticprotos.query.PaginationSupport;
 import com.phatjam98.elasticprotos.query.QueryCompiler;
@@ -177,9 +179,10 @@ public class ElasticProtosService {
   }
 
   /**
-   * Runs one search and reads the hits back into messages.
+   * Runs one search and reads the hits back into messages, with the results of any aggregations
+   * of the criteria and the highlights of the hits ({@link Hit#highlight()}).
    *
-   * @param criteria what to search for, including sorting and pagination
+   * @param criteria what to search for, including sorting, pagination and aggregations
    * @param type the generated message class
    * @param <T> the message type
    * @return the page, with the pagination of the next one
@@ -198,7 +201,29 @@ public class ElasticProtosService {
       items.add(codec.fromHit(hit, type));
     }
     return new SearchPage<>(items, result.hits(), result.total(), result.totalExact(),
-        PaginationSupport.next(criteria.getPagination(), result), compiled.warnings());
+        PaginationSupport.next(criteria.getPagination(), result), compiled.warnings(),
+        AggregationResults.of(result));
+  }
+
+  /**
+   * Runs the aggregations of a search without returning hits: the page size is set to {@code -1},
+   * which compiles to {@code size: 0}.
+   *
+   * @param criteria what to search for and the aggregations to compute; its pagination is
+   *     replaced
+   * @param type the generated message class whose alias is searched
+   * @return the aggregation results
+   * @throws com.phatjam98.elasticprotos.query.QueryCompileException when the criteria do not fit
+   *     the index
+   */
+  public AggregationResults aggregate(SearchCriteria criteria, Class<? extends Message> type) {
+    IndexDefinition definition = definition(type);
+    SearchCriteria aggregationsOnly = criteria.toBuilder()
+        .setPagination(Pagination.newBuilder().setSize(-1))
+        .clearHighlight()
+        .build();
+    CompiledSearch compiled = compiler.compile(aggregationsOnly, definition);
+    return AggregationResults.of(engine.search(List.of(definition.alias()), compiled.body()));
   }
 
   /**
