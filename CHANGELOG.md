@@ -11,13 +11,22 @@ left out. All modules share one version ([ADR 0005](docs/adr/0005-lockstep-versi
 The first public release is a rewrite of the earlier internal library. It turns protobuf message
 definitions into Elasticsearch and OpenSearch index mappings driven by `elastic_options.proto` and
 programmatic overrides; creates and migrates hash-versioned indices behind stable aliases
-(`CREATE`, `NO_OP`, `PUT_MAPPING`, `REINDEX` with Painless scripts, `BLOCKED`, dry runs and
+(`CREATE`, `NO_OP`, `PUT_MAPPING`, `BACKFILL`, `REINDEX` with Painless scripts, `BLOCKED`, dry runs and
 rollback); converts messages to documents and back; and compiles the proto query DSL, including
 full-text search, nested queries, sorting and point-in-time paging, into search requests. It ships
 adapters for Elasticsearch 8.x/9.x and OpenSearch 2.x/3.x on the official low-level REST clients,
 an optional Micronaut 4 module and a BOM, and requires Java 17. It is not API-compatible with the
 pre-1.0 `com.phatjam98.elasticsearch.*` packages, and the private geobuf dependency is gone. A
 `1.0.0-rc.1` pre-release precedes it.
+
+Zero-downtime migrations before 1.0.0 ([ADR 0007](docs/adr/0007-zero-downtime-reindex.md)):
+a `REINDEX` no longer write-blocks the live index by default (`ReindexMode.ZERO_DOWNTIME`: copy,
+catch up, swap, freeze, reconcile with conditional writes, resumable after a crash;
+`ReindexMode.BLOCKING` keeps the old behaviour); additions existing documents were never indexed
+into are applied in place with the new `BACKFILL` action; `rollback` copies the writes made since
+the reindex back by default (`RollbackMode.REVERSE_DELTA`) and returns an `Outcome` instead of
+`void`; the in-memory test engine's points in time are snapshots and a mapping update replaces
+`_meta`, like the engines.
 
 Engine SPI additions before 1.0.0 (conditional writes, `updateByQuery`, `putSettings`, hit
 metadata):

@@ -41,7 +41,7 @@ come from.
 | Spring Data Elasticsearch | Annotated Java entities, repositories, the Spring ecosystem | Mapping lives in Java annotations on a second model class; Spring only; OpenSearch needs a separate project |
 | Hibernate Search | Keeping an index in sync with JPA entities, both engines | Built around an ORM and a relational source of truth |
 | Raw `elasticsearch-java` / `opensearch-java` | Full control of every API | You hand-write mappings, migrations, JSON conversion and query building, per engine |
-| **elastic-protos** | The `.proto` is the schema: mappings, migrations, documents and queries derive from it | Covers indexing and search, not every engine API; reindex migrations block writes briefly (see [Limitations](#limitations)) |
+| **elastic-protos** | The `.proto` is the schema: mappings, migrations, documents and queries derive from it | Covers indexing and search, not every engine API; a zero-downtime reindex serves slightly stale reads until it has reconciled (see [Limitations](#limitations)) |
 
 The query DSL is itself a proto (`SearchCriteria`), so a search request can cross a gRPC boundary
 unchanged and be compiled on the server against the index definition.
@@ -52,8 +52,10 @@ unchanged and be compiled on the server against the index definition.
   (`elastic`, `elastic_field`) and optional programmatic overrides; no field-name guessing.
 - Content-hash-versioned indices (`documents-v1a2b3c4d`) behind a stable alias, with a recorded
   `_meta` block.
-- Migrations that plan before they act: `CREATE`, `NO_OP`, `PUT_MAPPING`, `REINDEX` (with optional
-  Painless scripts) or `BLOCKED`, a printable dry-run report, and rollback.
+- Migrations that plan before they act: `CREATE`, `NO_OP`, `PUT_MAPPING`, `BACKFILL` (in-place
+  update by query), `REINDEX` (with optional Painless scripts) or `BLOCKED`, a printable dry-run
+  report, and rollback. A reindex never blocks writes to the live index: it copies, catches up,
+  swaps the alias and reconciles with conditional writes, and resumes after a crash.
 - `ProtoDocumentCodec`: message to document and back, honouring renamed and ignored fields, geo
   types, 64-bit integers and timestamps.
 - `QueryCompiler`: `SearchCriteria` to a search body, validated against the mapped field types, with
@@ -410,7 +412,7 @@ Inside `forField` / `forMessage` callbacks, `skip`, `id` and `full_text` are `Bo
   cannot start an index name (empty; leading `-`, `_` or `+`; whitespace or any of
   `\ / * ? " < > | , # :`) is rejected with `IllegalArgumentException`. Implement
   `IndexNamingStrategy` for anything else.
-- `PUT_MAPPING` extends an index in place, so the index keeps the name of the mapping it was created
+- `PUT_MAPPING` and `BACKFILL` extend an index in place, so the index keeps the name of the mapping it was created
   with while its recorded hash moves on. If a later reindex targets that same name (typically when a
   deploy is reverted under `RemovedFieldPolicy.REINDEX`), the new index gets a generation suffix:
   `documents-vcccb33c0-g2`, then `-g3`, the lowest that does not exist yet (or that is a leftover of
@@ -428,7 +430,10 @@ Inside `forField` / `forMessage` callbacks, `skip`, `id` and `full_text` are `Bo
 }
 ```
 
-Indices without this block (created by other tools) are treated as hash `legacy`.
+Indices without this block (created by other tools) are treated as hash `legacy`. While a
+backfill or a zero-downtime reindex is in progress, `elastic_protos` also carries a `pending`
+object that lets the next run resume it (see [Zero-downtime reindex](#zero-downtime-reindex));
+the migrator writes the whole `_meta` object on every update, since the engines replace it.
 
 ## Migrations
 
@@ -464,13 +469,33 @@ MigrationResult result = migrator.apply(plan);
 | `CREATE` | The alias does not exist | Creates the index with settings, mappings and the alias in one request |
 | `NO_OP` | Hash matches, or the mappings already match | Nothing |
 | `PUT_MAPPING` | Only fields were added that existing documents can be indexed into (new top-level fields, new properties under an object that already has typed properties), or only `dynamic` changed | Extends the mapping of the current index in place |
-| `REINDEX` | A field changed type or any mapping parameter other than `dynamic` (analyzer, `search_analyzer`, format, `ignore_above`, normalizer, `copy_to`, `index`, `doc_values`, `null_value`, `coerce`, `enabled`, ...); a multi-field was added to an existing field (for example `name.keyword`); a typed property was added under an object whose current mapping is dynamic; or fields were removed under `RemovedFieldPolicy.REINDEX` | New index, copy, verify, swap the alias (below) |
+| `BACKFILL` | Fields were added that existing documents were never indexed into: a multi-field added to an existing field (for example `name.keyword`), or a typed property added under an object whose current mapping is dynamic; nothing else needs a reindex | Extends the mapping in place, then re-indexes every document of the current index with `_update_by_query` (below) |
+| `REINDEX` | A field changed type or any mapping parameter other than `dynamic` (analyzer, `search_analyzer`, format, `ignore_above`, normalizer, `copy_to`, `index`, `doc_values`, `null_value`, `coerce`, `enabled`, ...); fields were removed under `RemovedFieldPolicy.REINDEX`; or a `BACKFILL` with `backfill` off or a migration script for the change | New index, copy, swap the alias, reconcile ([Zero-downtime reindex](#zero-downtime-reindex)) |
 | `BLOCKED` | A concrete index is named like the alias; the alias points at several indices; or a breaking change with `allowReindex` off | Nothing; the outcome's status is `BLOCKED`, the plan's `reason` says why and `MigrationResult.ok()` is false |
 
-An added multi-field, or typed properties over what used to be a dynamic object, need a reindex
-because the engine indexes a document into a field only when the document is written: after a
-`PUT_MAPPING`, sorts and exact matches on `name.keyword` would silently miss every older document.
-The plan lists these fields in `diff().unindexedAdditions()`.
+An added multi-field, or typed properties over what used to be a dynamic object, need more than a
+`PUT_MAPPING` because the engine indexes a document into a field only when the document is
+written: sorts and exact matches on `name.keyword` would silently miss every older document. The
+plan lists these fields in `diff().unindexedAdditions()`.
+
+A `BACKFILL` keeps the index and its name:
+
+1. it puts the target mappings with `_meta.elastic_protos.pending = {"action": "backfill",
+   "to_hash": "<target hash>"}` (both engines replace `_meta` as a whole on a mapping update);
+2. runs `_update_by_query` over every document (`conflicts=proceed`, refresh, `reindexTimeout`),
+   which re-indexes each one under the new mapping. A document written concurrently counts as a
+   version conflict: its own write already indexed it under the new mapping. The result must be
+   complete: no failures, no timeout, and every document counted;
+3. writes `_meta` again without `pending`.
+
+A run that dies or fails between 1 and 3 leaves the marker, and the next plan is `BACKFILL` again
+even though the hash is current. A backfill is not gated by `allowReindex`. With `backfill` off,
+or when a [migration script](#migration-scripts) exists for the change (a script means the
+documents change), the item is a `REINDEX` instead.
+
+Turning a container's `dynamic` from `false` to `true` stays a `PUT_MAPPING`, with a warning:
+values that existing documents carry under it unmapped stay unindexed until those documents are
+written again.
 
 Removed fields are kept in the mapping with a warning by default (`RemovedFieldPolicy.KEEP`).
 
@@ -514,7 +539,10 @@ message Document {
 | `replicas` | `ReplicaPolicy.dataNodesMinusOne(1)`: data nodes minus one, between 0 and 1 |
 | `reindexTimeout` | 10 minutes |
 | `dryRun` | `false` |
-| `clearStaleWriteBlock` | `true`: lift a write block found on the alias target when it needs no reindex (see below) |
+| `clearStaleWriteBlock` | `true`: lift a write block found on the alias target when it is kept or copied without blocking (see below) |
+| `reindexMode` | `ZERO_DOWNTIME`; `BLOCKING` write-blocks the old index for the whole copy |
+| `swapGrace` | 5 seconds: how long a zero-downtime reindex waits after the alias swap before it write-blocks the old index |
+| `backfill` | `true`: apply unindexed additions with `BACKFILL`; `false` reindexes them |
 
 ### Dry run
 
@@ -529,50 +557,97 @@ IndexMigrator dryRun = IndexMigrator.builder()
 MigrationResult wouldDo = dryRun.bootstrap(Document.class);   // every outcome is DRY_RUN
 ```
 
-### Reindex and the write-block window
+### Zero-downtime reindex
 
-A `REINDEX`:
+A `REINDEX` never blocks writes to the index the alias points at. It runs in phases; the new index
+records the phase in `_meta.elastic_protos.pending`, which is how an interrupted run is picked up
+([ADR 0007](docs/adr/0007-zero-downtime-reindex.md)):
 
-1. creates the new index without the alias. It gets a generation suffix (see
-   [Index naming](#index-naming-and-metadata)) when the alias already points at an index with the
-   target name, or when an index with that name exists and is write-blocked: that is an old index
-   retained by an earlier reindex, kept for rollback, and it is never reused or deleted. If an
-   unblocked index with the target name already exists it is
-   a leftover from an earlier run that did not finish: it is reused when its `_meta` records the
-   target hash and the alias does not point at it, and otherwise deleted and recreated (logged as a
-   warning), because its mappings are unknown. If the alias already points at it, the item fails
-   without touching anything (another migration ran in the meantime; plan again);
-2. sets a write block on the old index and refreshes it;
-3. runs `_reindex` old to new, with the migration script if one is found;
-4. checks the copy: the engine must report no failures and no timeout, and without a migration
-   script both indices must hold the same number of documents. A script may drop or add documents
-   on purpose, so with a script a differing count is logged and added to `Outcome.warnings()`
-   instead of failing. Both counts are recorded in `Outcome.sourceCount()` and `destCount()`;
-5. swaps the alias atomically;
-6. deletes the old index if `deleteOldAfter`, otherwise retains it write-blocked
-   (`Outcome.retainedIndices()`).
+| Phase | What happens | `pending` on the new index |
+|---|---|---|
+| Prepare | Creates the new index without the alias (naming below), or reuses a leftover | `{"action": "reindex", "from": "<old>", "phase": "copying"}` |
+| Copy | `_reindex` old to new with `version_type: external` and `conflicts: proceed`, with the migration script if one is found | `copying` |
+| Catch up | The same `_reindex` again: under external versioning it copies only documents written during the copy | `copying` |
+| Snapshot | Refreshes the new index and opens a point in time over it (keep-alive `max(1h, reindexTimeout)`) | `phase: swapping`, `pit: <id>` |
+| Swap | Moves the alias atomically | `swapping` |
+| Freeze | Waits `swapGrace`, then write-blocks and refreshes the old index | `reconciling` |
+| Reconcile | Pages through the frozen old index (1,000 per page) and looks each page up in the snapshot. A document the snapshot lacks is `create`d in the new index; one whose version differs is written with `if_seq_no`/`if_primary_term` from the snapshot. Either fails with 409 when a write through the alias after the swap got there first, and that write is kept | `reconciling` |
+| Sweep | Pages through the snapshot; a document the old index no longer has (deleted after the copy) is deleted from the new index on its snapshot sequence number, so a document rewritten after the swap is kept | `reconciling` |
+| Finish | Closes the point in time, deletes the staging index, removes `pending`; then deletes the old index if `deleteOldAfter`, otherwise retains it write-blocked (`Outcome.retainedIndices()`) | none |
 
-**Writes through the alias fail from step 2 until step 5.** Plan for that window (retry writes,
-pause producers or run migrations in a maintenance slot); zero-downtime dual writes are out of
-scope.
+Every `_reindex` and `_update_by_query` result must be complete (no failures, no timeout, every
+document counted as created, updated, a no-op, deleted or a version conflict), and a reconcile or
+sweep write that fails with anything other than 409 or 404 fails the item. `Outcome.sourceCount()`
+is the frozen old index and `destCount()` the new index after the reconcile; writes after the swap
+make them differ legitimately, so a difference is a warning. `Outcome.reconcile()` reports
+`ReconcileStats(copied, superseded, ghostsDeleted, staleSkipped)`.
 
-If any step fails, the outcome is `FAILED` with a `MigrationException`, the old index is unblocked
-and the alias is read again: the new index is deleted only if this run created it and the alias
-does not point at it. If the alias swap reports an error but the alias in fact points at the new
-index alone (for example a lost response), the migration counts as applied.
+What writers and readers see:
 
-The `_reindex` runs as a server-side task that the engine polls. When the `reindexTimeout`
-expires, or polling fails, the task is cancelled (`POST /_tasks/{id}/_cancel`) and awaited for up
-to 30 seconds before the error is reported, so the cleanup above does not race a copy still in
-progress. Transient polling errors (5xx, 429, I/O) are retried three times with a short backoff
-first.
+- **Writes through the alias never fail**, except a write that resolved the alias to the old index
+  before the swap and reaches it after the grace period: it gets a `BLOCKED` error
+  (`cluster_block_exception`) and can be retried against the alias. It never lands silently in an
+  index that nobody reads.
+- **Reads** see the old index until the swap, then the new index. Between the catch-up and the end
+  of the reconcile, the new index can lack writes made to the old index after the catch-up pass.
+- **Last writer wins per document**: a write through the alias after the swap is never overwritten
+  by the reconcile, and a document deleted after the swap is not resurrected.
+- **Partial updates** (`_update`) after the swap apply to the document as the new index holds it.
+  If that copy is stale, field changes made to the old index between the catch-up and the swap are
+  lost for that document; full-document writes are not affected.
 
-**Write-block recovery.** A process killed between steps 2 and 5 leaves the old index, still
+**Migration scripts** run on every copy, and on reconciled documents through a staging index
+`<new index>-reconcile` (target mappings, no alias): the changed ids are copied with `_reindex` and
+an `ids` query, then written into the new index with the conditional writes above. A script must
+not change `_id`; one that does fails the item with the advice to use `BLOCKING`.
+
+**Recovery.** Planning finds an interrupted run from the alias and the marker alone:
+
+| Interrupted | Next `plan` | Next `apply` |
+|---|---|---|
+| Before the swap (marker on the new index, alias on the old one) | `REINDEX`, `resume.swapped() == false` | Reuses the new index and starts again from the copy; external versioning makes it idempotent |
+| After the swap (marker on the index the alias points at) | `REINDEX` with `resume` (`from`, `pitId`, `phase`, `swapped`), even when the hash is current | Freezes the old index if needed, reconciles and sweeps. Conditional writes make this idempotent; `_reindex` never runs again, since external versioning compares version numbers and the new index takes live writes |
+| After the swap, point in time expired | as above | Degraded reconcile: creates missing documents only, no sweep; `APPLIED` with a warning that counts the documents that differ (`staleSkipped`) and those only in the new index |
+| While finishing (`phase: finishing`) | as above | Removes the marker |
+
+`IndexMigrator.Builder.listener(MigrationListener)` is told about every phase, for metrics and
+logs; an exception from the listener stops the run where it stands, without cleanup, which is how
+the tests simulate crashes.
+
+A failure before the swap deletes the new index if this run created it and the alias does not
+point at it; the old index was never blocked. A failure after the swap leaves the alias on the new
+index and the marker in place: the outcome is `FAILED` and the next `plan` and `apply` resume.
+
+The new index gets a generation suffix (see [Index naming](#index-naming-and-metadata)) when the
+alias already points at an index with the target name, or when an index with that name exists and
+is write-blocked: that is an old index retained by an earlier reindex, kept for rollback, and it
+is never reused or deleted. An unblocked index with the target name is a leftover from an earlier
+run that did not finish: it is reused when its `_meta` records the target hash and the alias does
+not point at it, and otherwise deleted and recreated (logged as a warning). If the alias already
+points at it, the item fails without touching anything (another migration ran in the meantime;
+plan again).
+
+The `_reindex` and `_update_by_query` run as server-side tasks that the engine polls. When the
+`reindexTimeout` expires, or polling fails, the task is cancelled (`POST /_tasks/{id}/_cancel`)
+and awaited for up to 30 seconds before the error is reported. Transient polling errors (5xx, 429,
+I/O) are retried three times with a short backoff first.
+
+#### Blocking reindex
+
+`reindexMode(ReindexMode.BLOCKING)` keeps the simpler procedure: write-block and refresh the old
+index, one `_reindex` (with the script), check the copy (no failures, no timeout, and without a
+script both indices must hold the same number of documents; with a script a differing count is a
+warning), swap the alias, retain or delete the old index. **Writes through the alias fail from the
+write block until the swap.** If a step fails, the old index is unblocked and the new index deleted
+under the same rules as above.
+
+**Write-block recovery.** A process killed during a blocking reindex leaves the old index, still
 behind the alias, write-blocked. The next plan reports a warning for any alias target with
 `index.blocks.write=true`. With `clearStaleWriteBlock` (the default), `apply` lifts the block when
-that index needs no reindex (`NO_OP` or `PUT_MAPPING`); a `REINDEX` moves the alias to a new,
-unblocked index anyway. The option assumes that a write block on a live alias target was left by
-an interrupted reindex; turn it off if you set write blocks on live indices yourself.
+that index is kept (`NO_OP`, `PUT_MAPPING`, `BACKFILL`) or copied by a zero-downtime reindex; a
+blocking `REINDEX` moves the alias to a new, unblocked index anyway. The option assumes that a
+write block on a live alias target was left by an interrupted reindex; turn it off if you set
+write blocks on live indices yourself.
 
 ### Migration scripts
 
@@ -604,13 +679,19 @@ for (MigrationResult.Outcome outcome : result.outcomes()) {
   IndexPlan item = outcome.plan();
   if (item.action() == Action.REINDEX && outcome.status() == MigrationResult.Status.APPLIED
       && !outcome.retainedIndices().isEmpty()) {
-    migrator.rollback(item);   // alias back to item.currentIndex(), write block lifted
+    MigrationResult.Outcome back = migrator.rollback(item);   // to item.currentIndex()
   }
 }
 ```
 
-`rollback(item, previousIndex)` targets any index. The new index is left in place, and documents
-written to it after the swap are not copied back.
+`rollback(item, previousIndex, mode)` returns an `Outcome` (`index` is the restored index,
+`retainedIndices` the new one) and never throws for engine errors; the alias must point at the
+plan's target index only.
+
+| `RollbackMode` | What it does |
+|---|---|
+| `REVERSE_DELTA` (default) | Unblocks the previous index and runs the zero-downtime procedure from the new index into it, without a script: copy, catch up, swap the alias, freeze the new index, reconcile, sweep. Versions are not comparable in this direction, so the reconcile compares sources: documents that differ, including those a migration script changed, are copied back in their new form. Writes made after the reindex are carried back. Any failure before the swap aborts the rollback: the previous index is write-blocked again, the alias stays on the new index, and the outcome is `FAILED`, advising `ALIAS_ONLY`. The new index is retained write-blocked |
+| `ALIAS_ONLY` | Unblocks the previous index, swaps the alias, waits `swapGrace` and write-blocks the new index. Writes made to the new index since the reindex are not carried back |
 
 ### Run the bootstrap from one place
 
@@ -623,8 +704,9 @@ turns it off on the other instances.
 
 A reindex can take minutes. Whatever runs it must not be killed mid-copy: on Kubernetes, give the
 pod that migrates a startup probe budget (`failureThreshold` x `periodSeconds`) longer than the
-`reindexTimeout`, or run the migration as a Job. An interrupted reindex is recovered on the next
-run (see [write-block recovery](#reindex-and-the-write-block-window)), but writes fail until then.
+`reindexTimeout`, or run the migration as a Job. An interrupted reindex is resumed on the next run
+(see [Zero-downtime reindex](#zero-downtime-reindex)); until then the alias may serve the old index,
+or a new index that still lacks writes made after the catch-up pass.
 
 ## Document codec
 
@@ -1072,9 +1154,12 @@ that do not fit together such as a `max-page-size` below `default-size`, abort
 | `elastic-protos.bootstrap.delete-old` | `false` | Delete the old index after a successful reindex |
 | `elastic-protos.bootstrap.removed-fields` | `KEEP` | Or `REINDEX` |
 | `elastic-protos.bootstrap.dry-run` | `false` | Plan and log only |
-| `elastic-protos.bootstrap.clear-stale-write-block` | `true` | Lift a write block on an alias target that needs no reindex, assumed left by an interrupted reindex |
+| `elastic-protos.bootstrap.clear-stale-write-block` | `true` | Lift a write block on an alias target that is kept or copied without blocking, assumed left by an interrupted reindex |
 | `elastic-protos.bootstrap.fail-on-error` | `true` | Abort startup when an index fails or is blocked |
-| `elastic-protos.bootstrap.reindex-timeout` | `10m` | How long a reindex may take |
+| `elastic-protos.bootstrap.reindex-timeout` | `10m` | How long a reindex or backfill may take |
+| `elastic-protos.bootstrap.reindex-mode` | `ZERO_DOWNTIME` | Or `BLOCKING` (write-block the old index during the copy) |
+| `elastic-protos.bootstrap.swap-grace` | `5s` | Wait after the alias swap before the old index is write-blocked |
+| `elastic-protos.bootstrap.backfill` | `true` | Apply additions existing documents were never indexed into with an update by query; `false` reindexes |
 | `elastic-protos.defaults.shards` | `1` | Shards of new indices (message options win) |
 | `elastic-protos.defaults.replicas` | `-1` | Replicas of new indices; negative means data nodes minus one, at most 1 |
 | `elastic-protos.naming.prefix` | empty | Prefix for every alias and index, joined with `-` |
@@ -1105,7 +1190,14 @@ before 3.3); `pager(...)` always adapts.
 
 ## Limitations
 
-- A reindex blocks writes for its duration; there is no dual-write, zero-downtime mode.
+- During a zero-downtime reindex, reads through the alias between the swap and the end of the
+  reconcile can miss writes made to the old index after the catch-up pass; a partial `_update`
+  in that window applies to the possibly stale copy and can drop those field changes (see
+  [Zero-downtime reindex](#zero-downtime-reindex)). `BLOCKING` avoids both by failing writes for
+  the whole copy instead.
+- A document created after the catch-up pass and deleted through the alias after the swap,
+  before the reconcile reached it, is created again by the reconcile: the new index never held it,
+  so there is nothing to compare the delete with.
 - Settings of existing indices (shards, replicas, analysis) are never changed by a migration;
   settings-only changes need a mapping-visible step (see [Settings changes](#settings-changes)).
 - Keys of a `flattened` map are keywords: no numeric ranges, full text or per-key types unless the
