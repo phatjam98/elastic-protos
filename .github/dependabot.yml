@@ -8,6 +8,18 @@ updates:
     commit-message:
       prefix: build
       include: scope
+    ignore:
+      # Micronaut 4 is the supported line; a Micronaut 5 module (Java 25) is planned separately.
+      - dependency-name: 'io.micronaut*'
+        update-types: ['version-update:semver-major']
+      # protobuf stays on the 3.25 line: generated code loads on 3.25+ and 4.x runtimes, and Micronaut 4
+      # consumers are pinned to 3.25 by the Micronaut platform BOM (see CLAUDE.md).
+      - dependency-name: 'com.google.protobuf:protobuf-java'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'com.google.protobuf:protobuf-java-util'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'com.google.protobuf:protoc'
+        update-types: ['version-update:semver-major']
     groups:
       gradle-plugins:
         patterns:
