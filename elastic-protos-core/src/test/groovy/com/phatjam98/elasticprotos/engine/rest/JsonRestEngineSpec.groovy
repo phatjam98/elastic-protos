@@ -686,7 +686,6 @@ class JsonRestEngineSpec extends Specification {
     e.kind == kind
     e.status == status
     e.message == (type == null ? 'plain text failure' : "${type}: r")
-    kind != EngineException.Kind.BLOCKED
 
     where:
     status | type                                | kind
@@ -700,11 +699,12 @@ class JsonRestEngineSpec extends Specification {
     408    | null                                | EngineException.Kind.TIMEOUT
     429    | 'es_rejected_execution_exception'   | EngineException.Kind.TRANSIENT
     503    | null                                | EngineException.Kind.TRANSIENT
+    503    | 'cluster_block_exception'           | EngineException.Kind.TRANSIENT
     500    | 'null_pointer_exception'            | EngineException.Kind.OTHER
   }
 
   @Unroll
-  def "#status #type is BLOCKED, not an authorization failure"() {
+  def "#status #type is BLOCKED, not an authorization failure or transient"() {
     given:
     http.enqueue(status, [error: [type: type, reason: 'index [x] blocked by: [FORBIDDEN/8/index write (api)];']])
 
@@ -716,13 +716,13 @@ class JsonRestEngineSpec extends Specification {
     e.kind == EngineException.Kind.BLOCKED
     e.status == status
     e.message.startsWith("${type}: index [x] blocked by")
-    e.message.endsWith(suffix)
+    e.message.endsWith('(blocked: lift the block before retrying)')
 
     where:
-    status | type                      | suffix
-    403    | 'cluster_block_exception' | '(the index or cluster is write-blocked)'
-    429    | 'cluster_block_exception' | '(the index or cluster is write-blocked)'
-    400    | 'index_closed_exception'  | '(the index is closed)'
+    status | type
+    403    | 'cluster_block_exception'
+    429    | 'cluster_block_exception'
+    400    | 'index_closed_exception'
   }
 
   def "a BLOCKED reindex poll is not retried"() {
@@ -739,6 +739,20 @@ class JsonRestEngineSpec extends Specification {
     def e = thrown(EngineException)
     e.kind == EngineException.Kind.BLOCKED
     http.requests.size() == 4
+  }
+
+  def "a 503 cluster block during a reindex poll is retried"() {
+    given:
+    http.enqueue(200, [task: 'n:1'])
+        .enqueue(503, [error: [type: 'cluster_block_exception', reason: 'state not recovered']])
+        .enqueue(200, [completed: true, response: [total: 1, created: 1, failures: []]])
+
+    when:
+    def result = engine.reindex(ReindexRequest.of('a', 'b'))
+
+    then:
+    result.created() == 1
+    http.requests.size() == 3
   }
 
   def "transport failures become IO errors and close is forwarded"() {

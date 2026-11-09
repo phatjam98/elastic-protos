@@ -45,6 +45,7 @@ public final class JsonRestEngine implements SearchEngine {
 
   private static final String CLUSTER_BLOCK = "cluster_block_exception";
   private static final String INDEX_CLOSED = "index_closed_exception";
+  private static final String BLOCKED_SUFFIX = " (blocked: lift the block before retrying)";
 
   private static final Logger LOG = LoggerFactory.getLogger(JsonRestEngine.class);
   private static final Duration DEFAULT_POLL = Duration.ofMillis(500);
@@ -635,19 +636,19 @@ public final class JsonRestEngine implements SearchEngine {
     Kind kind = classify(response.status(), type);
     String message = type.isEmpty() ? reason : type + ": " + reason;
     if (kind == Kind.BLOCKED) {
-      message += INDEX_CLOSED.equals(type)
-          ? " (the index is closed)"
-          : " (the index or cluster is write-blocked)";
+      message += BLOCKED_SUFFIX;
     }
     throw new EngineException(kind, response.status(), message);
   }
 
   private static Kind classify(int status, String type) {
-    // A block answers 403 (index.blocks.write, read_only) or 429 (the read_only_allow_delete
-    // block of the flood-stage disk watermark) with cluster_block_exception; a closed index
-    // answers 400 with index_closed_exception. None of them is an authorization failure or goes
-    // away by retrying.
-    if (CLUSTER_BLOCK.equals(type) || INDEX_CLOSED.equals(type)) {
+    // An index or cluster block answers 403 (index.blocks.write, read or read_only) or 429 (the
+    // read_only_allow_delete block of the flood-stage disk watermark) with
+    // cluster_block_exception, and a closed index answers 400 with index_closed_exception. None
+    // of them is an authorization failure or goes away by retrying. A 503
+    // cluster_block_exception (state not recovered, no master) is a cluster that is still
+    // forming, so 5xx blocks fall through to TRANSIENT.
+    if (status < 500 && (CLUSTER_BLOCK.equals(type) || INDEX_CLOSED.equals(type))) {
       return Kind.BLOCKED;
     }
     if (type.contains("already_exists")) {

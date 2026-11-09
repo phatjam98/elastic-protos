@@ -605,7 +605,7 @@ public class InMemorySearchEngine implements SearchEngine {
     if (state.writeBlocked) {
       throw new EngineException(Kind.BLOCKED, 403,
           "cluster_block_exception: index [" + name + "] blocked by: [FORBIDDEN/8/index write"
-              + " (api)] (the index or cluster is write-blocked)");
+              + " (api)] (blocked: lift the block before retrying)");
     }
   }
 

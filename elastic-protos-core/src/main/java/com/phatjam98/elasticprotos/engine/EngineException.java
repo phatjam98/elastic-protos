@@ -13,10 +13,11 @@ public class EngineException extends RuntimeException {
     BAD_REQUEST,
     UNAUTHORIZED,
     /**
-     * The index or cluster is write-blocked ({@code cluster_block_exception}, for example a
-     * {@code index.blocks.write} or the flood-stage disk watermark's read-only block) or the index
-     * is closed ({@code index_closed_exception}). Retrying does not help until the block is
-     * lifted.
+     * The index or cluster is blocked: a {@code cluster_block_exception} with a 4xx status (for
+     * example an {@code index.blocks.write}, read or read-only block, or the flood-stage disk
+     * watermark's {@code read_only_allow_delete} block) or an {@code index_closed_exception}.
+     * Retrying does not help until the block is lifted, so it is not retried. A 5xx {@code
+     * cluster_block_exception} (state not recovered, no master) is {@link #TRANSIENT} instead.
      */
     BLOCKED,
     TRANSIENT,

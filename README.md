@@ -799,11 +799,12 @@ SearchEngine engine = ElasticsearchEngine.of(client);   // closing the engine cl
 writes, realtime `get` by id, `bulk`, `search`, `count`, point in time, `refresh` and `health`, all
 as JSON-shaped maps. Transport failures are `EngineException`s of kind `IO` that name the request
 and the hosts, for example `GET /documents/_alias on http://localhost:9200 failed: No route to host`.
-Engine errors are classified by `EngineException.getKind()`: `cluster_block_exception` (an
-`index.blocks.write` or read-only block, or the flood-stage disk watermark, answered with 403 or 429)
-and `index_closed_exception` are `BLOCKED`, not `UNAUTHORIZED` or `TRANSIENT`, since retrying does
-not help until the block is lifted.
-`BulkBuffer` batches writes by count, size and interval:
+Engine errors are classified by `EngineException.getKind()`. A `cluster_block_exception` with a 4xx
+status (a write, read or read-only block, answered with 403, or the flood-stage disk watermark's
+`read_only_allow_delete` block, answered with 429) and an `index_closed_exception` are `BLOCKED`, not
+`UNAUTHORIZED` or `TRANSIENT`: retrying does not help until the block is lifted, and the reindex poll
+loop does not retry them. A 5xx `cluster_block_exception` (state not recovered, no master) is
+`TRANSIENT` and is retried.
 
 ```java
 try (BulkBuffer buffer = BulkBuffer.builder()
