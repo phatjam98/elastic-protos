@@ -670,9 +670,13 @@ abstract class EngineIntegrationSpec extends Specification {
     when:
     IndexMigrator.builder().engine(engine).mapper(mapper).build().rollback(reindexPlan)
 
-    then:
+    then: 'the index rolled away from is retained write-blocked, and the original index stays blocked'
     engine.getAliases(documents.alias()).keySet() == [keywordDocuments.name()] as Set
     count(documents.alias()) == 6
+    !writeBlocked(keywordDocuments.name())
+    writeBlocked(reindexPlan.target().name())
+    writeBlocked(originalDocumentIndex)
+    count(originalDocumentIndex) == 6
 
     when:
     def written = engine.index(keywordDocuments.name(), 'doc-x',
@@ -681,6 +685,58 @@ abstract class EngineIntegrationSpec extends Specification {
     then:
     written != null
     count(documents.alias()) == 7
+  }
+
+  def "a fix-forward after a rollback reindexes into the next generation and leaves the retained index alone"() {
+    given: 'a dedicated alias with the sample set, reindexed v1 -> v2 and rolled back'
+    IndexNamingStrategy rbNaming = IndexNamingStrategy.prefixed(prefix + '-rb')
+    def v1Mapper = ProtoMapper.builder().naming(rbNaming).build()
+    def v2Mapper = ProtoMapper.builder().naming(rbNaming)
+        .overrides(MappingOverrides.builder().forField(Document.descriptor, 'title') { it.setType(EsType.KEYWORD) }.build())
+        .build()
+    IndexDefinition v1 = v1Mapper.map(Document)
+    IndexDefinition v2 = v2Mapper.map(Document)
+    def v1Migrator = IndexMigrator.builder().engine(engine).mapper(v1Mapper)
+        .scriptProvider(MigrationScriptProvider.none()).build()
+    def v2Migrator = IndexMigrator.builder().engine(engine).mapper(v2Mapper)
+        .scriptProvider(MigrationScriptProvider.none()).build()
+    assert v1Migrator.bootstrap(Document).ok()
+    def v1Codec = ProtoDocumentCodec.of(v1Mapper)
+    assert !engine.bulk(SampleData.documents().collect {
+      BulkOp.index(v1.alias(), v1Codec.idOf(it).get(), v1Codec.toDocument(it))
+    }).errors()
+    engine.refresh(v1.alias())
+    MigrationPlan forward = v2Migrator.plan(Document)
+    assert forward.items()*.action() == [Action.REINDEX]
+    assert v2Migrator.apply(forward).ok()
+    v2Migrator.rollback(forward.items()[0])
+
+    expect: 'v2 is retained, write-blocked, and v1 takes writes again'
+    engine.getAliases(v1.alias()).keySet() == [v1.name()] as Set
+    writeBlocked(v2.name())
+    !writeBlocked(v1.name())
+    count(v2.name()) == 6
+
+    when: 'a write lands on v1, then v2 is planned again'
+    engine.index(v1.alias(), 'doc-after-rollback',
+        v1Codec.toDocument(SampleData.documents()[0].toBuilder().setId('doc-after-rollback').build()),
+        IndexOptions.refreshed())
+    MigrationPlan again = v2Migrator.plan(Document)
+    MigrationResult result = v2Migrator.apply(again)
+
+    then: 'the fix-forward lands in v2-g2 with every document, and v2 is untouched'
+    again.items()*.action() == [Action.REINDEX]
+    again.items()[0].target().name() == v2.name() + '-g2'
+    again.items()[0].reason().contains(v2.name() + ' exists and is write-blocked')
+    result.ok()
+    result.outcomes()[0].sourceCount() == 7L
+    result.outcomes()[0].destCount() == 7L
+    engine.getAliases(v1.alias()).keySet() == [v2.name() + '-g2'] as Set
+    count(v1.alias()) == 7
+    engine.indexExists(v2.name())
+    writeBlocked(v2.name())
+    count(v2.name()) == 6
+    v2Migrator.plan(Document).items()*.action() == [Action.NO_OP]
   }
 
   // ------------------------------------------------------------------ errors
@@ -705,6 +761,10 @@ abstract class EngineIntegrationSpec extends Specification {
 
   long count(String index) {
     engine.count(index)
+  }
+
+  boolean writeBlocked(String index) {
+    String.valueOf(engine.getSettings(index).index?.blocks?.write) == 'true'
   }
 
   Set<String> docIds(SearchCriteria criteria, IndexDefinition index = documents) {

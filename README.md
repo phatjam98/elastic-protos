@@ -292,16 +292,22 @@ root dynamic mode and how singular messages, repeated messages and `Struct` are 
 Requested types are validated: `OBJECT`, `NESTED` and `FLATTENED` need a message or map field;
 `GEO_POINT` needs a string or a message with `lat`/`lon` (or `latitude`, `lng`, `longitude`)
 numbers; `GEO_SHAPE` needs a string or `GeoShape`; `DATE` on a message needs `Timestamp`. A
-mapped-name override (`elastic_field.name`) must be non-empty and contain no `.` or whitespace.
-Invalid options throw `MappingException`, naming the field path.
+mapped-name override (`elastic_field.name`) must be non-empty, contain no `.` or whitespace, and
+not start with `_` (reserved for metadata fields). Invalid options throw `MappingException`,
+naming the field path. The declared `index` and `alias` are lower-cased and must pass the same
+checks as a naming prefix (below), and the final index name must fit in 255 bytes; otherwise the
+mapper throws `MappingException` naming the message.
 
 **Field limits.** The engines refuse mappings with more than 50 `nested` fields
 (`index.mapping.nested_fields.limit`) or 1000 fields in total (`index.mapping.total_fields.limit`).
 The mapper checks both up front and throws a `MappingException` naming the message, the count and
 the limit. Fields are counted the way the engines count them: every mapped field, including
-`object` and `nested` containers and multi-fields such as `title.keyword`. If you raise the limits
-on the index (through `settings_json`), raise them in `MappingDefaults` too
-(`withMaxNestedFields`, `withMaxTotalFields`); `0` turns a check off.
+`object` and `nested` containers and multi-fields such as `title.keyword`; a `search_as_you_type`
+field counts 1 + its `max_shingle_size` (4 by default, for its `_2gram`, `_3gram` and
+`_index_prefix` sub-fields), and a `text` field counts one more for `index_prefixes` and one more
+for `index_phrases`. When the message's settings (`settings_json` or
+`MappingOverrides.setting`) declare either limit, that value is used for the message; otherwise
+`MappingDefaults` (`withMaxNestedFields`, `withMaxTotalFields`) decides. `0` turns a check off.
 
 ### Message options
 
@@ -389,7 +395,7 @@ Inside `forField` / `forMessage` callbacks, `skip`, `id` and `full_text` are `Bo
   [Settings changes](#settings-changes)).
 - `IndexNamingStrategy.prefixed("dev")` prefixes both alias and index (`dev-documents`,
   `dev-documents-vcccb33c0`), for example per environment. The prefix is lower-cased, and one that
-  cannot start an index name (empty; leading `-`, `_` or `+`; whitespace or any of
+  cannot start an index name (empty; leading `-`, `_`, `+` or `.`; whitespace or any of
   `\ / * ? " < > | , # :`) is rejected with `IllegalArgumentException`. Implement
   `IndexNamingStrategy` for anything else.
 - `PUT_MAPPING` extends an index in place, so the index keeps the name of the mapping it was created
@@ -444,14 +450,25 @@ MigrationResult result = migrator.apply(plan);
 |---|---|---|
 | `CREATE` | The alias does not exist | Creates the index with settings, mappings and the alias in one request |
 | `NO_OP` | Hash matches, or the mappings already match | Nothing |
-| `PUT_MAPPING` | Only fields were added that existing documents can be indexed into (new top-level fields, new properties under an object that already has typed properties), or only `dynamic` changed | Extends the mapping of the current index in place |
-| `REINDEX` | A field changed type or any mapping parameter other than `dynamic` (analyzer, `search_analyzer`, format, `ignore_above`, normalizer, `copy_to`, `index`, `doc_values`, `null_value`, `coerce`, `enabled`, ...); a multi-field was added to an existing field (for example `name.keyword`); a typed property was added under an object whose current mapping is dynamic; or fields were removed under `RemovedFieldPolicy.REINDEX` | New index, copy, verify, swap the alias (below) |
+| `PUT_MAPPING` | Only fields were added that no existing document holds unindexed (any addition under a parent whose current `dynamic` is `strict` or `true`), or only `dynamic` changed | Extends the mapping of the current index in place |
+| `REINDEX` | A field changed type or any mapping parameter other than `dynamic` (analyzer, `search_analyzer`, format, `ignore_above`, normalizer, `copy_to`, `index`, `doc_values`, `null_value`, `coerce`, `enabled`, ...); a multi-field was added to an existing field (for example `name.keyword`); a property was added under a parent whose current `dynamic` is `false` or `runtime`; or fields were removed under `RemovedFieldPolicy.REINDEX` | New index, copy, verify, swap the alias (below) |
 | `BLOCKED` | A concrete index is named like the alias; the alias points at several indices; or a breaking change with `allowReindex` off | Nothing; the outcome's status is `BLOCKED`, the plan's `reason` says why and `MigrationResult.ok()` is false |
 
-An added multi-field, or typed properties over what used to be a dynamic object, need a reindex
-because the engine indexes a document into a field only when the document is written: after a
-`PUT_MAPPING`, sorts and exact matches on `name.keyword` would silently miss every older document.
-The plan lists these fields in `diff().unindexedAdditions()`.
+The engine indexes a document into a field only when the document is written. An added
+multi-field therefore needs a reindex: after a `PUT_MAPPING`, sorts and exact matches on
+`name.keyword` would silently miss every older document. So does a property added under a parent
+whose current `dynamic` is `false` or `runtime` (inherited from the parents if not declared): old
+documents may carry that value in `_source` without it being indexed. Under `dynamic: true` the
+engine maps every key it sees, so a property missing from the current mapping is in no old document,
+and under `strict` no old document can have one; both are plain additions. Keys the engine picked
+up under `dynamic: true` are compared with the typed properties that replace them, so a differing
+type is a type change. The plan lists the additions that need a reindex in
+`diff().unindexedAdditions()`.
+
+`dynamic` is compared by its effective value (inherited when not declared, `true` at a root that
+declares none). When an object declares `dynamic` in the live mapping but the proto leaves it to
+inheritance, the `PUT_MAPPING` body sets it explicitly to the inherited value, because the engine
+keeps a declared `dynamic` that a later put omits.
 
 Removed fields are kept in the mapping with a warning by default (`RemovedFieldPolicy.KEEP`).
 
@@ -520,15 +537,22 @@ A `REINDEX`:
    retained by an earlier reindex, kept for rollback, and it is never reused or deleted. If an
    unblocked index with the target name already exists it is
    a leftover from an earlier run that did not finish: it is reused when its `_meta` records the
-   target hash and the alias does not point at it, and otherwise deleted and recreated (logged as a
-   warning), because its mappings are unknown. If the alias already points at it, the item fails
-   without touching anything (another migration ran in the meantime; plan again);
-2. sets a write block on the old index and refreshes it;
+   target hash and the alias does not point at it; recreated (logged as a warning) when it records
+   another hash and is empty; and when it records another hash and holds documents, the item fails
+   with a `MigrationException` naming the index and its document count, because deleting it could
+   lose data (inspect it, then delete it, or write-block it to keep it). If the alias already
+   points at it, the item fails without touching anything (another migration ran in the
+   meantime; plan again);
+2. sets a write block on the old index, refreshes it and counts its documents;
 3. runs `_reindex` old to new, with the migration script if one is found;
-4. checks the copy: the engine must report no failures and no timeout, and without a migration
-   script both indices must hold the same number of documents. A script may drop or add documents
-   on purpose, so with a script a differing count is logged and added to `Outcome.warnings()`
-   instead of failing. Both counts are recorded in `Outcome.sourceCount()` and `destCount()`;
+4. checks the copy. The engine must report no failures, no timeout and no version conflicts, must
+   have read every source document (`total` equals the source count) and must account for each one
+   (`created + updated + noops + deleted == total`). Without a migration script, or when the
+   target was a reused leftover, both indices must then hold the same number of documents. With a
+   script and a fresh target, the target must hold what the script let through (`created +
+   updated`); a script may drop documents on purpose, so a difference from the source count is
+   logged and added to `Outcome.warnings()` instead of failing. Both counts are recorded in
+   `Outcome.sourceCount()` and `destCount()`, on failed outcomes too;
 5. swaps the alias atomically;
 6. deletes the old index if `deleteOldAfter`, otherwise retains it write-blocked
    (`Outcome.retainedIndices()`).
@@ -590,8 +614,11 @@ for (MigrationResult.Outcome outcome : result.outcomes()) {
 }
 ```
 
-`rollback(item, previousIndex)` targets any index. The new index is left in place, and documents
-written to it after the swap are not copied back.
+`rollback(item, previousIndex)` targets any index. The index the alias moves away from is
+write-blocked first and left in place: documents written to it after the swap are not copied back,
+but they are kept. Being write-blocked, it counts as a retained index, so a later fix-forward to
+the same mapping never reuses or deletes it and reindexes into the next generation
+(`<name>-g2`) instead.
 
 ### Run the bootstrap from one place
 

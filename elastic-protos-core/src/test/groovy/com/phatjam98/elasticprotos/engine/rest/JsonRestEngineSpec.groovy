@@ -7,6 +7,7 @@ import com.phatjam98.elasticprotos.engine.EngineProduct
 import com.phatjam98.elasticprotos.engine.IndexOptions
 import com.phatjam98.elasticprotos.engine.Pit
 import com.phatjam98.elasticprotos.engine.ReindexRequest
+import com.phatjam98.elasticprotos.engine.ReindexResult
 import spock.lang.Specification
 import spock.lang.Unroll
 
@@ -201,17 +202,22 @@ class JsonRestEngineSpec extends Specification {
     given:
     http.enqueue(200, [task: 'node:1'])
         .enqueue(200, [completed: false])
-        .enqueue(200, [completed: true, response: [total: 3, created: 2, updated: 1, failures: [], took: 42, timed_out: false]])
+        .enqueue(200, [completed: true, response: [total: 6, created: 2, updated: 1, noops: 2, deleted: 1,
+                                                   version_conflicts: 0, failures: [], took: 42, timed_out: false]])
 
     when:
     def result = engine.reindex(ReindexRequest.of('docs', 'docs-v2').withScript('ctx._source.x = params.v', [v: 1]))
 
     then:
     result.ok()
-    result.total() == 3
+    result.total() == 6
     result.created() == 2
     result.updated() == 1
+    result.noops() == 2
+    result.deleted() == 1
+    result.versionConflicts() == 0
     result.tookMs() == 42
+    new ReindexResult(1, 1, 0, [], 0, false).noops() == 0
     http.requests*.path == ['/_reindex', '/_tasks/node:1', '/_tasks/node:1']
     http.requests[0].params == [refresh: 'true', wait_for_completion: 'false']
     http.requests[0].json() == [dest: [index: 'docs-v2'], script: [lang: 'painless', params: [v: 1], source: 'ctx._source.x = params.v'], source: [index: 'docs']]

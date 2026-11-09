@@ -114,7 +114,14 @@ public class ElasticProtosBootstrap implements ApplicationEventListener<StartupE
 
   private static String describe(MigrationResult result) {
     List<String> parts = new ArrayList<>();
-    for (MigrationResult.Outcome outcome : result.problems()) {
+    for (MigrationResult.Outcome outcome : result.outcomes()) {
+      if (outcome.ok()) {
+        if (!outcome.warnings().isEmpty()) {
+          parts.add(outcome.plan().alias() + ' ' + outcome.plan().action() + '/'
+              + outcome.status() + " warnings: " + String.join("; ", outcome.warnings()));
+        }
+        continue;
+      }
       StringBuilder part = new StringBuilder()
           .append(outcome.plan().alias())
           .append(' ')
@@ -126,6 +133,9 @@ public class ElasticProtosBootstrap implements ApplicationEventListener<StartupE
       }
       if (outcome.error() != null) {
         part.append(" (").append(outcome.error().getMessage()).append(')');
+      }
+      if (!outcome.warnings().isEmpty()) {
+        part.append(" warnings: ").append(String.join("; ", outcome.warnings()));
       }
       parts.add(part.toString());
     }

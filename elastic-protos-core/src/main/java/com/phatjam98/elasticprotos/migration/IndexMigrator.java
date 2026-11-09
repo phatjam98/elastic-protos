@@ -12,6 +12,7 @@ import com.phatjam98.elasticprotos.mapping.ProtoMapper;
 import com.phatjam98.elasticprotos.migration.MappingDiff.Change;
 import com.phatjam98.elasticprotos.migration.MigrationResult.Outcome;
 import com.phatjam98.elasticprotos.migration.MigrationResult.Status;
+import com.phatjam98.elasticprotos.util.Json;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -33,12 +34,14 @@ import org.slf4j.LoggerFactory;
  * <p>A reindex blocks writes to the old index from the moment the copy starts until the alias has
  * been swapped, so writes fail for that window; zero-downtime dual writes are out of scope. The
  * old index is retained, still write-blocked, unless {@link MigrationOptions#deleteOldAfter()};
- * {@link #rollback(IndexPlan, String)} points the alias back at it.
+ * {@link #rollback(IndexPlan, String)} points the alias back at it and write-blocks the index it
+ * moves away from, which is then retained the same way.
  *
  * <p>When a reindex fails, the old index is unblocked and the new index is deleted, but only if
- * this run created it and the alias does not point at it. An index that already has the target
- * name when a reindex starts is a leftover from an interrupted run: it is reused when its recorded
- * hash is the target hash and recreated otherwise. A write block found on the index an alias
+ * this run created it and the alias does not point at it. An unblocked index that already has the
+ * target name when a reindex starts is a leftover from an interrupted run: it is reused when its
+ * recorded hash is the target hash, recreated when it records another hash and is empty, and
+ * otherwise the item fails rather than delete documents. A write block found on the index an alias
  * points at is assumed to be left by an interrupted reindex and is cleared when that index needs
  * no reindex, unless {@link MigrationOptions#clearStaleWriteBlock()} is false.
  *
@@ -358,12 +361,18 @@ public final class IndexMigrator {
   /**
    * Points an alias back at the index it used before a reindex and unblocks writes to it.
    *
+   * <p>The index the alias moves away from is write-blocked first, so that it counts as an old
+   * index retained for rollback: a later migration never reuses or deletes it (it reindexes into
+   * the next generation instead), and the writes it took while it was live stay in it.
+   *
    * @param plan the reindex item that was applied
    * @param previousIndex the index to restore, usually {@link IndexPlan#currentIndex()}
    */
   public void rollback(IndexPlan plan, String previousIndex) {
     String alias = plan.alias();
-    LOG.info("rolling back {}: alias from {} to {}", alias, plan.target().name(), previousIndex);
+    LOG.info("rolling back {}: alias from {} to {}; {} is retained write-blocked", alias,
+        plan.target().name(), previousIndex, plan.target().name());
+    engine.setWriteBlock(plan.target().name(), true);
     engine.updateAliases(List.of(
         AliasAction.remove(plan.target().name(), alias),
         AliasAction.add(previousIndex, alias)));
@@ -393,6 +402,7 @@ public final class IndexMigrator {
   }
 
   private Outcome applyOne(IndexPlan item) {
+    Counts counts = new Counts();
     try {
       switch (item.action()) {
         case CREATE:
@@ -400,11 +410,12 @@ public final class IndexMigrator {
         case PUT_MAPPING:
           LOG.info("{}: adding fields {} to {}", item.alias(), paths(item.diff().added()),
               item.currentIndex());
-          engine.putMappings(item.currentIndex(), item.target().mappings());
+          engine.putMappings(item.currentIndex(),
+              withExplicitDynamic(item.target().mappings(), item.diff()));
           clearStaleWriteBlock(item);
           return new Outcome(item, Status.APPLIED, item.currentIndex(), List.of(), null);
         case REINDEX:
-          return reindex(item);
+          return reindex(item, counts);
         case BLOCKED:
           LOG.info("{}: blocked: {}", item.alias(), item.reason());
           return new Outcome(item, Status.BLOCKED, item.currentIndex(), List.of(), null);
@@ -415,8 +426,44 @@ public final class IndexMigrator {
       }
     } catch (RuntimeException e) {
       LOG.info("{}: {} failed: {}", item.alias(), item.action(), e.getMessage());
-      return new Outcome(item, Status.FAILED, item.currentIndex(), List.of(), e);
+      return new Outcome(item, Status.FAILED, item.currentIndex(), List.of(), e, counts.source,
+          counts.dest, List.of());
     }
+  }
+
+  /**
+   * Returns the mappings to put: the desired mappings, plus an explicit {@code dynamic} on every
+   * object whose {@code dynamic} the diff reports as changed but which the desired mappings leave
+   * to inheritance. The engine keeps a {@code dynamic} it was given once when a later put omits
+   * it, so without this the change would never be applied and every plan would report it again.
+   * The diff carries the effective (inherited) value as the change's {@code after}.
+   */
+  @SuppressWarnings("unchecked")
+  private static Map<String, Object> withExplicitDynamic(
+      Map<String, Object> desired, MappingDiff diff) {
+    Map<String, Object> body = Json.sortedCopy(desired);
+    for (Change change : diff.paramChanged()) {
+      if (!"dynamic".equals(DiffClassifier.param(change.path()))
+          || change.path().startsWith(DiffClassifier.ROOT)) {
+        continue;
+      }
+      String path = change.path().substring(0, change.path().lastIndexOf(':'));
+      Map<String, Object> node = body;
+      for (String name : path.split("\\.")) {
+        Object child = map(node.get("properties")).get(name);
+        if (!(child instanceof Map)) {
+          node = null;
+          break;
+        }
+        node = (Map<String, Object>) child;
+      }
+      if (node != null && !node.containsKey("dynamic") && change.after() != null) {
+        Object value = change.after();
+        node.put("dynamic", "true".equals(value) || "false".equals(value)
+            ? Boolean.valueOf(value.toString()) : value);
+      }
+    }
+    return body;
   }
 
   private boolean clearStaleWriteBlock(IndexPlan item) {
@@ -448,7 +495,7 @@ public final class IndexMigrator {
     return settings;
   }
 
-  private Outcome reindex(IndexPlan item) {
+  private Outcome reindex(IndexPlan item, Counts counts) {
     IndexDefinition target = item.target();
     String alias = target.alias();
     String current = item.currentIndex();
@@ -457,11 +504,10 @@ public final class IndexMigrator {
     final boolean createdNext = prepareTarget(target, current);
     LOG.info("{}: blocking writes to {}", alias, current);
     engine.setWriteBlock(current, true);
-    long before;
-    long after;
     List<String> warnings = new ArrayList<>();
     try {
       engine.refresh(current);
+      counts.source = engine.count(current);
       ReindexRequest request = ReindexRequest.of(current, next)
           .withTimeout(options.reindexTimeout());
       String fromHash = item.currentHash() == null ? LEGACY_HASH : item.currentHash();
@@ -479,19 +525,12 @@ public final class IndexMigrator {
             + (result.timedOut() ? "timed out" : result.failures().size() + " failures, first "
                 + result.failures().get(0)));
       }
-      before = engine.count(current);
-      after = engine.count(next);
-      if (before != after) {
-        if (script.isEmpty()) {
-          throw new MigrationException("reindex " + current + " -> " + next + " copied " + after
-              + " of " + before + " documents");
-        }
-        // A script may drop or add documents on purpose; the engine reported no failures.
-        String warning = "the migration script left " + after + " documents in " + next
-            + " from " + before + " in " + current;
-        LOG.warn("{}: {}", alias, warning);
-        warnings.add(warning);
-      }
+      counts.dest = engine.count(next);
+      checkCopy(current, next, result, counts.source, counts.dest, script.isPresent(),
+          createdNext).ifPresent(warning -> {
+            LOG.warn("{}: {}", alias, warning);
+            warnings.add(warning);
+          });
     } catch (RuntimeException e) {
       LOG.warn("{}: reindex {} -> {} failed: {}", alias, current, next, e.getMessage());
       undo(alias, current, next, createdNext);
@@ -520,17 +559,71 @@ public final class IndexMigrator {
     if (options.deleteOldAfter()) {
       LOG.info("{}: deleting old index {}", alias, current);
       engine.deleteIndex(current);
-      return new Outcome(item, Status.APPLIED, next, List.of(), null, before, after, warnings);
+      return new Outcome(item, Status.APPLIED, next, List.of(), null, counts.source,
+          counts.dest, warnings);
     }
     LOG.info("{}: retaining old index {} (write-blocked)", alias, current);
-    return new Outcome(item, Status.APPLIED, next, List.of(current), null, before, after,
-        warnings);
+    return new Outcome(item, Status.APPLIED, next, List.of(current), null, counts.source,
+        counts.dest, warnings);
+  }
+
+  /**
+   * Verifies a finished copy. The engine must have read every source document ({@code total}
+   * equals the source count) and accounted for each one ({@code created + updated + noops +
+   * deleted == total}) without version conflicts. Without a script, or when the target was a
+   * reused leftover, both indices must then hold the same number of documents. With a script and
+   * a freshly created target, the target holds what the script let through ({@code created +
+   * updated}); a difference from the source count is returned as a warning.
+   *
+   * @return a warning, or empty
+   * @throws MigrationException if the copy is not accounted for
+   */
+  private static Optional<String> checkCopy(String current, String next, ReindexResult result,
+      long source, long dest, boolean scripted, boolean createdNext) {
+    String copy = "reindex " + current + " -> " + next;
+    if (result.total() != source) {
+      throw new MigrationException(copy + " read " + result.total() + " of " + source
+          + " documents");
+    }
+    long accounted = result.created() + result.updated() + result.noops() + result.deleted();
+    if (accounted != result.total()) {
+      throw new MigrationException(copy + " accounted for " + accounted + " of "
+          + result.total() + " documents (created " + result.created() + ", updated "
+          + result.updated() + ", noops " + result.noops() + ", deleted " + result.deleted()
+          + ")");
+    }
+    if (result.versionConflicts() != 0) {
+      throw new MigrationException(copy + " hit " + result.versionConflicts()
+          + " version conflicts");
+    }
+    if (!scripted || !createdNext) {
+      if (source != dest) {
+        throw new MigrationException(copy + " copied " + dest + " of " + source + " documents"
+            + (createdNext ? "" : " into a reused index"));
+      }
+      return Optional.empty();
+    }
+    long kept = result.created() + result.updated();
+    if (dest != kept) {
+      throw new MigrationException(copy + " holds " + dest + " documents but the engine wrote "
+          + kept);
+    }
+    return dest == source ? Optional.empty() : Optional.of("the migration script left " + dest
+        + " documents in " + next + " from " + source + " in " + current);
+  }
+
+  /** Document counts of a reindex, kept so that a failed outcome reports them too. */
+  private static final class Counts {
+    private Long source;
+    private Long dest;
   }
 
   /**
    * Makes sure the reindex target exists with the target mappings. An index that already has the
    * target name is a leftover from an earlier run that did not finish: it is reused when it records
-   * the target hash, and deleted and recreated otherwise, since its mappings are unknown. The index
+   * the target hash (the copy check then requires equal counts), deleted and recreated when it
+   * records another hash and holds no documents, and otherwise the item fails, since deleting it
+   * could lose data. The index
    * the alias points at, and a write-blocked index (an old index retained after an earlier
    * reindex, which planning skips), are never touched: the item fails instead.
    *
@@ -558,7 +651,14 @@ public final class IndexMigrator {
             alias, next, hash);
         return false;
       }
-      LOG.warn("{}: {} is left over from an earlier attempt with hash {} instead of {};"
+      long documents = engine.count(next);
+      if (documents > 0) {
+        throw new MigrationException(next + " exists with hash " + hash + " instead of "
+            + target.contentHash() + " and holds " + documents + " documents while migrating"
+            + " from " + current + "; it is not deleted. Inspect it, then delete it or"
+            + " write-block it to keep it and plan again");
+      }
+      LOG.warn("{}: {} is an empty leftover from an earlier attempt with hash {} instead of {};"
           + " deleting and recreating it", alias, next, hash, target.contentHash());
       engine.deleteIndex(next);
     }

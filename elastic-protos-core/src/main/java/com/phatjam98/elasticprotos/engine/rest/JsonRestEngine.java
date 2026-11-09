@@ -241,7 +241,10 @@ public final class JsonRestEngine implements SearchEngine {
             number(response.get("updated")),
             list(response.get("failures")),
             number(response.get("took")),
-            Boolean.TRUE.equals(response.get("timed_out")));
+            Boolean.TRUE.equals(response.get("timed_out")),
+            number(response.get("noops")),
+            number(response.get("deleted")),
+            number(response.get("version_conflicts")));
       }
       if (System.nanoTime() > deadline) {
         throw new EngineException(Kind.TIMEOUT, 0,

@@ -15,8 +15,9 @@ import java.util.List;
  * @param paramChanged mapping parameters that differ on fields present in both
  * @param settingsChanged whether a desired setting other than shard and replica counts differs
  * @param unindexedAdditions the subset of {@code added} that existing documents were never indexed
- *     into: a multi-field added under an existing field, or a typed property added under an object
- *     whose current mapping is dynamic. Putting the mapping would leave them empty for every old
+ *     into: a multi-field added under an existing field, or a property added under a parent whose
+ *     current effective {@code dynamic} is {@code false} or {@code runtime} (old values sit in
+ *     {@code _source} unindexed). Putting the mapping would leave them empty for every old
  *     document, so they need a reindex
  */
 public record MappingDiff(

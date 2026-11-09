@@ -80,16 +80,41 @@ class DiffClassifierSpec extends Specification {
     'new field that carries multi-fields'           | root([a: KEYWORD])                                          | root([a: KEYWORD, t: TEXT + [fields: [keyword: KEYWORD]]])                             | ['t']             | []                | []            | Action.PUT_MAPPING
     'new top-level field under a dynamic root'      | root([a: KEYWORD], [dynamic: 'true'])                       | root([a: KEYWORD, b: KEYWORD], [dynamic: 'true'])                                      | ['b']             | []                | []            | Action.PUT_MAPPING
     'property under typed properties'               | root([o: [properties: [a: KEYWORD]]], [dynamic: 'true'])    | root([o: [properties: [a: KEYWORD, b: KEYWORD]]], [dynamic: 'true'])                   | ['o.b']           | []                | []            | Action.PUT_MAPPING
-    'typed property over dynamic: true'             | root([m: DYN])                                              | root([m: [type: 'object', dynamic: 'strict', properties: [a: KEYWORD]]])               | ['m.a']           | ['m.a']           | ['m:dynamic'] | Action.REINDEX
-    'typed property over dynamic: true, keys kept'  | root([m: DYN + [properties: [tier: KEYWORD]]])              | root([m: [type: 'object', dynamic: 'strict', properties: [tier: KEYWORD, a: KEYWORD]]]) | ['m.a']          | ['m.a']           | ['m:dynamic'] | Action.REINDEX
+    'typed property over dynamic: true'             | root([m: DYN])                                              | root([m: [type: 'object', dynamic: 'strict', properties: [a: KEYWORD]]])               | ['m.a']           | []                | ['m:dynamic'] | Action.PUT_MAPPING
+    'typed property over dynamic: true, keys kept'  | root([m: DYN + [properties: [tier: KEYWORD]]])              | root([m: [type: 'object', dynamic: 'strict', properties: [tier: KEYWORD, a: KEYWORD]]]) | ['m.a']          | []                | ['m:dynamic'] | Action.PUT_MAPPING
     'typed over dynamic: true, only picked-up keys' | root([m: DYN + [properties: [tier: KEYWORD]]])              | root([m: [type: 'object', dynamic: 'strict', properties: [tier: KEYWORD]]])            | []                | []                | ['m:dynamic'] | Action.PUT_MAPPING
-    'typed property over a dynamic nested field'    | root([n: NESTED_DYN])                                       | root([n: [type: 'nested', properties: [a: KEYWORD]]])                                  | ['n.a']           | ['n.a']           | ['n:dynamic'] | Action.REINDEX
-    'empty object under a dynamic root'             | root([o: [type: 'object']], [dynamic: 'true'])              | root([o: [type: 'object', properties: [a: KEYWORD]]], [dynamic: 'true'])               | ['o.a']           | ['o.a']           | []            | Action.REINDEX
-    'empty object, root without dynamic'            | [properties: [o: [type: 'object']]]                         | [properties: [o: [properties: [a: KEYWORD]]]]                                          | ['o.a']           | ['o.a']           | []            | Action.REINDEX
-    'empty object inheriting dynamic from a parent' | root([p: [properties: [o: [type: 'object']]]], [dynamic: true]) | root([p: [properties: [o: [properties: [a: KEYWORD]]]]], [dynamic: true])          | ['p.o.a']         | ['p.o.a']         | []            | Action.REINDEX
+    'typed property over a dynamic nested field'    | root([n: NESTED_DYN])                                       | root([n: [type: 'nested', properties: [a: KEYWORD]]])                                  | ['n.a']           | []                | ['n:dynamic'] | Action.PUT_MAPPING
+    'empty object under a dynamic root'             | root([o: [type: 'object']], [dynamic: 'true'])              | root([o: [type: 'object', properties: [a: KEYWORD]]], [dynamic: 'true'])               | ['o.a']           | []                | []            | Action.PUT_MAPPING
+    'empty object, root without dynamic'            | [properties: [o: [type: 'object']]]                         | [properties: [o: [properties: [a: KEYWORD]]]]                                          | ['o.a']           | []                | []            | Action.PUT_MAPPING
     'empty object under a strict root'              | root([o: [type: 'object']])                                 | root([o: [type: 'object', properties: [a: KEYWORD]]])                                  | ['o.a']           | []                | []            | Action.PUT_MAPPING
-    'empty object that turns dynamic off'           | root([o: [type: 'object', dynamic: 'false']], [dynamic: 'true']) | root([o: [type: 'object', dynamic: false, properties: [a: KEYWORD]]], [dynamic: 'true']) | ['o.a']     | []                | []            | Action.PUT_MAPPING
-    'empty object under a parent that is strict'    | root([p: [dynamic: 'strict', properties: [o: [type: 'object']]]], [dynamic: 'true']) | root([p: [dynamic: 'strict', properties: [o: [properties: [a: KEYWORD]]]]], [dynamic: 'true']) | ['p.o.a'] | [] | [] | Action.PUT_MAPPING
+    'property under dynamic: false'                 | root([o: [dynamic: 'false', properties: [a: KEYWORD]]])     | root([o: [dynamic: false, properties: [a: KEYWORD, b: KEYWORD]]])                      | ['o.b']           | ['o.b']           | []            | Action.REINDEX
+    'property under dynamic: runtime'               | root([o: [dynamic: 'runtime', properties: [a: KEYWORD]]])   | root([o: [dynamic: 'runtime', properties: [a: KEYWORD, b: KEYWORD]]])                  | ['o.b']           | ['o.b']           | []            | Action.REINDEX
+    'empty object that had dynamic: false'          | root([o: [type: 'object', dynamic: 'false']], [dynamic: 'true']) | root([o: [type: 'object', dynamic: false, properties: [a: KEYWORD]]], [dynamic: 'true']) | ['o.a']     | ['o.a']           | []            | Action.REINDEX
+    'dynamic: false inherited from the root'        | root([o: [properties: [a: KEYWORD]]], [dynamic: 'false'])   | root([o: [properties: [a: KEYWORD, b: KEYWORD]]], [dynamic: false])                    | ['o.b']           | ['o.b']           | []            | Action.REINDEX
+    'top-level field under a dynamic: false root'   | root([a: KEYWORD], [dynamic: 'false'])                      | root([a: KEYWORD, b: KEYWORD], [dynamic: 'false'])                                     | ['b']             | ['b']             | []            | Action.REINDEX
+    'top-level field under a runtime root'          | root([a: KEYWORD], [dynamic: 'runtime'])                    | root([a: KEYWORD, b: KEYWORD], [dynamic: 'runtime'])                                   | ['b']             | ['b']             | []            | Action.REINDEX
+    'property under a strict object, false root'    | root([o: [dynamic: 'strict', properties: [a: KEYWORD]]], [dynamic: 'false']) | root([o: [dynamic: 'strict', properties: [a: KEYWORD, b: KEYWORD]]], [dynamic: 'false']) | ['o.b'] | [] | [] | Action.PUT_MAPPING
+    'property where the desired side turns dynamic off' | root([o: [properties: [a: KEYWORD]]])                   | root([o: [dynamic: false, properties: [a: KEYWORD, b: KEYWORD]]])                      | ['o.b']           | []                | ['o:dynamic'] | Action.PUT_MAPPING
+  }
+
+  @Unroll
+  def "effective dynamic: #description"() {
+    when:
+    MappingDiff diff = DiffClassifier.diff(existing, desired, [:], [:])
+
+    then:
+    diff.typeChanged()*.path == typeChanged
+    diff.paramChanged().collect { [it.path(), it.before(), it.after()] } == paramChanged
+    diff.removed().isEmpty()
+    DiffClassifier.classify(diff, RemovedFieldPolicy.REINDEX) == action
+
+    where:
+    description                                    | existing                                                     | desired                                                                      | typeChanged | paramChanged                        | action
+    'picked-up key with another type'              | root([m: DYN + [properties: [tier: TEXT]]])                  | root([m: [type: 'object', dynamic: 'strict', properties: [tier: KEYWORD]]])  | ['m.tier']  | [['m:dynamic', 'true', 'strict']]   | Action.REINDEX
+    'explicit true left to inheritance'            | root([o: [dynamic: 'true', properties: [a: KEYWORD]]])       | root([o: [properties: [a: KEYWORD]]])                                        | []          | [['o:dynamic', 'true', 'strict']]   | Action.PUT_MAPPING
+    'explicit value equal to the inherited one'    | root([o: [dynamic: 'strict', properties: [a: KEYWORD]]])     | root([o: [properties: [a: KEYWORD]]])                                        | []          | []                                  | Action.NO_OP
+    'inherited value changes with the root'        | root([o: [properties: [a: KEYWORD]]])                        | root([o: [properties: [a: KEYWORD]]], [dynamic: 'false'])                    | []          | [['<root>:dynamic', 'strict', 'false']] | Action.PUT_MAPPING
+    'root without dynamic defaults to true'        | [properties: [a: KEYWORD]]                                   | root([a: KEYWORD], [dynamic: 'true'])                                        | []          | []                                  | Action.NO_OP
   }
 
   @Unroll

@@ -1,6 +1,9 @@
 package com.phatjam98.elasticprotos.micronaut
 
+import com.phatjam98.elasticprotos.mapping.ProtoMapper
 import com.phatjam98.elasticprotos.migration.Action
+import com.phatjam98.elasticprotos.migration.IndexPlan
+import com.phatjam98.elasticprotos.migration.MappingDiff
 import com.phatjam98.elasticprotos.migration.MigrationResult
 import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
@@ -103,6 +106,25 @@ class BootstrapSpec extends Specification {
 
     cleanup:
     ctx?.close()
+  }
+
+  def "the problem description includes outcome warnings"() {
+    given:
+    def mapper = ProtoMapper.withDefaults()
+    def plan = { Class type, Action action ->
+      new IndexPlan(mapper.map(type), action, 'old', 'h', MappingDiff.empty(), 'why', [])
+    }
+    def result = new MigrationResult([
+        new MigrationResult.Outcome(plan(Document, Action.REINDEX), MigrationResult.Status.APPLIED, 'new', ['old'],
+            null, 3L, 2L, ['the migration script left 2 documents']),
+        new MigrationResult.Outcome(plan(Firm, Action.REINDEX), MigrationResult.Status.FAILED, 'old', [],
+            new IllegalStateException('boom'), 3L, 1L, ['first warning', 'second warning']),
+    ])
+
+    expect:
+    ElasticProtosBootstrap.describe(result) ==
+        'documents REINDEX/APPLIED warnings: the migration script left 2 documents, ' +
+        'firms REINDEX/FAILED: why (boom) warnings: first warning; second warning'
   }
 
   def "a dry run creates nothing"() {

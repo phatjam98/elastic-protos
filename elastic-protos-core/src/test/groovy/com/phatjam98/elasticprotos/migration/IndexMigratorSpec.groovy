@@ -208,6 +208,30 @@ class IndexMigratorSpec extends Specification {
     again.toReport().contains("up to date (hash ${DEFAULT.map(Document).contentHash()})")
   }
 
+  def "an explicit dynamic: true the proto now leaves to inheritance is put explicitly, so the next plan is a no-op"() {
+    given: 'the live index declares dynamic: true on parties, which the proto does not'
+    Map live = Json.sortedCopy(DEFAULT.map(Document).mappings())
+    live.properties.parties.dynamic = true
+    live._meta.elastic_protos.hash = 'oldhash1'
+    engine.createIndex(DOC_V1, [:], live, ['documents'] as Set)
+
+    when:
+    def plan = migrator().plan(Document)
+
+    then:
+    plan.items()[0].action() == Action.PUT_MAPPING
+    plan.items()[0].diff().paramChanged() == [new MappingDiff.Change('parties:dynamic', 'true', 'strict')]
+
+    when:
+    def result = migrator().apply(plan)
+
+    then: 'the put carried the inherited value, and the plan converges'
+    result.ok()
+    engine.getMappings('documents').properties.parties.dynamic == 'strict'
+    migrator().plan(Document).items()[0].action() == Action.NO_OP
+    !migrator().plan(Document).items()[0].diff().hasFieldChanges()
+  }
+
   def "a dynamic change is compatible"() {
     given:
     migrator().bootstrap(Document)
@@ -290,8 +314,8 @@ class IndexMigratorSpec extends Specification {
         "createIndex ${DOC_V2}".toString(),
         "setWriteBlock ${DOC_V1}=true".toString(),
         "refresh ${DOC_V1}".toString(),
-        "reindex ${DOC_V1} -> ${DOC_V2}".toString(),
         "search ${DOC_V1}".toString(),
+        "reindex ${DOC_V1} -> ${DOC_V2}".toString(),
         "search ${DOC_V2}".toString(),
         "updateAliases [remove ${DOC_V1} documents, add ${DOC_V2} documents]".toString(),
     ]
@@ -302,6 +326,7 @@ class IndexMigratorSpec extends Specification {
     then:
     engine.indices() == [(DOC_V1): ['documents'] as Set, (DOC_V2): [] as Set]
     !engine.isWriteBlocked(DOC_V1)
+    engine.isWriteBlocked(DOC_V2)
   }
 
   def "rollback without an explicit index uses the plan's current index"() {
@@ -355,12 +380,11 @@ class IndexMigratorSpec extends Specification {
     engine.documents(DOC_V2).size() == 2
   }
 
-  def "a leftover target index with another hash or none is deleted and recreated: #label"() {
+  def "an empty leftover target index with another hash or none is deleted and recreated: #label"() {
     given:
     migrator().bootstrap(Document)
     seedDocuments(2)
     engine.createIndex(DOC_V2, [:], leftoverMappings, [] as Set)
-    engine.index(DOC_V2, 'stale', [id: 'stale'], IndexOptions.defaults())
     engine.clearLog()
 
     when:
@@ -377,6 +401,67 @@ class IndexMigratorSpec extends Specification {
     label        | leftoverMappings
     'wrong hash' | DEFAULT.map(Document).mappings()
     'no hash'    | [dynamic: 'false', properties: [id: [type: 'keyword']]]
+  }
+
+  def "a leftover target index that holds documents and another hash is never deleted: #label"() {
+    given:
+    migrator().bootstrap(Document)
+    seedDocuments(2)
+    engine.createIndex(DOC_V2, [:], leftoverMappings, [] as Set)
+    engine.index(DOC_V2, 'stale', [id: 'stale'], IndexOptions.defaults())
+    engine.clearLog()
+
+    when:
+    def result = migrator(TITLE_KEYWORD).bootstrap(Document)
+    def outcome = result.outcomes()[0]
+
+    then:
+    outcome.status() == MigrationResult.Status.FAILED
+    outcome.error() instanceof MigrationException
+    outcome.error().message.contains("${DOC_V2} exists with hash ${hash} instead of ${TITLE_KEYWORD.map(Document).contentHash()} and holds 1 documents")
+    outcome.error().message.contains('it is not deleted')
+    !engine.log().contains("deleteIndex ${DOC_V2}".toString())
+    engine.documents(DOC_V2).keySet() == ['stale'] as Set
+    engine.indices()[DOC_V1] == ['documents'] as Set
+    !engine.isWriteBlocked(DOC_V1)
+
+    where:
+    label        | leftoverMappings                                         | hash
+    'wrong hash' | DEFAULT.map(Document).mappings()                         | DEFAULT.map(Document).contentHash()
+    'no hash'    | [dynamic: 'false', properties: [id: [type: 'keyword']]] | 'legacy'
+  }
+
+  def "rollback write-blocks the index it leaves, so a fix-forward reindexes into the next generation"() {
+    given: 'A -> C by reindex, then rolled back to A, which takes new writes'
+    migrator().bootstrap(Document)
+    seedDocuments(2)
+    def forward = migrator(TITLE_KEYWORD).plan(Document)
+    assert migrator(TITLE_KEYWORD).apply(forward).ok()
+    engine.index('documents', 'written-to-c', [id: 'written-to-c', title: 'kept'], IndexOptions.defaults())
+    migrator(TITLE_KEYWORD).rollback(forward.items()[0])
+    engine.index('documents', 'written-to-a', [id: 'written-to-a', title: 'T'], IndexOptions.defaults())
+
+    expect: 'C is retained, write-blocked, with the writes it took while it was live'
+    engine.indices()[DOC_V1] == ['documents'] as Set
+    !engine.isWriteBlocked(DOC_V1)
+    engine.isWriteBlocked(DOC_V2)
+    engine.documents(DOC_V2).keySet() == ['d0', 'd1', 'written-to-c'] as Set
+
+    when: 'C is planned again'
+    engine.clearLog()
+    def again = migrator(TITLE_KEYWORD).plan(Document).items()[0]
+    def result = migrator(TITLE_KEYWORD).apply(new MigrationPlan([again]))
+
+    then: 'the fix-forward lands in C-g2 and C is untouched'
+    again.action() == Action.REINDEX
+    again.target().name() == "${DOC_V2}-g2".toString()
+    again.reason().contains("${DOC_V2} exists and is write-blocked (retained from an earlier reindex)")
+    result.ok()
+    engine.indices()["${DOC_V2}-g2".toString()] == ['documents'] as Set
+    engine.documents("${DOC_V2}-g2".toString()).keySet() == ['d0', 'd1', 'written-to-a'] as Set
+    engine.documents(DOC_V2).keySet() == ['d0', 'd1', 'written-to-c'] as Set
+    engine.isWriteBlocked(DOC_V2)
+    !engine.log().any { it == "deleteIndex ${DOC_V2}".toString() || it == "createIndex ${DOC_V2}".toString() }
   }
 
   def "a target index the alias already points at is never reused or deleted"() {
@@ -668,7 +753,7 @@ class IndexMigratorSpec extends Specification {
 
   def "with a migration script, a differing document count is a warning, not a failure"() {
     given: 'a script that the engine runs and that drops a document'
-    def dropping = new CannedReindexEngine(answer: new ReindexResult(3, 2, 0, [], 1, false), dropOne: true)
+    def dropping = new CannedReindexEngine(answer: new ReindexResult(3, 2, 0, [], 1, false, 1, 0, 0), dropOne: true)
     copyInto(dropping)
     MigrationScriptProvider script = { alias, from, to -> Optional.of("ctx._source.remove('body')") } as MigrationScriptProvider
     def scripted = IndexMigrator.builder().engine(dropping).mapper(TITLE_KEYWORD).scriptProvider(script).build()
@@ -685,6 +770,53 @@ class IndexMigratorSpec extends Specification {
     outcome.destCount() == 2L
     outcome.warnings() == ["the migration script left 2 documents in ${DOC_V2} from 3 in ${DOC_V1}".toString()]
     dropping.indices()[DOC_V2] == ['documents'] as Set
+  }
+
+  def "the copy must be accounted for: #label"() {
+    given:
+    def canned = new CannedReindexEngine(answer: answer, dropOne: dropOne)
+    copyInto(canned)
+    if (leftover) {
+      canned.createIndex(DOC_V2, [:], TITLE_KEYWORD.map(Document).mappings(), [] as Set)
+    }
+    MigrationScriptProvider script = { alias, from, to -> Optional.of("ctx._source.remove('body')") } as MigrationScriptProvider
+    def provider = scripted ? script : MigrationScriptProvider.none()
+
+    when:
+    def outcome = IndexMigrator.builder().engine(canned).mapper(TITLE_KEYWORD).scriptProvider(provider).build()
+        .bootstrap(Document).outcomes()[0]
+
+    then: 'the item fails, with both counts recorded, and the old index keeps the alias'
+    outcome.status() == MigrationResult.Status.FAILED
+    outcome.error() instanceof MigrationException
+    outcome.error().message.contains(message)
+    outcome.sourceCount() == 3L
+    outcome.destCount() == destCount
+    canned.indices()[DOC_V1] == ['documents'] as Set
+    !canned.isWriteBlocked(DOC_V1)
+
+    where:
+    label                             | scripted | leftover | dropOne | answer                                                    | destCount | message
+    'total differs from the source'   | false    | false    | false   | new ReindexResult(2, 2, 0, [], 1, false)                  | 3L        | 'read 2 of 3 documents'
+    'unaccounted documents'           | true     | false    | false   | new ReindexResult(3, 2, 0, [], 1, false)                  | 3L        | 'accounted for 2 of 3 documents (created 2, updated 0, noops 0, deleted 0)'
+    'version conflicts'               | true     | false    | false   | new ReindexResult(3, 3, 0, [], 1, false, 0, 0, 1)         | 3L        | 'hit 1 version conflicts'
+    'script, dest differs from writes' | true    | false    | true    | new ReindexResult(3, 3, 0, [], 1, false)                  | 2L        | 'holds 2 documents but the engine wrote 3'
+    'script into a reused index'      | true     | true     | true    | new ReindexResult(3, 2, 0, [], 1, false, 1, 0, 0)         | 2L        | 'copied 2 of 3 documents into a reused index'
+  }
+
+  def "a script that skips documents on purpose is accounted for by noops and deleted"() {
+    given:
+    def canned = new CannedReindexEngine(answer: new ReindexResult(3, 2, 0, [], 1, false, 0, 1, 0), dropOne: true)
+    copyInto(canned)
+    MigrationScriptProvider script = { alias, from, to -> Optional.of("ctx._source.remove('body')") } as MigrationScriptProvider
+
+    when:
+    def outcome = IndexMigrator.builder().engine(canned).mapper(TITLE_KEYWORD).scriptProvider(script).build()
+        .bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.status() == MigrationResult.Status.APPLIED
+    outcome.warnings().size() == 1
   }
 
   def "with a migration script, reindex failures still fail the migration"() {
