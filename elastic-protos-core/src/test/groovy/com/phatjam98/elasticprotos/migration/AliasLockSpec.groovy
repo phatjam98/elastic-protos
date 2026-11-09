@@ -123,7 +123,7 @@ class AliasLockSpec extends Specification {
 
   def "an expired lock is taken over by exactly one of two takers"() {
     given:
-    writeLock('documents', 'dead/1/deadbeef', Instant.now().minusSeconds(5))
+    writeLock('documents', 'dead/1/deadbeef', Instant.now().minusSeconds(120))
     def a = lock()
     def b = lock()
     AliasLock.Lease wonByB = null
@@ -198,14 +198,78 @@ class AliasLockSpec extends Specification {
     def lease = lock(Duration.ofSeconds(1)).acquire('documents', 'REINDEX', 'abc', Duration.ZERO)
     long seqNo = engine.get(LOCKS, 'documents').get().seqNo()
 
-    when:
-    sleep(1200)
-
-    then:
-    engine.get(LOCKS, 'documents').get().seqNo() > seqNo
+    expect:
+    new spock.util.concurrent.PollingConditions(timeout: 10).eventually {
+      assert engine.get(LOCKS, 'documents').get().seqNo() > seqNo
+    }
 
     cleanup:
     lease?.close()
+  }
+
+  def "a lease expires locally two thirds of the TTL after its last successful write"() {
+    given:
+    def clock = new IndexMigratorLockSpec.MutableClock()
+    def locks = new AliasLock(engine, LOCKS, Duration.ofSeconds(90), { 0 }, clock)
+    def lease = locks.acquire('documents', 'REINDEX', 'abc', Duration.ZERO)
+
+    when: 'just under two thirds of the TTL'
+    clock.advance(Duration.ofSeconds(59))
+    lease.check()
+
+    then:
+    notThrown(LockException)
+
+    when: 'a renewal fails with a transient error: retried, not lost, and the lease does not move'
+    engine.failIndex = true
+    lease.heartbeat()
+    clock.advance(Duration.ofSeconds(2))
+    lease.check()
+
+    then:
+    def e = thrown(LockException)
+    e.lost()
+    e.message.contains('no renewal succeeded since')
+  }
+
+  def "a successful renewal moves the local expiry on"() {
+    given:
+    def clock = new IndexMigratorLockSpec.MutableClock()
+    def lease = new AliasLock(engine, LOCKS, Duration.ofSeconds(90), { 0 }, clock)
+        .acquire('documents', 'REINDEX', 'abc', Duration.ZERO)
+
+    when:
+    clock.advance(Duration.ofSeconds(50))
+    lease.heartbeat()
+    clock.advance(Duration.ofSeconds(50))
+    lease.check()
+
+    then:
+    notThrown(LockException)
+  }
+
+  def "an expired lock is taken over only a third of the TTL after it expired"() {
+    given:
+    writeLock('documents', 'skewed/1/deadbeef', Instant.now().minusSeconds(10))
+
+    when:
+    lock().acquire('documents', 'CREATE', 'h', Duration.ZERO)
+
+    then:
+    def e = thrown(LockException)
+    e.holder() == 'skewed/1/deadbeef'
+  }
+
+  def "an acquire response without sequence numbers is refused"() {
+    given:
+    engine.noSeqNo = true
+
+    when:
+    lock().acquire('documents', 'CREATE', 'h', Duration.ZERO)
+
+    then:
+    def e = thrown(IllegalStateException)
+    e.message.contains('did not return _seq_no and _primary_term')
   }
 
   def "engine errors other than conflicts are reported"() {
@@ -224,6 +288,7 @@ class AliasLockSpec extends Specification {
     Closure beforeDelete
     Closure beforeCreate
     boolean failIndex
+    boolean noSeqNo
 
     @Override
     boolean delete(String index, String id, IndexOptions options) {
@@ -243,7 +308,9 @@ class AliasLockSpec extends Specification {
         throw new com.phatjam98.elasticprotos.engine.EngineException(
             com.phatjam98.elasticprotos.engine.EngineException.Kind.TRANSIENT, 503, 'busy')
       }
-      super.index(index, id, document, options)
+      def result = super.index(index, id, document, options)
+      noSeqNo ? new com.phatjam98.elasticprotos.engine.IndexResult(result.index(), result.id(), result.result(),
+          result.version()) : result
     }
   }
 }
