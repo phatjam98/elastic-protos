@@ -846,9 +846,22 @@ RestClient client = RestClient.builder(HttpHost.create("http://localhost:9200"))
 SearchEngine engine = ElasticsearchEngine.of(client);   // closing the engine closes the client
 ```
 
-`SearchEngine` is the whole SPI: index lifecycle, mappings, aliases, reindex, write blocks, document
-writes, realtime `get` by id, `bulk`, `search`, `count`, point in time, `refresh` and `health`, all
-as JSON-shaped maps. Transport failures are `EngineException`s of kind `IO` that name the request
+`SearchEngine` is the whole SPI: index lifecycle, mappings, settings updates (`putSettings`),
+aliases, reindex, `updateByQuery`, write blocks, document writes, realtime `get` by id, `bulk`,
+`search`, `count`, point in time, `refresh` and `health`, all as JSON-shaped maps.
+
+Writes support optimistic concurrency: `IndexResult` and `Hit` carry the document's `seqNo` and
+`primaryTerm`, and `IndexOptions.ifMatch(seqNo, primaryTerm)` (or `BulkOp.indexIfMatch` /
+`deleteIfMatch`) only writes while the document still has them, failing with `CONFLICT` otherwise.
+`get` always returns `version`, `seqNo` and `primaryTerm` on the hit; `search` returns them when the
+body asks for `"version": true` / `"seq_no_primary_term": true`, and per-field `highlight`
+fragments when it has a `highlight`. `ReindexRequest` takes a source `query`, `VersionType.EXTERNAL`
+(keep source versions, never overwrite a newer destination document) and `proceedOnConflicts`;
+`ReindexResult` counts `versionConflicts`, `noops` and `deleted`, and `accounted()` checks that
+they add up to `total`. `updateByQuery` rewrites matching documents in place, polled as a task like
+reindex.
+
+Transport failures are `EngineException`s of kind `IO` that name the request
 and the hosts, for example `GET /documents/_alias on http://localhost:9200 failed: No route to host`.
 Engine errors are classified by `EngineException.getKind()`. A `cluster_block_exception` with a 4xx
 status (a write, read or read-only block, answered with 403, or the flood-stage disk watermark's
