@@ -18,3 +18,13 @@ adapters for Elasticsearch 8.x/9.x and OpenSearch 2.x/3.x on the official low-le
 an optional Micronaut 4 module and a BOM, and requires Java 17. It is not API-compatible with the
 pre-1.0 `com.phatjam98.elasticsearch.*` packages, and the private geobuf dependency is gone. A
 `1.0.0-rc.1` pre-release precedes it.
+
+`RangeValue.min` and `max` are now proto3 `optional`, so `NUM_RANGE` supports open-ended ranges
+(`Values.atLeast`, `greaterThan`, `atMost`, `lessThan`, `onOrAfter`, `after`, `onOrBefore`,
+`before` and `between(Instant, Instant)`; the same steps on `Criteria`). Only the bounds that are
+set are compiled. Wire break: with implicit presence, rc.1/rc.2 generated code never put `0.0` on
+the wire and the default `JsonFormat` printer omits it, so criteria built with rc.2 such as
+`between(0, 100)` or `range(-50, 0)` and then serialized (binary or JSON), or saved queries, now
+arrive with that `min` or `max` unset and therefore open. Rebuild producers against rc.3 or
+persist criteria with `includingDefaultValueFields`. A range with no bound, a NaN bound or an empty
+range is rejected with `QueryCompileException`.

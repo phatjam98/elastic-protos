@@ -274,6 +274,27 @@ abstract class EngineIntegrationSpec extends Specification {
     docIds(Criteria.where('filed_at').between(from, to).build()) == ['doc-2', 'doc-3'] as Set
   }
 
+  def "NUM_RANGE with only a lower bound matches at or above it"() {
+    given:
+    long threshold = 120_000L
+    Set<String> expected = SampleData.documents().findAll { it.sizeBytes >= threshold }*.id as Set
+
+    expect:
+    expected == ['doc-1', 'doc-5', 'doc-6'] as Set
+    docIds(Criteria.where('size_bytes').atLeast(threshold).build()) == expected
+  }
+
+  def "NUM_RANGE with an exclusive lower date bound matches strictly after it"() {
+    given:
+    Instant after = Instant.parse('2024-03-10T09:15:00Z')
+    Set<String> expected = SampleData.documents()
+        .findAll { Instant.ofEpochSecond(it.filedAt.seconds, it.filedAt.nanos).isAfter(after) }*.id as Set
+
+    expect: 'the document filed exactly at the bound is excluded'
+    expected == ['doc-4', 'doc-5', 'doc-6'] as Set
+    docIds(Criteria.where('filed_at').after(after).build()) == expected
+  }
+
   def "ANY_IN matches any of the listed values"() {
     expect:
     docIds(where(fc('tags', ANY_IN, list('urgent', 'admin')))) == ['doc-2', 'doc-4'] as Set
