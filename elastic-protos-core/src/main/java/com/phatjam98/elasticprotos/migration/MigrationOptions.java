@@ -49,6 +49,8 @@ import java.util.Objects;
  *   <li>{@code backfill}: whether additions that existing documents were never indexed into are
  *       applied in place with an update by query ({@link Action#BACKFILL}); when false they are
  *       reindexed; default true
+ *   <li>{@code degradedReconcile}: what a zero-downtime reindex does after the swap when the
+ *       snapshot of the new index is lost; default {@link DegradedReconcile#REPORT}
  *   <li>{@code lock}: whether {@link IndexMigrator#apply(MigrationPlan)} and {@code rollback} take
  *       a per-alias lock in the lock index ({@link
  *       com.phatjam98.elasticprotos.mapping.IndexNamingStrategy#lockIndex()}) and re-plan the item
@@ -63,7 +65,8 @@ import java.util.Objects;
  * </ul>
  *
  * <p>Null settings throw {@link NullPointerException}; a shard count below 1 or a timeout that is
- * not positive, a negative swap grace or lock wait, or a lock TTL under one second, throws {@link IllegalArgumentException}.
+ * not positive, a negative swap grace or lock wait, or a lock TTL under one second, throws {@link
+ * IllegalArgumentException}.
  */
 public final class MigrationOptions {
 
@@ -85,6 +88,7 @@ public final class MigrationOptions {
   private final boolean lock;
   private final Duration lockWait;
   private final Duration lockTtl;
+  private final DegradedReconcile degradedReconcile;
 
   private MigrationOptions(Builder builder) {
     Objects.requireNonNull(builder.failure, "failure");
@@ -93,6 +97,7 @@ public final class MigrationOptions {
     Objects.requireNonNull(builder.reindexTimeout, "reindexTimeout");
     Objects.requireNonNull(builder.reindexMode, "reindexMode");
     Objects.requireNonNull(builder.swapGrace, "swapGrace");
+    Objects.requireNonNull(builder.degradedReconcile, "degradedReconcile");
     if (builder.swapGrace.isNegative()) {
       throw new IllegalArgumentException("swapGrace must not be negative: " + builder.swapGrace);
     }
@@ -102,7 +107,8 @@ public final class MigrationOptions {
       throw new IllegalArgumentException("lockWait must not be negative: " + builder.lockWait);
     }
     if (builder.lockTtl.compareTo(MIN_LOCK_TTL) < 0) {
-      throw new IllegalArgumentException("lockTtl must be at least one second: " + builder.lockTtl);
+      throw new IllegalArgumentException(
+          "lockTtl must be at least one second: " + builder.lockTtl);
     }
     if (builder.reindexTimeout.isNegative() || builder.reindexTimeout.isZero()) {
       throw new IllegalArgumentException(
@@ -124,6 +130,7 @@ public final class MigrationOptions {
     this.reindexMode = builder.reindexMode;
     this.swapGrace = builder.swapGrace;
     this.backfill = builder.backfill;
+    this.degradedReconcile = builder.degradedReconcile;
     this.lock = builder.lock;
     this.lockWait = builder.lockWait;
     this.lockTtl = builder.lockTtl;
@@ -209,6 +216,11 @@ public final class MigrationOptions {
     return backfill;
   }
 
+  /** Returns what a zero-downtime reindex does when the snapshot of the new index is lost. */
+  public DegradedReconcile degradedReconcile() {
+    return degradedReconcile;
+  }
+
   /** Returns whether apply and rollback take a per-alias lock. */
   public boolean lock() {
     return lock;
@@ -284,6 +296,11 @@ public final class MigrationOptions {
     return toBuilder().backfill(value).build();
   }
 
+  /** Returns a copy with another degraded-reconcile behaviour. */
+  public MigrationOptions withDegradedReconcile(DegradedReconcile value) {
+    return toBuilder().degradedReconcile(value).build();
+  }
+
   /** Returns a copy that takes, or does not take, the per-alias lock. */
   public MigrationOptions withLock(boolean value) {
     return toBuilder().lock(value).build();
@@ -314,6 +331,7 @@ public final class MigrationOptions {
         && reindexMode == that.reindexMode
         && swapGrace.equals(that.swapGrace)
         && backfill == that.backfill
+        && degradedReconcile == that.degradedReconcile
         && lock == that.lock
         && lockWait.equals(that.lockWait)
         && lockTtl.equals(that.lockTtl);
@@ -322,7 +340,8 @@ public final class MigrationOptions {
   @Override
   public int hashCode() {
     return Objects.hash(failure, allowReindex, deleteOldAfter, removedFields, defaultShards,
-        replicas, reindexTimeout, dryRun, clearStaleWriteBlock, reindexMode, swapGrace, backfill, lock, lockWait, lockTtl);
+        replicas, reindexTimeout, dryRun, clearStaleWriteBlock, reindexMode, swapGrace, backfill,
+        degradedReconcile, lock, lockWait, lockTtl);
   }
 
   @Override
@@ -339,6 +358,7 @@ public final class MigrationOptions {
         + ", reindexMode=" + reindexMode
         + ", swapGrace=" + swapGrace
         + ", backfill=" + backfill
+        + ", degradedReconcile=" + degradedReconcile
         + ", lock=" + lock
         + ", lockWait=" + lockWait
         + ", lockTtl=" + lockTtl + "]";
@@ -362,6 +382,7 @@ public final class MigrationOptions {
     private boolean lock = true;
     private Duration lockWait = Duration.ofMinutes(10);
     private Duration lockTtl = Duration.ofMinutes(2);
+    private DegradedReconcile degradedReconcile = DegradedReconcile.REPORT;
 
     private Builder() {}
 
@@ -378,6 +399,7 @@ public final class MigrationOptions {
       this.reindexMode = options.reindexMode;
       this.swapGrace = options.swapGrace;
       this.backfill = options.backfill;
+      this.degradedReconcile = options.degradedReconcile;
       this.lock = options.lock;
       this.lockWait = options.lockWait;
       this.lockTtl = options.lockTtl;
@@ -455,6 +477,12 @@ public final class MigrationOptions {
     /** Sets whether unindexed additions are backfilled in place; default true. */
     public Builder backfill(boolean value) {
       this.backfill = value;
+      return this;
+    }
+
+    /** Sets what a reindex does when the snapshot of the new index is lost; default REPORT. */
+    public Builder degradedReconcile(DegradedReconcile value) {
+      this.degradedReconcile = value;
       return this;
     }
 

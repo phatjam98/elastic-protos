@@ -287,7 +287,7 @@ class IndexMigratorLockSpec extends Specification {
 
     when: 'another process holds the lock'
     new AliasLock(engine, LOCKS, Duration.ofMinutes(2), { 0 }).acquire('documents', 'ROLLBACK', 'h', Duration.ZERO)
-    def locked = migrator(TITLE_KEYWORD, LOCKED.withLockWait(Duration.ZERO)).rollback(plan.items()[0])
+    def locked = migrator(TITLE_KEYWORD, LOCKED.withLockWait(Duration.ZERO)).rollback(plan.items()[0], plan.items()[0].currentIndex(), RollbackMode.REVERSE_DELTA)
 
     then:
     locked.status() == MigrationResult.Status.LOCKED
@@ -301,7 +301,7 @@ class IndexMigratorLockSpec extends Specification {
     on[Phase.COPIED] = { engine.delete(LOCKS, 'documents'); sleep(800) }
 
     when:
-    def outcome = migrator(TITLE_KEYWORD, LOCKED.withLockTtl(Duration.ofSeconds(1))).rollback(plan.items()[0])
+    def outcome = migrator(TITLE_KEYWORD, LOCKED.withLockTtl(Duration.ofSeconds(1))).rollback(plan.items()[0], plan.items()[0].currentIndex(), RollbackMode.REVERSE_DELTA)
 
     then:
     outcome.status() == MigrationResult.Status.FAILED
@@ -316,6 +316,6 @@ class IndexMigratorLockSpec extends Specification {
     engine.setWriteBlock(LOCKS, true)
 
     expect:
-    migrator(TITLE_KEYWORD).rollback(plan.items()[0]).status() == MigrationResult.Status.FAILED
+    migrator(TITLE_KEYWORD).rollback(plan.items()[0], plan.items()[0].currentIndex(), RollbackMode.REVERSE_DELTA).status() == MigrationResult.Status.FAILED
   }
 }

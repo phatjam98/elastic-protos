@@ -104,7 +104,8 @@ class IndexMigratorRollbackSpec extends Specification {
 
     then:
     outcome.ok()
-    marker == [action: 'reindex', from: V2, phase: 'copying', rollback: true]
+    marker.subMap('action', 'from', 'phase', 'rollback') == [action: 'reindex', from: V2, phase: 'copying', rollback: true]
+    marker.checkpoint instanceof Number
     titles(V1).d2 == 'during rollback'
     titles(V1).d3 == 'after rollback swap'
   }
@@ -115,7 +116,7 @@ class IndexMigratorRollbackSpec extends Specification {
     engine.duringReindex { throw new EngineException(EngineException.Kind.TRANSIENT, 503, 'busy') }
 
     when:
-    def outcome = migrator().rollback(plan)
+    def outcome = migrator().rollback(plan, V1, RollbackMode.REVERSE_DELTA)
 
     then:
     outcome.status() == MigrationResult.Status.FAILED
@@ -136,7 +137,7 @@ class IndexMigratorRollbackSpec extends Specification {
     engine.failSwaps = true
 
     when:
-    def outcome = migrator().rollback(plan)
+    def outcome = migrator().rollback(plan, V1, RollbackMode.REVERSE_DELTA)
 
     then:
     outcome.status() == MigrationResult.Status.FAILED
@@ -184,8 +185,8 @@ class IndexMigratorRollbackSpec extends Specification {
     given:
     migrate()
     put('n1', 'after the reindex')
-    on[Phase.FROZEN] = { throw new IllegalStateException('killed') }
-    def crashed = migrator().rollback(plan)
+    on[Phase.FROZEN] = { throw new MigrationListener.Abort('killed') }
+    def crashed = migrator().rollback(plan, V1, RollbackMode.REVERSE_DELTA)
     on.clear()
 
     when: 'the next plan finds the rollback marker on the index the alias now points at'
@@ -226,16 +227,93 @@ class IndexMigratorRollbackSpec extends Specification {
   def "a crash during the rollback copy stops without cleanup"() {
     given:
     migrate()
-    on[Phase.COPIED] = { throw new IllegalStateException('killed') }
+    on[Phase.COPIED] = { throw new MigrationListener.Abort('killed') }
 
     when:
-    def outcome = migrator().rollback(plan)
+    def outcome = migrator().rollback(plan, V1, RollbackMode.REVERSE_DELTA)
 
     then:
     outcome.status() == MigrationResult.Status.FAILED
     outcome.index() == V2
     outcome.error().message == 'documents: stopped by the listener after COPIED: killed'
     engine.getMappings(V1)._meta.elastic_protos.pending.phase == 'copying'
+  }
+
+  def "the convenience overloads throw when the rollback fails"() {
+    given:
+    migrate()
+    engine.duringReindex { throw new EngineException(EngineException.Kind.TRANSIENT, 503, 'busy') }
+
+    when:
+    migrator().rollback(plan)
+
+    then:
+    def e = thrown(MigrationException)
+    e.message.contains('aborted before the alias swap')
+
+    when:
+    migrator().rollback(plan, V1)
+
+    then:
+    thrown(MigrationException)
+  }
+
+  def "a reverse delta is refused when a migration script exists for the reindex, unless forced"() {
+    given:
+    migrate()
+    MigrationScriptProvider scripts = { alias, from, to -> Optional.of("ctx._source.remove('body')") }
+    def scripted = IndexMigrator.builder().engine(engine).mapper(TITLE_KEYWORD).options(ZD).scriptProvider(scripts).build()
+
+    when:
+    def refused = scripted.rollback(plan, V1, RollbackMode.REVERSE_DELTA)
+
+    then:
+    refused.status() == MigrationResult.Status.FAILED
+    refused.error().message.contains('a migration script exists for')
+    refused.error().message.contains('RollbackMode.ALIAS_ONLY')
+    engine.indices()[V2] == ['documents'] as Set
+
+    when:
+    def forced = scripted.rollback(plan, V1, RollbackMode.REVERSE_DELTA_FORCE)
+
+    then:
+    forced.ok()
+    engine.indices()[V1] == ['documents'] as Set
+  }
+
+  def "a reverse delta that dies before its swap is reported by the next plan"() {
+    given:
+    migrate()
+    on[Phase.COPIED] = { throw new MigrationListener.Abort('killed') }
+    migrator().rollback(plan, V1, RollbackMode.REVERSE_DELTA)
+    on.clear()
+
+    when:
+    def item = migrator().plan(Document).items()[0]
+
+    then:
+    item.action() == Action.NO_OP
+    item.warnings().any { it.startsWith("a rollback of documents to ${V1} stopped before its alias swap".toString()) }
+
+    when: 'rolling back again finishes it and removes the note'
+    def again = migrator().rollback(plan, V1, RollbackMode.REVERSE_DELTA)
+
+    then:
+    again.ok()
+    engine.getMappings(V2)._meta.elastic_protos.pending == null
+    migrator().plan(Document).items()[0].warnings().isEmpty()
+  }
+
+  def "an aborted reverse delta removes its note from the new index"() {
+    given:
+    migrate()
+    engine.duringReindex { throw new EngineException(EngineException.Kind.TRANSIENT, 503, 'busy') }
+
+    when:
+    migrator().rollback(plan, V1, RollbackMode.REVERSE_DELTA)
+
+    then:
+    engine.getMappings(V2)._meta.elastic_protos.pending == null
   }
 
   /** Refuses alias swaps while {@code failSwaps} is set. */

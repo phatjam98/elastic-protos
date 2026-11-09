@@ -27,6 +27,13 @@ public record MigrationResult(List<Outcome> outcomes) {
     /** The change failed; see {@link Outcome#error()}. */
     FAILED,
     /**
+     * A zero-downtime reindex moved the alias but could not finish its reconcile, because the
+     * snapshot of the new index was lost and {@link MigrationOptions#degradedReconcile()} is
+     * {@link DegradedReconcile#REPORT}: nothing was written, the warnings count what differs, and
+     * the new index keeps its pending marker for the operator to decide.
+     */
+    INCOMPLETE,
+    /**
      * Nothing was done because another process held the alias's migration lock for longer than
      * {@link MigrationOptions#lockWait()}; see {@link Outcome#error()}, a {@link LockException}.
      */
@@ -99,17 +106,17 @@ public record MigrationResult(List<Outcome> outcomes) {
 
     /** Returns whether this item neither failed nor was blocked. */
     public boolean ok() {
-      return status != Status.FAILED && status != Status.BLOCKED && status != Status.LOCKED
-          && plan.action() != Action.BLOCKED;
+      return status != Status.FAILED && status != Status.BLOCKED && status != Status.INCOMPLETE
+          && status != Status.LOCKED && plan.action() != Action.BLOCKED;
     }
   }
 
-  /** Returns whether no item failed, was blocked or found its lock held. */
+  /** Returns whether no item failed and none was blocked. */
   public boolean ok() {
     return outcomes.stream().allMatch(Outcome::ok);
   }
 
-  /** Returns the items that failed, were blocked or found their lock held. */
+  /** Returns the items that failed or were blocked. */
   public List<Outcome> problems() {
     List<Outcome> problems = new ArrayList<>();
     for (Outcome outcome : outcomes) {

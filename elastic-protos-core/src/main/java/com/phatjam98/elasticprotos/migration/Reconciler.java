@@ -21,14 +21,23 @@ import java.util.function.Consumer;
 
 /**
  * Brings the new index of a zero-downtime reindex up to date with the frozen old index after the
- * alias swap, using a point in time over the new index taken just before the swap (the snapshot).
+ * alias swap, using a point in time over the new index taken just before the swap (the snapshot)
+ * and the sequence number checkpoint of the old index taken before the first copy.
  *
- * <p>Reconcile: every document of the old index is compared with the snapshot. Missing from the
- * snapshot, it is created in the new index; with another version (or, for a rollback, another
- * source), it is written on the snapshot's sequence number and primary term. Either write fails
- * with 409 when a write through the alias after the swap got there first, and that write wins.
- * Sweep: every document of the snapshot that is missing from the old index was deleted there after
+ * <p>Reconcile, hot pass first: every document of the old index written after the checkpoint
+ * ({@code _seq_no} above it) may have changed after the copy, whatever its version says (a version
+ * restarts at 1 once a delete's tombstone is gone): it is created in the new index when the
+ * snapshot lacks it, and otherwise, when its version or source differs from the snapshot's (with a
+ * migration script: always), written on the snapshot's sequence number and primary term.
+ * Then the cold pass: every other document is compared with the snapshot by version (or, for a
+ * rollback, by source) and written the same way when it differs. A conditional write fails with
+ * 409 when a write through the alias after the swap got there first, and that write wins.
+ *
+ * <p>Sweep: every document of the snapshot that the old index no longer has was deleted there after
  * the copy, and is deleted from the new index on the snapshot's sequence number.
+ *
+ * <p>The old index is scanned without sources; sources are fetched only for the documents that
+ * are written.
  */
 final class Reconciler {
 
@@ -73,6 +82,7 @@ final class Reconciler {
     long superseded;
     long ghostsDeleted;
     long staleSkipped;
+    long missing;
     final List<String> warnings = new ArrayList<>();
 
     ReconcileStats stats() {
@@ -83,57 +93,94 @@ final class Reconciler {
   // ------------------------------------------------------------------ reconcile
 
   /**
-   * Copies the documents of {@code from} that the snapshot of {@code to} lacks or holds in another
-   * version.
+   * Copies the documents of {@code from} that changed after the checkpoint, or that the snapshot of
+   * {@code to} lacks or holds in another version.
    *
+   * @param checkpoint the sequence number checkpoint of {@code from} taken before the first copy;
+   *     negative when unknown, which makes every document hot
    * @param staging the script to apply, or null
-   * @param compareSources whether documents with equal versions are compared by source too, for a
+   * @param compareSources whether cold documents are compared by source instead of version, for a
    *     rollback, whose versions are not comparable across the indices
    * @throws SnapshotLost when the snapshot's point in time is gone
    */
-  void reconcile(String from, String to, String snapshotPit, Staging staging,
+  void reconcile(String from, String to, String snapshotPit, long checkpoint, Staging staging,
       boolean compareSources, Counts counts) {
-    Map<String, Object> body = new LinkedHashMap<>();
-    body.put("version", true);
-    body.put("_source", staging == null);
-    scan(from, body, page -> {
-      List<String> ids = ids(page);
-      Map<String, Hit> snapshot = snapshot(snapshotPit, ids, compareSources);
-      Map<String, Hit> changed = new LinkedHashMap<>();
+    // without a script, a hot document is compared by version and source; with one, the copy's
+    // source differs by design, so every hot document is written
+    boolean bySource = staging == null;
+    Map<String, Object> hot = new LinkedHashMap<>();
+    hot.put("_source", bySource);
+    hot.put("version", true);
+    hot.put("seq_no_primary_term", true);
+    if (checkpoint >= 0) {
+      hot.put("query", Map.of("range", Map.of("_seq_no", Map.of("gt", checkpoint))));
+    }
+    scan(from, hot, page -> {
+      Map<String, Hit> snapshot = snapshot(snapshotPit, ids(page), bySource);
+      List<String> changed = new ArrayList<>();
       for (Hit hit : page) {
         Hit seen = snapshot.get(hit.id());
-        if (seen == null || differs(hit, seen, compareSources)) {
-          changed.put(hit.id(), hit);
+        if (!bySource || seen == null || differs(hit, seen, false) || differs(hit, seen, true)) {
+          changed.add(hit.id());
         }
       }
-      if (changed.isEmpty()) {
+      write(from, to, changed, snapshot, staging, counts);
+    });
+    if (checkpoint < 0) {
+      return;
+    }
+    Map<String, Object> cold = new LinkedHashMap<>();
+    cold.put("_source", compareSources);
+    cold.put("version", true);
+    cold.put("seq_no_primary_term", true);
+    scan(from, cold, page -> {
+      List<Hit> unchanged = new ArrayList<>();
+      for (Hit hit : page) {
+        if (hit.seqNo() == null || hit.seqNo() <= checkpoint) {
+          unchanged.add(hit);
+        }
+      }
+      if (unchanged.isEmpty()) {
         return;
       }
-      Map<String, Map<String, Object>> sources = new LinkedHashMap<>();
-      if (staging == null) {
-        changed.forEach((id, hit) -> sources.put(id, hit.source()));
-      } else {
-        sources.putAll(stage(from, staging, new ArrayList<>(changed.keySet())));
-      }
-      List<BulkOp> ops = new ArrayList<>();
-      List<BulkOp> deletes = new ArrayList<>();
-      for (String id : changed.keySet()) {
-        Hit seen = snapshot.get(id);
-        Map<String, Object> source = sources.get(id);
-        if (source == null) {
-          // the script dropped the document: drop the copy the snapshot holds, if any
-          if (seen != null) {
-            deletes.add(BulkOp.deleteIfMatch(to, id, seqNo(seen), primaryTerm(seen)));
-          }
-        } else if (seen == null) {
-          ops.add(BulkOp.create(to, id, source));
-        } else {
-          ops.add(BulkOp.indexIfMatch(to, id, source, seqNo(seen), primaryTerm(seen)));
+      Map<String, Hit> snapshot = snapshot(snapshotPit, ids(unchanged), compareSources);
+      List<String> changed = new ArrayList<>();
+      for (Hit hit : unchanged) {
+        Hit seen = snapshot.get(hit.id());
+        if (seen == null || differs(hit, seen, compareSources)) {
+          changed.add(hit.id());
         }
       }
-      apply(ops, counts, false);
-      apply(deletes, counts, true);
+      write(from, to, changed, snapshot, staging, counts);
     });
+  }
+
+  /** Writes documents of {@code from} into {@code to}, conditional on the snapshot. */
+  private void write(String from, String to, List<String> ids, Map<String, Hit> snapshot,
+      Staging staging, Counts counts) {
+    if (ids.isEmpty()) {
+      return;
+    }
+    Map<String, Map<String, Object>> sources = staging == null
+        ? sources(from, ids) : stage(from, staging, ids);
+    List<BulkOp> ops = new ArrayList<>();
+    List<BulkOp> deletes = new ArrayList<>();
+    for (String id : ids) {
+      Hit seen = snapshot.get(id);
+      Map<String, Object> source = sources.get(id);
+      if (source == null) {
+        // the script dropped the document: drop the copy the snapshot holds, if any
+        if (seen != null) {
+          deletes.add(BulkOp.deleteIfMatch(to, id, seqNo(seen), primaryTerm(seen)));
+        }
+      } else if (seen == null) {
+        ops.add(BulkOp.create(to, id, source));
+      } else {
+        ops.add(BulkOp.indexIfMatch(to, id, source, seqNo(seen), primaryTerm(seen)));
+      }
+    }
+    apply(ops, counts, false);
+    apply(deletes, counts, true);
   }
 
   /**
@@ -158,18 +205,19 @@ final class Reconciler {
   }
 
   /**
-   * Reconciles without the snapshot: creates the documents {@code to} lacks, and only counts the
-   * documents that differ and those that exist only in {@code to}, since a write through the
-   * alias after the swap cannot be told apart from a stale copy.
+   * Compares without the snapshot. A write through the alias after the swap cannot be told apart
+   * from a stale copy, so documents that differ are only counted ({@code staleSkipped}), and so
+   * are those that exist only in {@code to}. Documents {@code to} lacks are counted ({@code
+   * missing}) or, with {@code createMissing}, created, which brings back every document deleted
+   * through the alias since the swap.
    */
   void degraded(String from, String to, Staging staging, boolean compareSources,
-      Counts counts) {
+      boolean createMissing, Counts counts) {
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("version", true);
-    body.put("_source", staging == null || compareSources);
+    body.put("_source", compareSources);
     scan(from, body, page -> {
-      List<String> ids = ids(page);
-      Map<String, Hit> live = lookup(to, ids, compareSources);
+      Map<String, Hit> live = lookup(to, ids(page), compareSources);
       List<String> missing = new ArrayList<>();
       for (Hit hit : page) {
         Hit current = live.get(hit.id());
@@ -182,16 +230,12 @@ final class Reconciler {
       if (missing.isEmpty()) {
         return;
       }
-      Map<String, Map<String, Object>> sources = new LinkedHashMap<>();
-      if (staging == null) {
-        for (Hit hit : page) {
-          if (missing.contains(hit.id())) {
-            sources.put(hit.id(), hit.source());
-          }
-        }
-      } else {
-        sources.putAll(stage(from, staging, missing));
+      if (!createMissing) {
+        counts.missing += missing.size();
+        return;
       }
+      Map<String, Map<String, Object>> sources = staging == null
+          ? sources(from, missing) : stage(from, staging, missing);
       List<BulkOp> ops = new ArrayList<>();
       sources.forEach((id, source) -> ops.add(BulkOp.create(to, id, source)));
       apply(ops, counts, false);
@@ -207,18 +251,55 @@ final class Reconciler {
         }
       }
     });
-    if (counts.staleSkipped > 0 || onlyInNew[0] > 0) {
-      counts.warnings.add("the snapshot of " + to + " taken at the swap was lost, so only missing"
-          + " documents were created: " + counts.staleSkipped + " documents differ between "
-          + from + " and " + to + " and were left as they are in " + to + ", and "
-          + onlyInNew[0] + " documents exist only in " + to + " and were kept");
+    String lost = "the snapshot of " + to + " taken at the swap was lost";
+    if (createMissing) {
+      counts.warnings.add(lost + ", so missing documents were created (including any deleted"
+          + " through the alias since the swap): " + counts.copied + " created, "
+          + counts.staleSkipped + " documents differ between " + from + " and " + to
+          + " and were left as they are in " + to + ", and " + onlyInNew[0]
+          + " documents exist only in " + to + " and were kept");
     } else {
-      counts.warnings.add("the snapshot of " + to + " taken at the swap was lost; only missing"
-          + " documents were created, and no other difference was found");
+      counts.warnings.add(lost + "; nothing was written. " + counts.missing + " documents of "
+          + from + " are missing from " + to + ", " + counts.staleSkipped + " differ, and "
+          + onlyInNew[0] + " exist only in " + to + ". Missing documents may have been written"
+          + " before the swap or deleted through the alias after it; apply again with"
+          + " DegradedReconcile.CREATE_MISSING to create them, or remove the pending marker");
     }
   }
 
   // ------------------------------------------------------------------ staging
+
+  /**
+   * Runs the script over the first page of documents of {@code from} into the staging index and
+   * checks that it kept their ids, before the alias moves.
+   *
+   * @throws MigrationException when the script changed a document id
+   */
+  void probe(String from, Staging staging) {
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("_source", false);
+    body.put("size", PAGE);
+    body.put("track_total_hits", false);
+    List<String> ids = ids(engine.search(List.of(from), body).hits());
+    if (ids.isEmpty()) {
+      return;
+    }
+    try {
+      stage(from, staging, ids);
+    } catch (IdChanged e) {
+      throw new MigrationException("the migration script changes _id; use ReindexMode.BLOCKING"
+          + " or fix the script (" + e.getMessage() + ")");
+    }
+  }
+
+  /** The script changed document ids. */
+  private static final class IdChanged extends MigrationException {
+    private static final long serialVersionUID = 1L;
+
+    IdChanged(String message) {
+      super(message);
+    }
+  }
 
   /**
    * Runs the script over the given documents of {@code from} into the staging index and returns
@@ -238,15 +319,9 @@ final class Reconciler {
           + " the migration script into " + staging.index() + " did not complete: "
           + IndexMigrator.describe(result));
     }
-    Map<String, Object> body = new LinkedHashMap<>();
-    body.put("query", idsQuery(ids));
-    body.put("size", ids.size());
-    Map<String, Map<String, Object>> staged = new LinkedHashMap<>();
-    for (Hit hit : engine.search(List.of(staging.index()), body).hits()) {
-      staged.put(hit.id(), hit.source());
-    }
+    Map<String, Map<String, Object>> staged = fetch(staging.index(), ids);
     if (staged.size() != result.created() + result.updated()) {
-      throw new MigrationException("the migration script wrote " + (result.created()
+      throw new IdChanged("the migration script wrote " + (result.created()
           + result.updated()) + " documents into " + staging.index() + " but only "
           + staged.size() + " kept their ids: a script must not change _id during a"
           + " zero-downtime reindex; use ReindexMode.BLOCKING");
@@ -255,6 +330,23 @@ final class Reconciler {
   }
 
   // ------------------------------------------------------------------ helpers
+
+  /** Fetches the sources of documents of the frozen old index. */
+  private Map<String, Map<String, Object>> sources(String index, List<String> ids) {
+    return fetch(index, ids);
+  }
+
+  private Map<String, Map<String, Object>> fetch(String index, List<String> ids) {
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("query", idsQuery(ids));
+    body.put("size", ids.size());
+    body.put("track_total_hits", false);
+    Map<String, Map<String, Object>> found = new LinkedHashMap<>();
+    for (Hit hit : engine.search(List.of(index), body).hits()) {
+      found.put(hit.id(), hit.source());
+    }
+    return found;
+  }
 
   /** Writes the operations and counts their outcomes; other failures stop the reconcile. */
   private void apply(List<BulkOp> ops, Counts counts, boolean deletes) {

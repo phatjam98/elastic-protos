@@ -284,6 +284,27 @@ abstract class EngineIntegrationSpec extends Specification {
     docIds(Criteria.where('filed_at').between(from, to).build()) == ['doc-2', 'doc-3'] as Set
   }
 
+  def "NUM_RANGE with only a lower bound matches at or above it"() {
+    given:
+    long threshold = 120_000L
+    Set<String> expected = SampleData.documents().findAll { it.sizeBytes >= threshold }*.id as Set
+
+    expect:
+    expected == ['doc-1', 'doc-5', 'doc-6'] as Set
+    docIds(Criteria.where('size_bytes').atLeast(threshold).build()) == expected
+  }
+
+  def "NUM_RANGE with an exclusive lower date bound matches strictly after it"() {
+    given:
+    Instant after = Instant.parse('2024-03-10T09:15:00Z')
+    Set<String> expected = SampleData.documents()
+        .findAll { Instant.ofEpochSecond(it.filedAt.seconds, it.filedAt.nanos).isAfter(after) }*.id as Set
+
+    expect: 'the document filed exactly at the bound is excluded'
+    expected == ['doc-4', 'doc-5', 'doc-6'] as Set
+    docIds(Criteria.where('filed_at').after(after).build()) == expected
+  }
+
   def "ANY_IN matches any of the listed values"() {
     expect:
     docIds(where(fc('tags', ANY_IN, list('urgent', 'admin')))) == ['doc-2', 'doc-4'] as Set
@@ -705,15 +726,15 @@ abstract class EngineIntegrationSpec extends Specification {
     String alias = documents.alias()
     Map<Phase, Closure> writes = [
         (Phase.COPIED)   : { write(alias, 'zd-1', 'copy window'); engine.delete(alias, 'zd-2'); write(alias, 'zd-5', 'copy window') },
-        (Phase.CAUGHT_UP): { write(alias, 'zd-1', 'catch-up 1'); write(alias, 'zd-1', 'catch-up 2'); engine.delete(alias, 'zd-3'); write(alias, 'zd-6', 'catch-up window') },
-        (Phase.SWAPPED)  : { write(alias, 'zd-1', 'after swap'); engine.delete(alias, 'zd-4'); write(alias, 'zd-7', 'after swap'); write(alias, 'zd-5', 'after swap') },
+        (Phase.CAUGHT_UP): { write(alias, 'zd-1', 'catch-up 1'); write(alias, 'zd-1', 'catch-up 2'); engine.delete(alias, 'zd-3'); write(alias, 'zd-6', 'catch-up window'); write(alias, 'zd-9', 'catch-up window') },
+        (Phase.SWAPPED)  : { write(alias, 'zd-1', 'after swap'); engine.delete(alias, 'zd-4'); write(alias, 'zd-7', 'after swap'); write(alias, 'zd-5', 'after swap'); engine.delete(alias, 'zd-9') },
     ]
     def breaking = IndexMigrator.builder().engine(engine).mapper(breakingMapper).scriptProvider(script).options(FAST)
         .listener({ a, phase -> writes[phase]?.call() } as MigrationListener).build()
     IndexDefinition target = breakingMapper.map(Document)
 
-    and: 'four more documents written before the migration'
-    ['zd-1', 'zd-2', 'zd-3', 'zd-4'].each { write(alias, it, 'before') }
+    and: 'five more documents written before the migration'
+    ['zd-1', 'zd-2', 'zd-3', 'zd-4', 'zd-9'].each { write(alias, it, 'before') }
     engine.refresh(alias)
 
     when:
@@ -738,11 +759,11 @@ abstract class EngineIntegrationSpec extends Specification {
     engine.getMappings(alias).properties.title.type == 'keyword'
     engine.getMappings(target.name())._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version'] as Set
 
-    and: 'the last write wins per document and nothing deleted comes back'
+    and: 'the last write wins per document and nothing deleted comes back, including zd-9, updated in the old index after the catch-up and deleted in the new one after the swap'
     titles(target.name()) == SampleData.documents().collectEntries { [(it.id): it.title] } + [
         'zd-1': 'after swap', 'zd-5': 'after swap', 'zd-6': 'catch-up window', 'zd-7': 'after swap']
-    result.outcomes()[0].reconcile() == new ReconcileStats(1, 1, 2, 0)
-    result.outcomes()[0].sourceCount() == 10L
+    result.outcomes()[0].reconcile() == new ReconcileStats(1, 3, 2, 0)
+    result.outcomes()[0].sourceCount() == 11L
     result.outcomes()[0].destCount() == 10L
 
     and: 'the migration script ran on every copied document, including the one reconciled through the staging index'
@@ -756,9 +777,10 @@ abstract class EngineIntegrationSpec extends Specification {
     when: 'writing to the retained old index'
     engine.index(originalDocumentIndex, 'doc-x', codec.toDocument(SampleData.documents()[0]), IndexOptions.defaults())
 
-    then: 'it is write-blocked'
+    then: 'it is write-blocked, through _block/write, which reads back as index.blocks.write'
     thrown(EngineException)
     engine.indexExists(originalDocumentIndex)
+    engine.getSettings(originalDocumentIndex).index.blocks.write == 'true'
   }
 
   def "a zero-downtime reindex that dies after the swap is resumed by the next run"() {
@@ -773,7 +795,7 @@ abstract class EngineIntegrationSpec extends Specification {
     indexSampleDocuments(plain)
     Map<Phase, Closure> on = [
         (Phase.CAUGHT_UP): { write(alias, 'crash-0', 'after the catch-up') },
-        (Phase.FROZEN)   : { throw new IllegalStateException('killed') },
+        (Phase.FROZEN)   : { throw new MigrationListener.Abort('killed') },
     ]
     def crashing = IndexMigrator.builder().engine(engine).mapper(titleKeyword).options(FAST)
         .listener({ a, phase -> on[phase]?.call() } as MigrationListener).build()
@@ -804,6 +826,44 @@ abstract class EngineIntegrationSpec extends Specification {
     engine.getMappings(v2.name())._meta.elastic_protos.pending == null
     resumer.plan(Document).items()*.action() == [Action.NO_OP]
     outcome { engine.index(v1.name(), 'x', [id: 'x'], IndexOptions.defaults()) } == EngineException.Kind.BLOCKED
+  }
+
+  def "a zero-downtime reindex that dies right after the swap, before the freeze, is resumed"() {
+    given:
+    IndexNamingStrategy crashNaming = IndexNamingStrategy.prefixed(prefix + '-crash2')
+    def plain = ProtoMapper.builder().naming(crashNaming).build()
+    def titleKeyword = ProtoMapper.builder().naming(crashNaming).overrides(MappingOverrides.builder()
+        .forField(Document.descriptor, 'title') { it.setType(EsType.KEYWORD) }.build()).build()
+    IndexDefinition v1 = plain.map(Document)
+    IndexDefinition v2 = titleKeyword.map(Document)
+    String alias = v1.alias()
+    indexSampleDocuments(plain)
+    Map<Phase, Closure> on = [
+        (Phase.CAUGHT_UP): { write(alias, 'crash-0', 'after the catch-up') },
+        (Phase.SWAPPED)  : { throw new MigrationListener.Abort('killed') },
+    ]
+    def crashing = IndexMigrator.builder().engine(engine).mapper(titleKeyword).options(FAST)
+        .listener({ a, phase -> on[phase]?.call() } as MigrationListener).build()
+
+    when:
+    def crashed = crashing.bootstrap(Document)
+
+    then: 'the old index was never blocked and the marker still says swapping'
+    crashed.outcomes()[0].status() == MigrationResult.Status.FAILED
+    engine.getAliases(alias).keySet() == [v2.name()] as Set
+    engine.getMappings(v2.name())._meta.elastic_protos.pending.phase == 'swapping'
+    engine.getSettings(v1.name()).index.blocks?.write != 'true'
+
+    when:
+    def resumer = IndexMigrator.builder().engine(engine).mapper(titleKeyword).options(FAST).build()
+    def result = resumer.bootstrap(Document)
+
+    then:
+    result.ok()
+    result.outcomes()[0].plan().resume().swapped()
+    titles(v2.name()) == SampleData.documents().collectEntries { [(it.id): it.title] } + ['crash-0': 'after the catch-up']
+    engine.getSettings(v1.name()).index.blocks.write == 'true'
+    engine.getMappings(v2.name())._meta.elastic_protos.pending == null
   }
 
   def "a reverse-delta rollback restores the old index with the writes made after the reindex"() {

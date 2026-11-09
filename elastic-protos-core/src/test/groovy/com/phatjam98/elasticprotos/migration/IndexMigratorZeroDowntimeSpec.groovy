@@ -28,7 +28,7 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
   List<Phase> phases = []
 
   IndexMigrator migrator(Map args = [:]) {
-    def builder = IndexMigrator.builder().engine(engine)
+    def builder = IndexMigrator.builder().engine(args.engine ?: engine)
         .mapper(args.mapper ?: TITLE_KEYWORD)
         .options(args.options ?: ZD)
         .scriptProvider(args.scripts ?: MigrationScriptProvider.none())
@@ -145,6 +145,8 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
         "putMappings ${V2}",
         "openPit ${V1}",
         "closePit PIT",
+        "openPit ${V1}",
+        "closePit PIT",
         "putMappings ${V2}",
         "closePit PIT",
         "putMappings ${V2}",
@@ -162,7 +164,7 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
 
     then:
     result.ok()
-    seen[Phase.PREPARED] == [action: 'reindex', from: V1, phase: 'copying']
+    seen[Phase.PREPARED] == [action: 'reindex', from: V1, phase: 'copying', checkpoint: 4]
     seen[Phase.COPIED] == seen[Phase.PREPARED]
     seen[Phase.CAUGHT_UP] == seen[Phase.PREPARED]
     seen[Phase.SNAPSHOT].subMap('action', 'from', 'phase') == [action: 'reindex', from: V1, phase: 'swapping']
@@ -215,7 +217,7 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     result.outcomes()[0].reconcile() == new ReconcileStats(0, 0, 1, 0)
   }
 
-  def "a script that changes document ids fails the reconcile and advises BLOCKING"() {
+  def "a script that changes document ids is caught by the probe before the swap"() {
     given:
     MigrationScriptProvider scripts = { alias, from, to -> Optional.of('ctx._id = params.alias') }
 
@@ -226,11 +228,29 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     then:
     !result.ok()
     outcome.status() == MigrationResult.Status.FAILED
+    outcome.index() == V1
+    outcome.error().message.startsWith('the migration script changes _id; use ReindexMode.BLOCKING or fix the script')
+    engine.indices() == [(V1): ['documents'] as Set]
+    !engine.isWriteBlocked(V1)
+    phases == [Phase.PREPARED, Phase.COPIED, Phase.CAUGHT_UP]
+  }
+
+  def "a script that changes only some ids gets past the probe and is caught by the reconcile"() {
+    given: 'the probe sees only d0..d4; n1, written after the catch-up, gets an id the script changes'
+    engine = new IdChangingStagingEngine()
+    setup()
+    MigrationScriptProvider scripts = { alias, from, to -> Optional.of('ctx._source.migrated = params.to_hash') }
+    on[Phase.SNAPSHOT] = { put('n1', 'new'); (engine as IdChangingStagingEngine).changeIds = true }
+
+    when:
+    def result = migrator(scripts: scripts).bootstrap(Document)
+    def outcome = result.outcomes()[0]
+
+    then:
+    outcome.status() == MigrationResult.Status.FAILED
     outcome.index() == V2
     outcome.error().message.contains('a script must not change _id')
-    outcome.error().message.contains('ReindexMode.BLOCKING')
     outcome.error().message.contains('resume the reconcile')
-    engine.indices()[V2] == ['documents'] as Set
     pending(V2).phase == 'reconciling'
   }
 
@@ -364,7 +384,7 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     boolean wrote = false
     def writes = { if (!wrote) { wrote = true; put('d0', 'pre-swap'); remove('d1'); put('n1', 'new 1') } }
     on[Phase.CAUGHT_UP] = writes
-    on[phase] = { writes(); throw new IllegalStateException('killed') }
+    on[phase] = { writes(); throw new MigrationListener.Abort('killed') }
 
     when: 'the run dies after the phase'
     def crashed = migrator().bootstrap(Document)
@@ -406,7 +426,7 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
 
   def "a resumed reindex after the swap never copies with _reindex again"() {
     given:
-    on[Phase.FROZEN] = { throw new IllegalStateException('killed') }
+    on[Phase.FROZEN] = { throw new MigrationListener.Abort('killed') }
     migrator().bootstrap(Document)
     engine.clearLog()
 
@@ -429,7 +449,7 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
 
   def "a crash before the swap restarts from the copy into the same index"() {
     given:
-    on[Phase.SNAPSHOT] = { throw new IllegalStateException('killed') }
+    on[Phase.SNAPSHOT] = { throw new MigrationListener.Abort('killed') }
     migrator().bootstrap(Document)
 
     when:
@@ -446,52 +466,176 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     def blockingPlan = blocking.plan(Document)
     def result = blocking.apply(blockingPlan)
 
-    then: 'it reuses the index and removes the marker'
+    then: 'it recreates the index, since a marked leftover is not a blocking copy'
     blockingPlan.items()[0].resume() == null
     result.ok()
     pending(V2) == null
     engine.documents(V2).size() == 5
+    engine.log().contains("deleteIndex ${V2}".toString())
   }
 
-  def "a lost snapshot falls back to creating missing documents and reports what it could not decide"() {
+  def "a resume before the swap closes the point in time of the interrupted run"() {
+    given:
+    on[Phase.SWAPPED] = { }
+    def failing = new FailingSwapEngine()
+    engine = failing
+    setup()
+    migrator().bootstrap(Document)
+    assert engine.openPits().isEmpty()
+
+    when: 'a run aborted at SNAPSHOT closes its point in time too'
+    engine = new InMemorySearchEngine()
+    setup()
+    on[Phase.SNAPSHOT] = { throw new MigrationListener.Abort('killed') }
+    migrator().bootstrap(Document)
+
+    then:
+    engine.openPits().isEmpty()
+    pending(V2).pit != null
+
+    when: 'the resume closes the recorded point in time before it opens a new one'
+    engine.clearLog()
+    on.clear()
+    migrator(listen: false).bootstrap(Document)
+
+    then:
+    engine.log().findIndexOf { it.startsWith('closePit') } < engine.log().findIndexOf { it.startsWith('openPit') }
+  }
+
+  def "only copying and swapping markers restart a copy"() {
+    given:
+    on[Phase.SNAPSHOT] = { throw new MigrationListener.Abort('killed') }
+    migrator().bootstrap(Document)
+    def marker = pending(V2) + [phase: 'reconciling']
+    engine.putMappings(V2, [_meta: [elastic_protos: engine.getMappings(V2)._meta.elastic_protos + [pending: marker]]])
+
+    expect:
+    migrator(listen: false).plan(Document).items()[0].resume() == null
+  }
+
+  def "a listener that fails with anything but Abort is ignored"() {
+    given:
+    on[Phase.COPIED] = { throw new IllegalStateException('boom') }
+
+    expect:
+    migrator().bootstrap(Document).ok()
+  }
+
+  def "a version reset after gc_deletes is caught by the sequence number checkpoint"() {
+    given: 'd0 is deleted, its tombstone expires, and it is written again at version 1, after the catch-up'
+    on[Phase.CAUGHT_UP] = {
+      remove('d0')
+      engine.expireTombstones()
+      put('d0', 'reborn')
+      assert engine.get(V1, 'd0').get().version() == 1L
+    }
+
+    when:
+    def result = migrator(engine: engineWith(checkpoint)).bootstrap(Document)
+
+    then:
+    result.ok()
+    titles(V2).d0 == expected
+
+    where:
+    checkpoint | expected
+    'real'     | 'reborn'
+    'useless'  | 'Title 0'
+  }
+
+  def "with a gc_deletes lifetime, tombstones expire on their own"() {
+    given:
+    engine.gcDeletes(Duration.ZERO)
+    remove('d0')
+
+    expect:
+    engine.tombstoneVersion(V1, 'd0') == null
+    engine.gcDeletes(null).is(engine)
+  }
+
+  def "an engine without checkpoints treats every document as possibly changed"() {
+    given:
+    engine = new NoCheckpointEngine()
+    setup()
+    on[Phase.CAUGHT_UP] = { put('d0', 'pre-swap') }
+
+    when:
+    def result = migrator().bootstrap(Document)
+
+    then:
+    result.ok()
+    titles(V2).d0 == 'pre-swap'
+    pending(V2) == null
+  }
+
+  def "a lost snapshot is reported, not guessed at: INCOMPLETE, nothing written, marker kept"() {
     given:
     on[Phase.CAUGHT_UP] = { put('d0', 'pre-swap'); remove('d1'); put('n1', 'new 1') }
-    on[Phase.FROZEN] = { throw new IllegalStateException('killed') }
+    on[Phase.SWAPPED] = { remove('d3') }
+    on[Phase.FROZEN] = { throw new MigrationListener.Abort('killed') }
+    migrator().bootstrap(Document)
+    engine.expirePits()
+    engine.clearLog()
+
+    when:
+    def result = migrator(listen: false).bootstrap(Document)
+    def outcome = result.outcomes()[0]
+
+    then: 'd3, deleted through the alias after the swap, is not brought back'
+    !result.ok()
+    outcome.status() == MigrationResult.Status.INCOMPLETE
+    outcome.index() == V2
+    outcome.retainedIndices() == [V1]
+    outcome.warnings()[0] == "the snapshot of ${V2} taken at the swap was lost; nothing was written. 2 documents of ${V1}".toString() +
+        " are missing from ${V2}, 1 differ, and 1 exist only in ${V2}. Missing documents may have been written before the swap".toString() +
+        ' or deleted through the alias after it; apply again with DegradedReconcile.CREATE_MISSING to create them, or remove the pending marker'
+    !engine.log().any { it.startsWith('bulk') }
+    !engine.documents(V2).containsKey('d3')
+    pending(V2).phase == 'reconciling'
+    migrator(listen: false).plan(Document).items()[0].resume().swapped()
+  }
+
+  def "with CREATE_MISSING a lost snapshot creates missing documents and reports what it could not decide"() {
+    given:
+    on[Phase.CAUGHT_UP] = { put('d0', 'pre-swap'); remove('d1'); put('n1', 'new 1') }
+    on[Phase.FROZEN] = { throw new MigrationListener.Abort('killed') }
     migrator().bootstrap(Document)
     engine.expirePits()
 
     when:
-    def result = migrator(listen: false).bootstrap(Document)
+    def result = migrator(listen: false, options: ZD.withDegradedReconcile(DegradedReconcile.CREATE_MISSING)).bootstrap(Document)
     def outcome = result.outcomes()[0]
 
     then:
     result.ok()
     outcome.status() == MigrationResult.Status.APPLIED
     outcome.reconcile() == new ReconcileStats(1, 0, 0, 1)
-    outcome.warnings()[0] == "the snapshot of ${V2} taken at the swap was lost, so only missing documents were created:".toString() +
-        " 1 documents differ between ${V1} and ${V2} and were left as they are in ${V2}, and 1 documents exist only in ${V2} and were kept".toString()
+    outcome.warnings()[0] == "the snapshot of ${V2} taken at the swap was lost, so missing documents were created (including any deleted".toString() +
+        " through the alias since the swap): 1 created, 1 documents differ between ${V1} and ${V2} and were left as they are in ${V2}, and 1 documents exist only in ${V2} and were kept".toString()
     titles(V2).n1 == 'new 1'
     titles(V2).d0 == 'Title 0'
     pending(V2) == null
   }
 
-  def "a lost snapshot with nothing left to decide says so"() {
+  def "a lost snapshot with nothing to decide still reports, and INCOMPLETE stays until the operator decides"() {
     given:
-    on[Phase.FROZEN] = { throw new IllegalStateException('killed') }
+    on[Phase.FROZEN] = { throw new MigrationListener.Abort('killed') }
     migrator().bootstrap(Document)
     engine.expirePits()
 
     when:
     def result = migrator(listen: false).bootstrap(Document)
+    def again = migrator(listen: false).bootstrap(Document)
 
     then:
-    result.ok()
-    result.outcomes()[0].warnings() == ["the snapshot of ${V2} taken at the swap was lost; only missing documents were created, and no other difference was found".toString()]
+    result.outcomes()[0].status() == MigrationResult.Status.INCOMPLETE
+    result.outcomes()[0].warnings()[0].contains('0 documents of')
+    again.outcomes()[0].status() == MigrationResult.Status.INCOMPLETE
   }
 
   def "a resume whose old index is gone only removes the marker"() {
     given:
-    on[Phase.FROZEN] = { throw new IllegalStateException('killed') }
+    on[Phase.FROZEN] = { throw new MigrationListener.Abort('killed') }
     migrator().bootstrap(Document)
     engine.deleteIndex(V1)
 
@@ -508,7 +652,7 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
 
   def "a resume after the proto changed again warns and finishes the interrupted reindex first"() {
     given:
-    on[Phase.FROZEN] = { throw new IllegalStateException('killed') }
+    on[Phase.FROZEN] = { throw new MigrationListener.Abort('killed') }
     migrator().bootstrap(Document)
 
     when:
@@ -541,7 +685,7 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
 
   def "a dry run of a resume reports the target index"() {
     given:
-    on[Phase.FROZEN] = { throw new IllegalStateException('killed') }
+    on[Phase.FROZEN] = { throw new MigrationListener.Abort('killed') }
     migrator().bootstrap(Document)
 
     when:
@@ -607,6 +751,54 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
         }, 0)
       }
       super.bulk(operations)
+    }
+  }
+
+  /** Switches to the engine variant a feature needs. */
+  InMemorySearchEngine engineWith(String checkpoint) {
+    if (checkpoint == 'useless') {
+      def useless = new CheckpointEngine(fixed: Long.MAX_VALUE)
+      copyDocuments(useless)
+      engine = useless
+    }
+    engine
+  }
+
+  void copyDocuments(InMemorySearchEngine target) {
+    // rebuild the starting state in the other engine
+    IndexMigrator.builder().engine(target).mapper(DEFAULT).options(ZD)
+        .build().bootstrap(Document)
+    5.times { target.index('documents', "d${it}", [id: "d${it}".toString(), title: "Title ${it}".toString(), body: 'b'], IndexOptions.defaults()) }
+  }
+
+  /** Reports a fixed checkpoint, standing in for a reconcile without the checkpoint. */
+  static class CheckpointEngine extends InMemorySearchEngine {
+    long fixed
+
+    @Override
+    long seqNoCheckpoint(String index) {
+      fixed
+    }
+  }
+
+  /** Reports no checkpoint, like an engine that does not implement it. */
+  static class NoCheckpointEngine extends InMemorySearchEngine {
+    @Override
+    long seqNoCheckpoint(String index) {
+      -1
+    }
+  }
+
+  /** Stages documents under another id once {@code changeIds} is set. */
+  static class IdChangingStagingEngine extends InMemorySearchEngine {
+    boolean changeIds
+
+    @Override
+    com.phatjam98.elasticprotos.engine.ReindexResult reindex(com.phatjam98.elasticprotos.engine.ReindexRequest request) {
+      if (changeIds && request.dest().endsWith(IndexMigrator.STAGING_SUFFIX)) {
+        return super.reindex(request.withScript('ctx._id = params.alias', request.scriptParams()))
+      }
+      super.reindex(request)
     }
   }
 

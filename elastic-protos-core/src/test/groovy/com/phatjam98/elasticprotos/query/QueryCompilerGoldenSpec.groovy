@@ -28,6 +28,7 @@ import com.phatjam98.elasticprotos.proto.SortingOrder
 import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
 import com.phatjam98.elasticprotos.proto.test.Geo
+import java.time.Instant
 import spock.lang.Shared
 import spock.lang.Specification
 import spock.lang.Unroll
@@ -74,6 +75,10 @@ class QueryCompilerGoldenSpec extends Specification {
     'text_regex'            | permissive | document | where(fc('firm_id', TEXT_REGEX, str('f[0-9]+')))
     'num_range'             | strict    | document | where(fc('size_bytes', NUM_RANGE, range(100, 1000, true, false)))
     'num_range_date'        | strict    | document | where(fc('filed_at', NUM_RANGE, range(1.7e12, 1.8e12)))
+    'num_range_min_only'    | strict    | document | where(fc('size_bytes', NUM_RANGE, Values.atLeast(100)))
+    'num_range_max_only'    | strict    | document | where(fc('size_bytes', NUM_RANGE, Values.lessThan(1000)))
+    'num_range_date_after'  | strict    | document | where(fc('filed_at', NUM_RANGE, Values.after(Instant.ofEpochMilli(1700000000000L))))
+    'num_range_date_on_or_before' | strict | document | where(fc('filed_at', NUM_RANGE, Values.onOrBefore(Instant.ofEpochMilli(1800000000000L))))
     'any_in'                | strict    | document | where(fc('tags', ANY_IN, list('urgent', 'sealed')))
     'geo_distance'          | strict    | firm     | where(fc('headquarters.location', GEO_DISTANCE, geoDistance()))
     'geo_bounding_box'      | strict    | geo      | where(fc('point', GEO_BOUNDING_BOX, box()))
