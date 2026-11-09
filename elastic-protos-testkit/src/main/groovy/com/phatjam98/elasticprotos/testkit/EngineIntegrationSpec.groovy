@@ -667,7 +667,7 @@ abstract class EngineIntegrationSpec extends Specification {
     result.outcomes()[0].retainedIndices().isEmpty()
     engine.getAliases(documents.alias()).keySet() == [originalDocumentIndex] as Set
     live._meta.elastic_protos.hash == keywordDocuments.contentHash()
-    live._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version'] as Set
+    live._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version', 'static_settings'] as Set
     live.properties.body.fields.keyword.type == 'keyword'
     multiField.plan(Document).items()*.action() == [Action.NO_OP]
 
@@ -710,7 +710,7 @@ abstract class EngineIntegrationSpec extends Specification {
     result.outcomes()[0].destCount() == 6L
     result.outcomes()[0].reconcile() == new ReconcileStats(0, 0, 0, 0)
     engine.getAliases(v1.alias()).keySet() == [v2.name()] as Set
-    engine.getMappings(v2.name())._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version'] as Set
+    engine.getMappings(v2.name())._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version', 'static_settings'] as Set
     ids(engine.search([v1.alias()], [query: [term: ['body.keyword':
         'Counsel enters an appearance on behalf of the defendant.']]])) == ['doc-4'] as Set
     migrator.plan(Document).items()*.action() == [Action.NO_OP]
@@ -758,7 +758,7 @@ abstract class EngineIntegrationSpec extends Specification {
     result.outcomes()[0].retainedIndices() == [originalDocumentIndex]
     engine.getAliases(alias).keySet() == [target.name()] as Set
     engine.getMappings(alias).properties.title.type == 'keyword'
-    engine.getMappings(target.name())._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version'] as Set
+    engine.getMappings(target.name())._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version', 'static_settings'] as Set
 
     and: 'the last write wins per document and nothing deleted comes back, including zd-9, updated in the old index after the catch-up and deleted in the new one after the swap'
     titles(target.name()) == SampleData.documents().collectEntries { [(it.id): it.title] } + [
@@ -886,7 +886,7 @@ abstract class EngineIntegrationSpec extends Specification {
     titles(originalDocumentIndex)['zd-8'] == 'after the reindex'
     titles(originalDocumentIndex)['zd-1'] == 'after swap'
     count(alias) == 11
-    engine.getMappings(originalDocumentIndex)._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version'] as Set
+    engine.getMappings(originalDocumentIndex)._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version', 'static_settings'] as Set
     outcome { engine.index(next, 'x', [id: 'x'], IndexOptions.defaults()) } == EngineException.Kind.BLOCKED
 
     when: 'the restored index takes writes'
@@ -942,6 +942,8 @@ abstract class EngineIntegrationSpec extends Specification {
     engine.getAliases(v1.alias()).keySet() == [v1.name() + '-g2'] as Set
     newSettings.number_of_shards == '2'
     newSettings.refresh_interval == '5s'
+    engine.getMappings(v1.name() + '-g2')._meta.elastic_protos.static_settings ==
+        DiffClassifier.staticSettingsDigest(sharded.map(Document).settings(), [] as Set)
     reindexing.plan(Document).items()*.action() == [Action.NO_OP]
   }
 

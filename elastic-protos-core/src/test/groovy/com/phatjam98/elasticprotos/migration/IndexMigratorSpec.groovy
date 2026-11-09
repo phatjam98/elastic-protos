@@ -1161,6 +1161,98 @@ class IndexMigratorSpec extends Specification {
     engine.getSettings(firms + '-g2').index.number_of_shards == '1'
   }
 
+  def "the recorded static settings digest decides, so an engine spelling cannot loop a reindex"() {
+    given: 'an index whose engine reports codec differently from the declaration, but records its digest'
+    def mapper = withSettings(codec: 'best_compression')
+    def target = mapper.map(Firm)
+    Map mappings = new TreeMap(target.mappings())
+    mappings._meta = [elastic_protos: mappings._meta.elastic_protos +
+        [static_settings: DiffClassifier.staticSettingsDigest(target.settings(), [] as Set)]]
+    engine.createIndex(target.name(), [number_of_shards: 1, codec: 'BEST_COMPRESSION'], mappings, ['firms'] as Set)
+    def options = BLOCKING.withStaticSettings(StaticSettingsPolicy.REINDEX)
+
+    expect:
+    migrator(mapper, options).plan(Firm).items()[0].action() == Action.NO_OP
+
+    when: 'without the digest the engine values are compared'
+    engine.putMappings(target.name(), [_meta: [elastic_protos: [hash: target.contentHash()]]])
+    def item = migrator(mapper, options).plan(Firm).items()[0]
+
+    then:
+    item.action() == Action.REINDEX
+    item.warnings().isEmpty()
+  }
+
+  def "a new index the engine reports with other static values fails instead of looping"() {
+    given:
+    engine = new SpellingEngine()
+    def mapper = withSettings(codec: 'best_compression')
+    String firms = mapper.map(Firm).name()
+    engine.createIndex(firms, [number_of_shards: 1, codec: 'default'], mapper.map(Firm).mappings(), ['firms'] as Set)
+
+    when:
+    def result = migrator(mapper, BLOCKING.withStaticSettings(StaticSettingsPolicy.REINDEX)).bootstrap(Firm)
+
+    then:
+    result.outcomes()[0].status() == MigrationResult.Status.FAILED
+    result.outcomes()[0].error().message.startsWith('engine reports BEST for codec; declare it that way')
+    !engine.indexExists(firms + '-g2')
+    !engine.isWriteBlocked(firms)
+  }
+
+  def "the static settings warning is left out when the item reindexes anyway"() {
+    given:
+    engine.createIndex(DOC_V1, [number_of_shards: 2], DEFAULT.map(Document).mappings(), ['documents'] as Set)
+    def mapper = ProtoMapper.builder().overrides(MappingOverrides.builder()
+        .forPath('title') { it.setType(EsType.KEYWORD) }.setting('number_of_shards', 1).build()).build()
+
+    when:
+    def item = migrator(mapper).plan(Document).items()[0]
+
+    then:
+    item.action() == Action.REINDEX
+    !item.warnings().any { it.startsWith('static settings differ') }
+  }
+
+  def "declared shard and replica counts are not doubled by the defaults, in any spelling"() {
+    given:
+    engine = new CapturingEngine()
+    def mapper = withSettings('index.number_of_shards': 3, index: [number_of_replicas: 0])
+
+    when:
+    migrator(mapper).bootstrap(Document)
+
+    then:
+    engine.created.keySet() == ['index', 'index.number_of_shards'] as Set
+  }
+
+  def "extra dynamic settings are applied in place, with or without the index. prefix"() {
+    given:
+    migrator().bootstrap(Firm)
+    def mapper = withSettings(codec: 'best_compression')
+
+    when:
+    def plain = migrator(mapper).plan(Firm).items()[0]
+    def item = migrator(mapper, BLOCKING.withExtraDynamicSettings(['index.codec'] as Set)).plan(Firm).items()[0]
+
+    then:
+    plain.action() == Action.NO_OP
+    plain.warnings() == ['static settings differ; not applied: codec null -> best_compression']
+    item.action() == Action.UPDATE_SETTINGS
+    item.reason() == 'dynamic settings changed: codec null -> best_compression'
+  }
+
+  def "a blocked reindex names the dynamic settings it leaves out too"() {
+    given:
+    migrator().bootstrap(Document)
+    def mapper = ProtoMapper.builder().overrides(MappingOverrides.builder()
+        .forPath('title') { it.setType(EsType.KEYWORD) }.setting('refresh_interval', '5s').build()).build()
+
+    expect:
+    migrator(mapper, BLOCKING.withAllowReindex(false)).plan(Document).items()[0].reason()
+        .endsWith('; dynamic settings not applied either: refresh_interval null -> 5s')
+  }
+
   def "a legacy index without metadata reports the legacy hash"() {
     given:
     Map mappings = new TreeMap(DEFAULT.map(Document).mappings())
@@ -1310,6 +1402,31 @@ class IndexMigratorSpec extends Specification {
   }
 
   /** Copies like the real engine, then answers with a canned result, optionally losing a document. */
+  /** Reports codec as BEST on new generations, like an engine that normalizes the value. */
+  static class SpellingEngine extends InMemorySearchEngine {
+    @Override
+    Map<String, Object> getSettings(String aliasOrIndex) {
+      def settings = super.getSettings(aliasOrIndex)
+      if (aliasOrIndex.endsWith('-g2')) {
+        def index = new TreeMap(settings.index)
+        index.codec = 'BEST'
+        return [index: index]
+      }
+      settings
+    }
+  }
+
+  /** Records the settings of the last created index. */
+  static class CapturingEngine extends InMemorySearchEngine {
+    Map<String, Object> created
+
+    @Override
+    void createIndex(String name, Map<String, Object> settings, Map<String, Object> mappings, Set<String> aliases) {
+      created = settings
+      super.createIndex(name, settings, mappings, aliases)
+    }
+  }
+
   static class CannedReindexEngine extends InMemorySearchEngine {
     ReindexResult answer
     boolean dropOne

@@ -192,6 +192,10 @@ class DiffClassifierSpec extends Specification {
     'ignore managed keys'                      | [index: [blocks: [write: 'true']]]                                 | ['blocks.write': false, uuid: 'x', 'version.created': 1]  | []        | []                         | []                                    | ['blocks.write', 'uuid', 'version.created']
     'skip replicas under auto_expand_replicas' | [index: [number_of_replicas: '1', auto_expand_replicas: '0-1']]   | [auto_expand_replicas: '0-1', number_of_replicas: 0]      | []        | []                         | []                                    | []
     'compare replicas when auto-expand is off' | [index: [number_of_replicas: '1', auto_expand_replicas: 'false']] | [auto_expand_replicas: false, number_of_replicas: 0]      | []        | ['number_of_replicas']     | []                                    | []
+    'ignore managed keys only when they differ' | [index: [blocks: [write: 'true'], uuid: 'x']]                     | ['blocks.write': true, uuid: 'x']                         | []        | []                         | []                                    | []
+    'leave replicas to an existing auto-expand' | [index: [number_of_replicas: '1', auto_expand_replicas: '0-1']]  | [number_of_replicas: 2]                                   | []        | []                         | []                                    | ['number_of_replicas']
+    'treat merge settings as dynamic'          | [index: [:]]                                                       | ['merge.policy.max_merged_segment': '2gb', 'soft_deletes.retention_lease.period': '6h'] | [] | ['merge.policy.max_merged_segment', 'soft_deletes.retention_lease.period'] | [] | []
+    'take extra dynamic prefixes'              | [index: [:]]                                                       | ['lifecycle.name': 'p']                                   | ['lifecycle.'] | ['lifecycle.name']   | []                                    | []
     'accept null settings'                     | null                                                               | null                                                      | []        | []                         | []                                    | []
   }
 
@@ -202,6 +206,9 @@ class DiffClassifierSpec extends Specification {
         ['settings managed by the engine or the migrator are never applied: [uuid]',
          'static settings differ; not applied: number_of_shards 2 -> 1']
     DiffClassifier.settingsWarnings([:], [refresh_interval: '5s']).isEmpty()
+    DiffClassifier.settingsWarnings([:], [codec: 'x'], ['codec'] as Set).isEmpty()
+    DiffClassifier.settingsWarnings([index: [auto_expand_replicas: '0-all', number_of_replicas: '2']], [number_of_replicas: 1]) ==
+        ['number_of_replicas is managed by auto_expand_replicas on the index; not applied']
   }
 
   def "a settings diff lists its dynamic values for the settings API and describes itself"() {
@@ -218,6 +225,9 @@ class DiffClassifierSpec extends Specification {
     !DiffClassifier.isDynamicSetting('number_of_shards', [] as Set)
     DiffClassifier.isManagedSetting('creation_date')
     new MappingDiff([], [], [], [], false, []).settings().isEmpty()
+    DiffClassifier.staticSettingsDigest([number_of_shards: 2, refresh_interval: '5s'], [] as Set) ==
+        DiffClassifier.staticSettingsDigest(['index.number_of_shards': '2'], [] as Set)
+    DiffClassifier.staticSettingsDigest([number_of_shards: 2], [] as Set) != DiffClassifier.staticSettingsDigest([:], [] as Set)
   }
 
   def "a settings-only difference is not an empty diff but classifies as a no-op"() {
