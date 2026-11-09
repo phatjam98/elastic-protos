@@ -7,6 +7,7 @@ import com.phatjam98.elasticprotos.engine.ReindexRequest;
 import com.phatjam98.elasticprotos.engine.ReindexResult;
 import com.phatjam98.elasticprotos.engine.SearchEngine;
 import com.phatjam98.elasticprotos.mapping.IndexDefinition;
+import com.phatjam98.elasticprotos.mapping.IndexNamingStrategy;
 import com.phatjam98.elasticprotos.mapping.ProtoMapper;
 import com.phatjam98.elasticprotos.migration.MappingDiff.Change;
 import com.phatjam98.elasticprotos.migration.MigrationResult.Outcome;
@@ -41,6 +42,11 @@ import org.slf4j.LoggerFactory;
  * points at is assumed to be left by an interrupted reindex and is cleared when that index needs
  * no reindex, unless {@link MigrationOptions#clearStaleWriteBlock()} is false.
  *
+ * <p>A {@code PUT_MAPPING} keeps the index name while the recorded hash moves on, so a later
+ * reindex can find that the alias already points at an index with the target name. The new index
+ * then gets the lowest free generation of that name, {@code <name>-g2}, {@code <name>-g3} and so
+ * on (see {@link IndexNamingStrategy#generationName}).
+ *
  * <p>Running the migrator for the same aliases from several processes at once is unsupported and
  * can be destructive: one process can clear the write block or delete the index another is
  * reindexing into. Run it from one instance or a dedicated job.
@@ -51,6 +57,9 @@ public final class IndexMigrator {
 
   /** The hash reported for indices created without elastic-protos metadata. */
   public static final String LEGACY_HASH = "legacy";
+
+  /** The highest index generation tried before a name collision is reported as blocked. */
+  private static final int MAX_GENERATION = 100;
 
   private final SearchEngine engine;
   private final ProtoMapper mapper;
@@ -210,13 +219,48 @@ public final class IndexMigrator {
               warnings);
         }
         if (current.equals(target.name())) {
-          return new IndexPlan(target, Action.BLOCKED, current, currentHash, diff,
-              "index " + current + " already has the target name but different mappings: "
-                  + breaking, warnings);
+          String next = nextGeneration(target, current);
+          if (next == null) {
+            return new IndexPlan(target, Action.BLOCKED, current, currentHash, diff,
+                "index " + current + " already has the target name but different mappings,"
+                    + " and no free generation of it was found: " + breaking, warnings);
+          }
+          return new IndexPlan(renamed(target, next), Action.REINDEX, current, currentHash,
+              diff, "breaking change: " + breaking + "; " + current
+                  + " already has the target name, so the new index is " + next, warnings);
         }
         return new IndexPlan(target, Action.REINDEX, current, currentHash, diff,
             "breaking change: " + breaking, warnings);
     }
+  }
+
+  /**
+   * Picks the index to reindex into when the alias already points at an index with the target
+   * name, as happens after a {@code PUT_MAPPING} moved that index's hash on and the proto went
+   * back: the lowest generation ({@link IndexNamingStrategy#generationName}, from 2) that does
+   * not exist, or that is a leftover of an interrupted run recording the target hash.
+   *
+   * @return the name, or null when none of the first {@value #MAX_GENERATION} generations fits
+   */
+  private String nextGeneration(IndexDefinition target, String current) {
+    IndexNamingStrategy naming = mapper.naming();
+    for (int generation = 2; generation <= MAX_GENERATION; generation++) {
+      String name = naming.generationName(target.name(), generation);
+      if (name.equals(current)) {
+        continue;
+      }
+      if (!engine.indexExists(name)
+          || recordedHash(engine.getMappings(name)).equals(target.contentHash())) {
+        return name;
+      }
+    }
+    return null;
+  }
+
+  private static IndexDefinition renamed(IndexDefinition target, String name) {
+    return new IndexDefinition(target.descriptor(), target.alias(), name, target.contentHash(),
+        target.settings(), target.mappings(), target.fields(), target.nestedPaths(),
+        target.fullTextFields(), target.ignoredPaths(), target.idField(), target.warnings());
   }
 
   private static String upToDate(String hash) {
@@ -241,6 +285,10 @@ public final class IndexMigrator {
     }
     for (Change change : diff.paramChanged()) {
       parts.add(change.path() + " " + change.before() + " -> " + change.after());
+    }
+    if (!diff.unindexedAdditions().isEmpty()) {
+      parts.add("added " + paths(diff.unindexedAdditions())
+          + ", which existing documents were never indexed into");
     }
     if (!diff.removed().isEmpty()) {
       parts.add("removed " + paths(diff.removed()));
@@ -341,7 +389,7 @@ public final class IndexMigrator {
           return reindex(item);
         case BLOCKED:
           LOG.info("{}: blocked: {}", item.alias(), item.reason());
-          return new Outcome(item, Status.SKIPPED, item.currentIndex(), List.of(), null);
+          return new Outcome(item, Status.BLOCKED, item.currentIndex(), List.of(), null);
         default:
           LOG.info("{}: {} is up to date", item.alias(), item.currentIndex());
           return new Outcome(item, clearStaleWriteBlock(item) ? Status.APPLIED : Status.SKIPPED,
@@ -391,6 +439,9 @@ public final class IndexMigrator {
     final boolean createdNext = prepareTarget(target, current);
     LOG.info("{}: blocking writes to {}", alias, current);
     engine.setWriteBlock(current, true);
+    long before;
+    long after;
+    List<String> warnings = new ArrayList<>();
     try {
       engine.refresh(current);
       ReindexRequest request = ReindexRequest.of(current, next)
@@ -410,11 +461,18 @@ public final class IndexMigrator {
             + (result.timedOut() ? "timed out" : result.failures().size() + " failures, first "
                 + result.failures().get(0)));
       }
-      long before = engine.count(current);
-      long after = engine.count(next);
+      before = engine.count(current);
+      after = engine.count(next);
       if (before != after) {
-        throw new MigrationException("reindex " + current + " -> " + next + " copied " + after
-            + " of " + before + " documents");
+        if (script.isEmpty()) {
+          throw new MigrationException("reindex " + current + " -> " + next + " copied " + after
+              + " of " + before + " documents");
+        }
+        // A script may drop or add documents on purpose; the engine reported no failures.
+        String warning = "the migration script left " + after + " documents in " + next
+            + " from " + before + " in " + current;
+        LOG.warn("{}: {}", alias, warning);
+        warnings.add(warning);
       }
     } catch (RuntimeException e) {
       LOG.warn("{}: reindex {} -> {} failed: {}", alias, current, next, e.getMessage());
@@ -444,10 +502,11 @@ public final class IndexMigrator {
     if (options.deleteOldAfter()) {
       LOG.info("{}: deleting old index {}", alias, current);
       engine.deleteIndex(current);
-      return new Outcome(item, Status.APPLIED, next, List.of(), null);
+      return new Outcome(item, Status.APPLIED, next, List.of(), null, before, after, warnings);
     }
     LOG.info("{}: retaining old index {} (write-blocked)", alias, current);
-    return new Outcome(item, Status.APPLIED, next, List.of(current), null);
+    return new Outcome(item, Status.APPLIED, next, List.of(current), null, before, after,
+        warnings);
   }
 
   /**

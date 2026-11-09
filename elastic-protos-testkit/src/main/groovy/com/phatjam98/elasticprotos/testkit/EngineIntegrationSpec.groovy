@@ -25,9 +25,11 @@ import com.phatjam98.elasticprotos.migration.Action
 import com.phatjam98.elasticprotos.migration.DiffClassifier
 import com.phatjam98.elasticprotos.migration.IndexMigrator
 import com.phatjam98.elasticprotos.migration.IndexPlan
+import com.phatjam98.elasticprotos.migration.MigrationOptions
 import com.phatjam98.elasticprotos.migration.MigrationPlan
 import com.phatjam98.elasticprotos.migration.MigrationResult
 import com.phatjam98.elasticprotos.migration.MigrationScriptProvider
+import com.phatjam98.elasticprotos.migration.RemovedFieldPolicy
 import com.phatjam98.elasticprotos.proto.Bool3
 import com.phatjam98.elasticprotos.proto.DistanceUnit
 import com.phatjam98.elasticprotos.proto.EsType
@@ -91,7 +93,7 @@ abstract class EngineIntegrationSpec extends Specification {
 
   // state carried between the ordered features
   @Shared String originalDocumentIndex
-  @Shared IndexDefinition additiveDocuments
+  @Shared IndexDefinition keywordDocuments
   @Shared IndexPlan reindexPlan
 
   /** Connects to the server under test; called once, before any feature. */
@@ -517,34 +519,100 @@ abstract class EngineIntegrationSpec extends Specification {
 
   // ------------------------------------------------------------------ migrations
 
-  def "an added keyword sub-field is applied in place with PUT_MAPPING"() {
+  def "an added top-level field is applied in place, and reverting it reindexes into the next generation"() {
+    given: 'a second documents alias, created by a mapper that leaves relevance out, with the sample set'
+    IndexNamingStrategy putNaming = IndexNamingStrategy.prefixed(prefix + '-put')
+    def without = ProtoMapper.builder().naming(putNaming)
+        .overrides(MappingOverrides.builder().ignorePath('relevance').build()).build()
+    def withRelevance = ProtoMapper.builder().naming(putNaming).build()
+    IndexDefinition v1 = without.map(Document)
+    assert IndexMigrator.builder().engine(engine).mapper(without).build().bootstrap(Document).ok()
+    def v1Codec = ProtoDocumentCodec.of(without)
+    def bulk = engine.bulk(SampleData.documents().collect {
+      BulkOp.index(v1.alias(), v1Codec.idOf(it).get(), v1Codec.toDocument(it))
+    })
+    assert !bulk.errors()
+    engine.refresh(v1.alias())
+    def additive = IndexMigrator.builder().engine(engine).mapper(withRelevance).build()
+
+    when:
+    MigrationPlan plan = additive.plan(Document)
+    def result = additive.apply(plan)
+
+    then: 'the index keeps its name while its recorded hash moves on'
+    plan.items()*.action() == [Action.PUT_MAPPING]
+    plan.items()[0].diff().added()*.path() == ['relevance']
+    plan.items()[0].diff().unindexedAdditions().isEmpty()
+    result.ok()
+    result.outcomes()[0].index() == v1.name()
+    engine.getAliases(v1.alias()).keySet() == [v1.name()] as Set
+    engine.getMappings(v1.alias())._meta.elastic_protos.hash == withRelevance.map(Document).contentHash()
+    engine.getMappings(v1.alias()).properties.relevance.type == 'double'
+    additive.plan(Document).items()*.action() == [Action.NO_OP]
+
+    when: 'the proto goes back to v1, with removed fields reindexed'
+    def revert = IndexMigrator.builder().engine(engine).mapper(without)
+        .options(MigrationOptions.standard().withRemovedFields(RemovedFieldPolicy.REINDEX)).build()
+    MigrationPlan back = revert.plan(Document)
+    def reverted = revert.apply(back)
+
+    then: 'the live index already has the v1 name, so the new index is its second generation'
+    back.items()*.action() == [Action.REINDEX]
+    back.items()[0].target().name() == v1.name() + '-g2'
+    reverted.ok()
+    reverted.outcomes()[0].retainedIndices() == [v1.name()]
+    engine.getAliases(v1.alias()).keySet() == [v1.name() + '-g2'] as Set
+    count(v1.alias()) == 6
+    engine.getMappings(v1.alias())._meta.elastic_protos.hash == v1.contentHash()
+    revert.plan(Document).items()*.action() == [Action.NO_OP]
+  }
+
+  def "an added keyword multi-field is applied by reindexing, so old documents are found through it"() {
     given:
     def overrides = MappingOverrides.builder()
         .forField(Document.descriptor, 'body') { it.setKeywordSubfield(Bool3.TRUE) }
         .build()
-    def additiveMapper = ProtoMapper.builder().naming(naming).overrides(overrides).build()
-    def additive = IndexMigrator.builder().engine(engine).mapper(additiveMapper).build()
-    additiveDocuments = additiveMapper.map(Document)
+    def multiFieldMapper = ProtoMapper.builder().naming(naming).overrides(overrides).build()
+    def multiField = IndexMigrator.builder().engine(engine).mapper(multiFieldMapper).build()
+    keywordDocuments = multiFieldMapper.map(Document)
 
     when:
-    MigrationPlan plan = additive.plan(Document)
+    MigrationPlan plan = multiField.plan(Document)
 
     then:
-    plan.items()*.action() == [Action.PUT_MAPPING]
+    plan.items()*.action() == [Action.REINDEX]
     plan.items()[0].diff().added()*.path() == ['body.keyword']
-    additiveDocuments.contentHash() != documents.contentHash()
+    plan.items()[0].diff().unindexedAdditions()*.path() == ['body.keyword']
+    plan.items()[0].currentIndex() == originalDocumentIndex
+    plan.items()[0].target().name() == keywordDocuments.name()
+    keywordDocuments.name() != originalDocumentIndex
 
     when:
-    def result = additive.apply(plan)
+    def result = multiField.apply(plan)
     def live = engine.getMappings(documents.alias())
 
     then:
     result.ok()
-    result.outcomes()[0].index() == originalDocumentIndex
-    engine.getAliases(documents.alias()).keySet() == [originalDocumentIndex] as Set
-    live._meta.elastic_protos.hash == additiveDocuments.contentHash()
+    result.outcomes()[0].index() == keywordDocuments.name()
+    result.outcomes()[0].retainedIndices() == [originalDocumentIndex]
+    result.outcomes()[0].sourceCount() == 6L
+    result.outcomes()[0].destCount() == 6L
+    engine.getAliases(documents.alias()).keySet() == [keywordDocuments.name()] as Set
+    live._meta.elastic_protos.hash == keywordDocuments.contentHash()
     live.properties.body.fields.keyword.type == 'keyword'
-    additive.plan(Document).items()*.action() == [Action.NO_OP]
+    multiField.plan(Document).items()*.action() == [Action.NO_OP]
+
+    and: 'every document indexed before the migration is in the new sub-field'
+    ids(engine.search([documents.alias()], [query: [exists: [field: 'body.keyword']], size: 20])) ==
+        SampleData.documents()*.id as Set
+    ids(engine.search([documents.alias()], [query: [term: ['body.keyword':
+        'Counsel enters an appearance on behalf of the defendant.']]])) == ['doc-4'] as Set
+    docIds(where(fc('body', EQUALS, str('Seller transfers the listed assets to the buyer at closing.'))),
+        keywordDocuments) == ['doc-5'] as Set
+
+    and: 'sorting by body uses the sub-field and orders the old documents'
+    orderedIds(keywordDocuments, sorted(fieldSort('body', SortingOrder.ASC))) ==
+        SampleData.documents().toSorted { it.body }*.id
   }
 
   def "a changed field type is applied by reindexing behind the alias"() {
@@ -563,9 +631,9 @@ abstract class EngineIntegrationSpec extends Specification {
 
     then:
     plan.items()*.action() == [Action.REINDEX]
-    plan.items()[0].currentIndex() == originalDocumentIndex
+    plan.items()[0].currentIndex() == keywordDocuments.name()
     plan.items()[0].target().name() == target.name()
-    target.name() != originalDocumentIndex
+    target.name() != keywordDocuments.name()
 
     when:
     def result = breaking.apply(plan)
@@ -574,10 +642,13 @@ abstract class EngineIntegrationSpec extends Specification {
     then: 'the alias points only at the new index and nothing was lost'
     result.ok()
     result.outcomes()[0].index() == target.name()
-    result.outcomes()[0].retainedIndices() == [originalDocumentIndex]
+    result.outcomes()[0].retainedIndices() == [keywordDocuments.name()]
+    result.outcomes()[0].sourceCount() == 6L
+    result.outcomes()[0].destCount() == 6L
+    result.outcomes()[0].warnings().isEmpty()
     engine.getAliases(documents.alias()).keySet() == [target.name()] as Set
     count(documents.alias()) == 6
-    count(originalDocumentIndex) == 6
+    count(keywordDocuments.name()) == 6
     engine.getMappings(documents.alias()).properties.title.type == 'keyword'
 
     and: 'the migration script ran on every document'
@@ -588,11 +659,11 @@ abstract class EngineIntegrationSpec extends Specification {
     docIds(where(fc('title', TEXT_PREFIX, str('Order '))), target) == ['doc-3'] as Set
 
     when: 'writing to the retained old index'
-    engine.index(originalDocumentIndex, 'doc-x', codec.toDocument(SampleData.documents()[0]), IndexOptions.defaults())
+    engine.index(keywordDocuments.name(), 'doc-x', codec.toDocument(SampleData.documents()[0]), IndexOptions.defaults())
 
     then: 'it is write-blocked'
     thrown(EngineException)
-    engine.indexExists(originalDocumentIndex)
+    engine.indexExists(keywordDocuments.name())
   }
 
   def "rollback points the alias back at the old index and unblocks it"() {
@@ -600,11 +671,11 @@ abstract class EngineIntegrationSpec extends Specification {
     IndexMigrator.builder().engine(engine).mapper(mapper).build().rollback(reindexPlan)
 
     then:
-    engine.getAliases(documents.alias()).keySet() == [originalDocumentIndex] as Set
+    engine.getAliases(documents.alias()).keySet() == [keywordDocuments.name()] as Set
     count(documents.alias()) == 6
 
     when:
-    def written = engine.index(originalDocumentIndex, 'doc-x',
+    def written = engine.index(keywordDocuments.name(), 'doc-x',
         codec.toDocument(SampleData.documents()[0].toBuilder().setId('doc-x').build()), IndexOptions.refreshed())
 
     then:

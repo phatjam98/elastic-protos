@@ -18,10 +18,18 @@ import java.util.TreeSet;
  * one-element list, and key order is ignored.
  *
  * <p>Fields whose children the engine adds on its own are compared by their own parameters only:
- * the {@code properties} of an object or nested field with {@code dynamic: true} on either side,
- * and of a {@code flattened} or {@code flat_object} field, are ignored, so sub-fields picked up
- * from indexed documents (for example the keys of a proto {@code map}) are never reported as
- * removed.
+ * the {@code properties} of an object or nested field with {@code dynamic: true} in the desired
+ * mappings, and of a {@code flattened} or {@code flat_object} field, are ignored, so sub-fields
+ * picked up from indexed documents (for example the keys of a proto {@code map}) are never reported
+ * as removed. When only the current mapping is dynamic, its picked-up sub-fields are still never
+ * reported as removed, but typed properties the desired mapping adds are reported as additions.
+ *
+ * <p>An addition that existing documents were never indexed into is also listed in {@link
+ * MappingDiff#unindexedAdditions()}: a multi-field added under a field that already exists (for
+ * example {@code name.keyword} under {@code name}), and a typed property added under an object or
+ * nested field whose current mapping is dynamic ({@code dynamic: true}, or no properties at all
+ * while dynamic mapping is enabled, inherited from its parents). Brand-new top-level fields and
+ * properties added under an object that already has typed properties are plain additions.
  *
  * <p>Settings are compared only for keys the desired settings declare, by string value, against
  * the engine's {@code settings.index} object. Shard and replica counts cannot be migrated, so
@@ -33,13 +41,17 @@ public final class DiffClassifier {
   /** Path used for root-level parameter changes. */
   public static final String ROOT = "<root>";
 
-  /** Mapping parameters that cannot change without a reindex. */
-  public static final Set<String> REINDEX_PARAMS = Set.of(
-      "analyzer", "search_analyzer", "index", "doc_values", "format", "ignore_above",
-      "normalizer", "copy_to", "null_value", "coerce");
-
-  /** Parameters that the engine can update in place. */
+  /**
+   * The only mapping parameters applied in place. A change to any other parameter ({@code
+   * analyzer}, {@code search_analyzer}, {@code index}, {@code doc_values}, {@code format}, {@code
+   * ignore_above}, {@code normalizer}, {@code copy_to}, {@code null_value}, {@code coerce},
+   * {@code enabled}, and any parameter not listed here) needs a reindex, because either the engine
+   * refuses it or documents already indexed would not reflect it.
+   */
   public static final Set<String> UPDATABLE_PARAMS = Set.of("dynamic");
+
+  /** The dynamic mode of a mapping that does not declare one. */
+  private static final String DEFAULT_DYNAMIC = "true";
 
   private static final Set<String> STRUCTURAL = Set.of("type", "properties", "fields");
   private static final Set<String> FIXED_SETTINGS =
@@ -63,25 +75,29 @@ public final class DiffClassifier {
     Map<String, Object> after = normalizeNode(desiredMappings, true);
     Collector out = new Collector();
     diffParams(ROOT, before, after, out);
-    diffChildren("", map(before.get("properties")), map(after.get("properties")), out);
+    String dynamic = before.containsKey("dynamic")
+        ? String.valueOf(before.get("dynamic")) : DEFAULT_DYNAMIC;
+    diffChildren("", map(before.get("properties")), map(after.get("properties")), dynamic,
+        false, true, out);
     return new MappingDiff(out.added, out.removed, out.typeChanged, out.paramChanged,
-        settingsChanged(existingSettings, desiredSettings));
+        settingsChanged(existingSettings, desiredSettings), out.unindexed);
   }
 
   /**
    * Classifies a diff.
    *
-   * <p>Type changes and changes to any parameter other than {@code dynamic} need a reindex;
-   * removed fields need one only under {@link RemovedFieldPolicy#REINDEX}; added fields and
-   * {@code dynamic} changes are applied in place; anything else is a no-op. Settings differences
-   * alone are a no-op.
+   * <p>Type changes, changes to any parameter not in {@link #UPDATABLE_PARAMS}, and {@link
+   * MappingDiff#unindexedAdditions() additions old documents were never indexed into} need a
+   * reindex; removed fields need one only under {@link RemovedFieldPolicy#REINDEX}; other added
+   * fields and {@code dynamic} changes are applied in place; anything else is a no-op. Settings
+   * differences alone are a no-op.
    *
    * @param diff the differences
    * @param removedFields how removed fields are treated
    * @return {@link Action#NO_OP}, {@link Action#PUT_MAPPING} or {@link Action#REINDEX}
    */
   public static Action classify(MappingDiff diff, RemovedFieldPolicy removedFields) {
-    if (!diff.typeChanged().isEmpty()) {
+    if (!diff.typeChanged().isEmpty() || !diff.unindexedAdditions().isEmpty()) {
       return Action.REINDEX;
     }
     for (Change change : diff.paramChanged()) {
@@ -143,16 +159,31 @@ public final class DiffClassifier {
 
   // ------------------------------------------------------------------ mappings
 
+  /**
+   * Compares the children of one node.
+   *
+   * @param dynamic the effective dynamic mode of the parent's current mapping
+   * @param unindexed whether additions here are fields old documents were never indexed into
+   * @param reportRemoved whether children only in {@code before} are reported as removed
+   */
   private static void diffChildren(
-      String prefix, Map<String, Object> before, Map<String, Object> after, Collector out) {
+      String prefix, Map<String, Object> before, Map<String, Object> after, String dynamic,
+      boolean unindexed, boolean reportRemoved, Collector out) {
     for (Map.Entry<String, Object> entry : after.entrySet()) {
       String path = prefix + entry.getKey();
       Object existing = before.get(entry.getKey());
       if (existing == null) {
-        out.added.add(new Change(path, null, entry.getValue()));
+        Change change = new Change(path, null, entry.getValue());
+        out.added.add(change);
+        if (unindexed) {
+          out.unindexed.add(change);
+        }
       } else {
-        diffNode(path, map(existing), map(entry.getValue()), out);
+        diffNode(path, map(existing), map(entry.getValue()), dynamic, out);
       }
+    }
+    if (!reportRemoved) {
+      return;
     }
     for (Map.Entry<String, Object> entry : before.entrySet()) {
       if (!after.containsKey(entry.getKey())) {
@@ -161,8 +192,8 @@ public final class DiffClassifier {
     }
   }
 
-  private static void diffNode(
-      String path, Map<String, Object> before, Map<String, Object> after, Collector out) {
+  private static void diffNode(String path, Map<String, Object> before,
+      Map<String, Object> after, String inheritedDynamic, Collector out) {
     Object beforeType = before.get("type");
     Object afterType = after.get("type");
     if (!Objects.equals(beforeType, afterType)) {
@@ -170,10 +201,30 @@ public final class DiffClassifier {
       return;
     }
     diffParams(path, before, after, out);
-    if (!isOpenEnded(before) && !isOpenEnded(after)) {
-      diffChildren(path + ".", map(before.get("properties")), map(after.get("properties")), out);
+    String dynamic = before.containsKey("dynamic")
+        ? String.valueOf(before.get("dynamic")) : inheritedDynamic;
+    if (!isOpenEnded(after)) {
+      Map<String, Object> beforeProperties = map(before.get("properties"));
+      Map<String, Object> afterProperties = map(after.get("properties"));
+      if (isOpenEnded(before)) {
+        // Typed properties over a dynamic object: keys the engine picked up are not removals,
+        // and additions were never indexed for the documents already there.
+        diffChildren(path + ".", beforeProperties, afterProperties, dynamic, true, false, out);
+      } else {
+        boolean dynamicContainer = isContainer(before) && DEFAULT_DYNAMIC.equals(dynamic)
+            && beforeProperties.isEmpty();
+        diffChildren(path + ".", beforeProperties, afterProperties, dynamic, dynamicContainer,
+            true, out);
+      }
     }
-    diffChildren(path + ".", map(before.get("fields")), map(after.get("fields")), out);
+    // A multi-field added to an existing field is empty for every document indexed before it.
+    diffChildren(path + ".", map(before.get("fields")), map(after.get("fields")), dynamic, true,
+        true, out);
+  }
+
+  private static boolean isContainer(Map<String, Object> node) {
+    Object type = node.get("type");
+    return "object".equals(type) || "nested".equals(type);
   }
 
   /**
@@ -187,8 +238,7 @@ public final class DiffClassifier {
     if ("flattened".equals(type) || "flat_object".equals(type)) {
       return true;
     }
-    return ("object".equals(type) || "nested".equals(type))
-        && "true".equals(node.get("dynamic"));
+    return isContainer(node) && DEFAULT_DYNAMIC.equals(node.get("dynamic"));
   }
 
   private static void diffParams(
@@ -291,5 +341,6 @@ public final class DiffClassifier {
     private final List<Change> removed = new ArrayList<>();
     private final List<Change> typeChanged = new ArrayList<>();
     private final List<Change> paramChanged = new ArrayList<>();
+    private final List<Change> unindexed = new ArrayList<>();
   }
 }

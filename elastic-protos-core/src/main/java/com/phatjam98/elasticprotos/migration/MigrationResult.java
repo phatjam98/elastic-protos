@@ -20,8 +20,10 @@ public record MigrationResult(List<Outcome> outcomes) {
   public enum Status {
     /** The change was made. */
     APPLIED,
-    /** Nothing was done: the index was up to date, or the item was blocked. */
+    /** Nothing was done because the index was up to date. */
     SKIPPED,
+    /** Nothing was done because the plan item is {@link Action#BLOCKED}; see its reason. */
+    BLOCKED,
     /** The change failed; see {@link Outcome#error()}. */
     FAILED,
     /** Nothing was done because the options ask for a dry run. */
@@ -36,19 +38,42 @@ public record MigrationResult(List<Outcome> outcomes) {
    * @param index the concrete index behind the alias afterwards (or that would be, for a dry run)
    * @param retainedIndices old indices kept write-blocked after a reindex
    * @param error the failure, or null
+   * @param sourceCount for a reindex, the documents counted in the old index after the copy;
+   *     otherwise null
+   * @param destCount for a reindex, the documents counted in the new index after the copy;
+   *     otherwise null
+   * @param warnings things that went through but deserve attention, for example a migration
+   *     script that left the new index with a different document count
    */
   public record Outcome(
       IndexPlan plan, Status status, String index, List<String> retainedIndices,
-      Throwable error) {
+      Throwable error, Long sourceCount, Long destCount, List<String> warnings) {
 
-    /** Copies the retained indices. */
+    /** Copies the lists. */
     public Outcome {
       retainedIndices = List.copyOf(retainedIndices);
+      warnings = List.copyOf(warnings);
+    }
+
+    /**
+     * Creates an outcome without document counts or warnings.
+     *
+     * @param plan the item
+     * @param status how it ended
+     * @param index the concrete index behind the alias afterwards
+     * @param retainedIndices old indices kept write-blocked after a reindex
+     * @param error the failure, or null
+     */
+    public Outcome(
+        IndexPlan plan, Status status, String index, List<String> retainedIndices,
+        Throwable error) {
+      this(plan, status, index, retainedIndices, error, null, null, List.of());
     }
 
     /** Returns whether this item neither failed nor was blocked. */
     public boolean ok() {
-      return status != Status.FAILED && plan.action() != Action.BLOCKED;
+      return status != Status.FAILED && status != Status.BLOCKED
+          && plan.action() != Action.BLOCKED;
     }
   }
 
