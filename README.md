@@ -1003,6 +1003,9 @@ It also offers `bulkIndex`, `definition`, `pager` (a `SearchPager`), `plan`, `bo
 | `elastic-protos.query.default-keep-alive` | `1m` | Point-in-time keep-alive |
 | `elastic-protos.query.track-total-hits` | `true` | Count hits exactly |
 | `elastic-protos.query.shard-doc-tiebreaker` | `AUTO` | `_shard_doc` tiebreaker on point-in-time searches: `AUTO`, `ON` or `OFF` |
+| `elastic-protos.query.allow-script-sort` | `false` | Accept script sorts; callers then run Painless on the cluster |
+| `elastic-protos.query.allow-regex` | `false` | Accept `TEXT_REGEX` (a pattern without a literal prefix also needs `allow-leading-wildcards`) |
+| `elastic-protos.query.max-page-size` | `10000` | Largest page size, with or without a point in time |
 | `elastic-protos.bulk.actions` | `500` | `bulkBuffer(...)` sends a batch at this many operations |
 | `elastic-protos.bulk.flush-interval` | `1s` | Also send at this interval; `0s` disables |
 | `elastic-protos.bulk.max-bytes` | `5MB` | Send a batch at about this size |

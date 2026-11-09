@@ -49,6 +49,9 @@ class ConfigurationDefaultsSpec extends Specification {
     config.naming.prefix == ''
     config.codec.includeDefaults
     config.codec.int64AsNumber
+    !config.query.allowScriptSort
+    !config.query.allowRegex
+    config.query.maxPageSize == 10000
     config.bulk.actions == 500
     config.bulk.flushInterval == Duration.ofSeconds(1)
     config.bulk.maxBytes == 5L * 1024 * 1024

@@ -537,6 +537,11 @@ public class ElasticProtosConfiguration {
    *   <li>{@code default-size}: page size when the criteria set none; default 10
    *   <li>{@code default-keep-alive}: point-in-time keep-alive; default {@code 1m}
    *   <li>{@code track-total-hits}: count hits exactly; default true
+   *   <li>{@code allow-script-sort}: accept script sorts, which run a caller-supplied Painless
+   *       script on the cluster; default false
+   *   <li>{@code allow-regex}: accept {@code TEXT_REGEX}; default false
+   *   <li>{@code max-page-size}: the largest page size, with or without a point in time; default
+   *       10000
    * </ul>
    */
   @ConfigurationProperties("query")
@@ -551,6 +556,9 @@ public class ElasticProtosConfiguration {
     private Duration defaultKeepAlive = STANDARD.defaultKeepAlive();
     private boolean trackTotalHits = Boolean.TRUE.equals(STANDARD.trackTotalHits());
     private ShardDocTiebreaker shardDocTiebreaker = ShardDocTiebreaker.AUTO;
+    private boolean allowScriptSort = STANDARD.allowScriptSort();
+    private boolean allowRegex = STANDARD.allowRegex();
+    private int maxPageSize = STANDARD.maxPageSize();
 
     /** Values of {@code shard-doc-tiebreaker}. */
     public enum ShardDocTiebreaker {
@@ -633,6 +641,36 @@ public class ElasticProtosConfiguration {
     /** Sets {@code shard-doc-tiebreaker}. */
     public void setShardDocTiebreaker(ShardDocTiebreaker shardDocTiebreaker) {
       this.shardDocTiebreaker = shardDocTiebreaker;
+    }
+
+    /** Returns {@code allow-script-sort}. */
+    public boolean isAllowScriptSort() {
+      return allowScriptSort;
+    }
+
+    /** Sets {@code allow-script-sort}. */
+    public void setAllowScriptSort(boolean allowScriptSort) {
+      this.allowScriptSort = allowScriptSort;
+    }
+
+    /** Returns {@code allow-regex}. */
+    public boolean isAllowRegex() {
+      return allowRegex;
+    }
+
+    /** Sets {@code allow-regex}. */
+    public void setAllowRegex(boolean allowRegex) {
+      this.allowRegex = allowRegex;
+    }
+
+    /** Returns {@code max-page-size}. */
+    public int getMaxPageSize() {
+      return maxPageSize;
+    }
+
+    /** Sets {@code max-page-size}. */
+    public void setMaxPageSize(int maxPageSize) {
+      this.maxPageSize = maxPageSize;
     }
   }
 

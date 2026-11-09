@@ -52,6 +52,9 @@ import spock.lang.Specification
 @Property(name = 'elastic-protos.query.default-size', value = '25')
 @Property(name = 'elastic-protos.query.default-keep-alive', value = '5m')
 @Property(name = 'elastic-protos.query.track-total-hits', value = 'false')
+@Property(name = 'elastic-protos.query.allow-script-sort', value = 'true')
+@Property(name = 'elastic-protos.query.allow-regex', value = 'true')
+@Property(name = 'elastic-protos.query.max-page-size', value = '500')
 @Property(name = 'elastic-protos.bulk.actions', value = '1000')
 @Property(name = 'elastic-protos.bulk.flush-interval', value = '250ms')
 @Property(name = 'elastic-protos.bulk.max-bytes', value = '10MB')
@@ -132,6 +135,9 @@ class ConfigurationBindingSpec extends Specification {
       defaultSize == 25
       defaultKeepAlive == Duration.ofMinutes(5)
       !trackTotalHits
+      allowScriptSort
+      allowRegex
+      maxPageSize == 500
     }
     config.bulk.actions == 1000
     config.bulk.flushInterval == Duration.ofMillis(250)
@@ -150,7 +156,7 @@ class ConfigurationBindingSpec extends Specification {
     codec.config().unknownFields() == UnknownFieldPolicy.FAIL
     queryConfig == QueryCompilerConfig.standard().withAllowLeadingWildcards(true).withLenient(true)
         .withMaxResultWindow(50000).withDefaultSize(25).withDefaultKeepAlive(Duration.ofMinutes(5))
-        .withTrackTotalHits(false)
+        .withTrackTotalHits(false).withAllowScriptSort(true).withAllowRegex(true).withMaxPageSize(500)
     compiler.config() == queryConfig
     migrationOptions == new MigrationOptions(FailurePolicy.CONTINUE, false, true,
         RemovedFieldPolicy.REINDEX, 3, ReplicaPolicy.fixed(2), Duration.ofSeconds(90), true, false)
