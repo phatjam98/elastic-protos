@@ -153,7 +153,7 @@ public class ElasticProtosBootstrap implements ApplicationEventListener<StartupE
         parts.add(outcome.plan().alias() + ": " + String.join("; ", outcome.warnings()));
       }
     }
-    return String.join(", ", parts);
+    return String.join(" | ", parts);
   }
 
   private static String describe(MigrationResult result) {

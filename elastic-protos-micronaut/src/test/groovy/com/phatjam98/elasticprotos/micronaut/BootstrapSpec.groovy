@@ -14,6 +14,7 @@ import com.phatjam98.elasticprotos.migration.MappingDiff
 import com.phatjam98.elasticprotos.migration.MigrationResult
 import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
+import com.phatjam98.elasticprotos.proto.example.InboxItem
 import com.phatjam98.elasticprotos.testkit.InMemorySearchEngine
 import io.micronaut.context.ApplicationContext
 import io.micronaut.context.BeanContext
@@ -236,7 +237,8 @@ class BootstrapSpec extends Specification {
     given:
     def appender = capture()
     def result = new MigrationResult([
-        outcome(Firm, Action.NO_OP, MigrationResult.Status.SKIPPED, []),
+        outcome(Firm, Action.REINDEX, MigrationResult.Status.APPLIED, ['first']),
+        outcome(InboxItem, Action.NO_OP, MigrationResult.Status.SKIPPED, []),
         outcome(Document, Action.REINDEX, MigrationResult.Status.APPLIED,
             ['the migration script left 9 documents in b from 10 in a', 'second']),
     ])
@@ -247,8 +249,9 @@ class BootstrapSpec extends Specification {
     then:
     result.ok()
     finished(appender).level == Level.WARN
-    finished(appender).formattedMessage == 'elastic-protos bootstrap finished: 2 index(es) ok,' +
-        ' with warnings: documents: the migration script left 9 documents in b from 10 in a; second'
+    finished(appender).formattedMessage == 'elastic-protos bootstrap finished: 3 index(es) ok,' +
+        ' with warnings: firms: first | documents: the migration script left 9 documents in b' +
+        ' from 10 in a; second'
 
     cleanup:
     release(appender)
