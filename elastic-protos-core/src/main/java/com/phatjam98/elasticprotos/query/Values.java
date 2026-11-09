@@ -129,6 +129,115 @@ public final class Values {
   }
 
   /**
+   * Returns an inclusive date range for {@code NUM_RANGE} in epoch milliseconds.
+   *
+   * <p>Millisecond precision; sub-millisecond parts are truncated.
+   *
+   * @param from the inclusive start
+   * @param to the inclusive end
+   * @return {@code range_value}
+   */
+  public static FlatValue between(Instant from, Instant to) {
+    return between(millis(from), millis(to));
+  }
+
+  /**
+   * Returns a range matching values at or above a bound for {@code NUM_RANGE}.
+   *
+   * @param value the inclusive lower bound (epoch milliseconds on date fields)
+   * @return {@code range_value} with only a lower bound
+   */
+  public static FlatValue atLeast(double value) {
+    return FlatValue.newBuilder().setRangeValue(RangeValue.newBuilder()
+        .setMin(value).setMinInclusive(true)).build();
+  }
+
+  /**
+   * Returns a range matching values strictly above a bound for {@code NUM_RANGE}.
+   *
+   * @param value the exclusive lower bound (epoch milliseconds on date fields)
+   * @return {@code range_value} with only a lower bound
+   */
+  public static FlatValue greaterThan(double value) {
+    return FlatValue.newBuilder().setRangeValue(RangeValue.newBuilder()
+        .setMin(value).setMinInclusive(false)).build();
+  }
+
+  /**
+   * Returns a range matching values at or below a bound for {@code NUM_RANGE}.
+   *
+   * @param value the inclusive upper bound (epoch milliseconds on date fields)
+   * @return {@code range_value} with only an upper bound
+   */
+  public static FlatValue atMost(double value) {
+    return FlatValue.newBuilder().setRangeValue(RangeValue.newBuilder()
+        .setMax(value).setMaxInclusive(true)).build();
+  }
+
+  /**
+   * Returns a range matching values strictly below a bound for {@code NUM_RANGE}.
+   *
+   * @param value the exclusive upper bound (epoch milliseconds on date fields)
+   * @return {@code range_value} with only an upper bound
+   */
+  public static FlatValue lessThan(double value) {
+    return FlatValue.newBuilder().setRangeValue(RangeValue.newBuilder()
+        .setMax(value).setMaxInclusive(false)).build();
+  }
+
+  /**
+   * Returns a range matching dates at or after an instant for {@code NUM_RANGE}.
+   *
+   * <p>Millisecond precision; sub-millisecond parts are truncated.
+   *
+   * @param value the inclusive start
+   * @return {@code range_value} with only a lower bound
+   */
+  public static FlatValue onOrAfter(Instant value) {
+    return FlatValue.newBuilder().setRangeValue(RangeValue.newBuilder()
+        .setMin(millis(value)).setMinInclusive(true)).build();
+  }
+
+  /**
+   * Returns a range matching dates strictly after an instant for {@code NUM_RANGE}.
+   *
+   * <p>Millisecond precision; sub-millisecond parts are truncated.
+   *
+   * @param value the exclusive start
+   * @return {@code range_value} with only a lower bound
+   */
+  public static FlatValue after(Instant value) {
+    return FlatValue.newBuilder().setRangeValue(RangeValue.newBuilder()
+        .setMin(millis(value)).setMinInclusive(false)).build();
+  }
+
+  /**
+   * Returns a range matching dates at or before an instant for {@code NUM_RANGE}.
+   *
+   * <p>Millisecond precision; sub-millisecond parts are truncated.
+   *
+   * @param value the inclusive end
+   * @return {@code range_value} with only an upper bound
+   */
+  public static FlatValue onOrBefore(Instant value) {
+    return FlatValue.newBuilder().setRangeValue(RangeValue.newBuilder()
+        .setMax(millis(value)).setMaxInclusive(true)).build();
+  }
+
+  /**
+   * Returns a range matching dates strictly before an instant for {@code NUM_RANGE}.
+   *
+   * <p>Millisecond precision; sub-millisecond parts are truncated.
+   *
+   * @param value the exclusive end
+   * @return {@code range_value} with only an upper bound
+   */
+  public static FlatValue before(Instant value) {
+    return FlatValue.newBuilder().setRangeValue(RangeValue.newBuilder()
+        .setMax(millis(value)).setMaxInclusive(false)).build();
+  }
+
+  /**
    * Returns a list of scalars for {@code ANY_IN}.
    *
    * <p>Strings become {@code string_value}, booleans {@code bool_value}, {@code Long}, {@code
@@ -280,5 +389,14 @@ public final class Values {
 
   private static LatLon point(double lat, double lon) {
     return LatLon.newBuilder().setLat(lat).setLon(lon).build();
+  }
+
+  private static long millis(Instant instant) {
+    try {
+      return instant.toEpochMilli();
+    } catch (ArithmeticException e) {
+      throw new IllegalArgumentException(
+          "Instant " + instant + " is outside the range of epoch milliseconds", e);
+    }
   }
 }
