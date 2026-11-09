@@ -1,0 +1,17 @@
+{
+  "from" : 0,
+  "query" : {
+    "bool" : {
+      "filter" : [ {
+        "range" : {
+          "filed_at" : {
+            "format" : "epoch_millis",
+            "lte" : 1800000000000
+          }
+        }
+      } ]
+    }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}
