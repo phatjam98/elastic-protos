@@ -31,7 +31,8 @@ reindex at the next bootstrap, including changes made only to suit one environme
 - On an existing index, settings are compared only for the keys the proto declares. A difference
   that is the only change classifies as `NO_OP` with the warning `settings differ; not applied`
   (and, for shard and replica counts, a per-key warning). The library never updates the settings of
-  an existing index and never reindexes because of settings alone.
+  an existing index and never reindexes because of settings alone. *(Superseded by the addendum
+  below: dynamic settings are now updated in place, and static settings can opt into a reindex.)*
 - Settings are applied whenever the library creates an index: on `CREATE`, and on the new index of
   a `REINDEX` that a mapping change caused. A settings change therefore rides along with the next
   mapping-driven reindex.
@@ -54,6 +55,7 @@ reindex at the next bootstrap, including changes made only to suit one environme
   the plan rather than a migration. The README's migration section documents the rename path.
 - Indices created before a settings change keep their old settings until the next reindex; the
   `settings differ; not applied` warning in `plan(...)` output is the signal that they diverge.
+  *(Superseded by the addendum below for dynamic settings, which are applied in place.)*
 
 ## Addendum (2026-11-09): settings applied through a settings diff
 
@@ -61,7 +63,9 @@ Settings remain outside the content hash. Instead of only warning, the migrator 
 settings the proto declares with the live index on every plan and applies them through a settings
 diff: dynamic settings in place (`UPDATE_SETTINGS`, or before a `PUT_MAPPING` / `BACKFILL`), static
 settings by a warning (default) or, with `StaticSettingsPolicy.REINDEX`, by a reindex into the next
-generation of the same index name. Only declared keys are compared, so environment-specific replica
+generation of the same index name. Each created index records a digest of its declared static
+settings in `_meta.elastic_protos.static_settings`, compared instead of the engine-reported values
+so that a different spelling cannot loop a reindex. Only declared keys are compared, so environment-specific replica
 policies still never change an index name or trigger a reindex; a removed setting is never reset.
 The rename path above remains the way to roll out an analyzer change without a static-settings
 policy.

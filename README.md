@@ -511,8 +511,9 @@ compared with the live index on every plan, key by key, after flattening both si
 - **Only keys the proto declares are compared.** The `replicas` option of `MigrationOptions` (and
   `defaultShards`) applies only when an index is created, so a replica policy such as
   `dataNodesMinusOne` never shows up as a change. `number_of_replicas` is not compared while the
-  proto sets `auto_expand_replicas` to anything but `false`. Removing a setting from the proto never
-  resets it on the index.
+  proto sets `auto_expand_replicas` to anything but `false`, nor while the index has one and the
+  proto declares none (with a warning). Removing a setting from the proto never resets it on the
+  index.
 - **Dynamic settings are applied in place.** A plan whose mappings match but whose dynamic settings
   differ is `UPDATE_SETTINGS` (`PUT /<index>/_settings`, under the alias lock); a `PUT_MAPPING` or
   `BACKFILL` updates the dynamic settings first (so a raised `mapping.total_fields.limit` is in
@@ -526,19 +527,33 @@ compared with the live index on every plan, key by key, after flattening both si
   `write.wait_for_active_shards`, `unassigned.node_left.delayed_timeout`, the `routing.allocation`
   and `routing.rebalance` settings, the `mapping.*.limit` settings, `translog.durability`,
   `translog.flush_threshold_size`, and keys under `routing.allocation.include|exclude|require.`,
-  `search.slowlog.` and `indexing.slowlog.` (`DiffClassifier.DYNAMIC_SETTINGS` and
-  `DYNAMIC_SETTING_PREFIXES`). `MigrationOptions.extraDynamicSettings` adds keys.
+  `search.slowlog.`, `indexing.slowlog.` and `merge.`, and `soft_deletes.retention_lease.period`
+  (`DiffClassifier.DYNAMIC_SETTINGS` and `DYNAMIC_SETTING_PREFIXES`).
+  `MigrationOptions.extraDynamicSettings` adds keys (a leading `index.` is stripped; an entry
+  ending in `.` is a prefix). Candidates are engine-specific dynamic settings the built-in list
+  leaves out: on Elasticsearch `lifecycle.` and `mapping.total_fields.ignore_dynamic_beyond_limit`,
+  on OpenSearch `plugins.index_state_management.` and `search.default_pipeline`.
 - **Static settings** (everything else: `number_of_shards`, `analysis.*`, `codec`, `sort.*`,
   `similarity.*`, unknown keys) can only be set when an index is created. With
   `staticSettings(StaticSettingsPolicy.WARN)` (the default) a difference is the warning `static
   settings differ; not applied: <key before -> after, ...>`, and the dynamic part is still applied.
   With `StaticSettingsPolicy.REINDEX` the item is a `REINDEX` into the next generation of the index
   name (the hash does not change, so the new index is `<name>-g2`, `-g3`, ...), with the reason
-  `static settings changed: ...`, or `BLOCKED` when `allowReindex` is off.
+  `static settings changed: ...`, or `BLOCKED` when `allowReindex` is off. The warning is left out
+  when the item reindexes anyway, since the new index gets every setting.
+- Every index the migrator creates records a digest of the declared static settings in
+  `_meta.elastic_protos.static_settings` (the first 8 hex digits of the SHA-256 of their canonical
+  flattened key/value map). When it is present, planning compares the declared static settings
+  with the digest rather than with the values the engine reports, so an engine that spells a value
+  differently cannot make `REINDEX` loop; indices without it are compared by value. Under
+  `StaticSettingsPolicy.REINDEX` a new index whose engine-reported static values still differ from
+  the declaration fails the item ("engine reports `<v>` for `<key>`; declare it that way") and is
+  deleted.
 - Keys the engine or the migrator manages (`blocks.*`, `uuid`, `creation_date`, `version.*`,
-  `provided_name`) are never applied, with a warning.
-- Equivalent values in another spelling (`5000ms` against `5s`) compare as different, so they are
-  applied again on every run: harmless, but noisy. Declare them the way the engine reports them.
+  `provided_name`) are never applied; a warning names them when their value differs.
+- For dynamic keys, equivalent values in another spelling (`5000ms` against `5s`) compare as
+  different, so they are applied again on every run: harmless, but noisy. Declare them the way the
+  engine reports them. Static keys are covered by the digest above.
 - The plan's `diff().settings()` lists the dynamic and static changes and the ignored keys, and
   `toJson()` includes them.
 
