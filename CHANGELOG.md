@@ -19,6 +19,11 @@ an optional Micronaut 4 module and a BOM, and requires Java 17. It is not API-co
 pre-1.0 `com.phatjam98.elasticsearch.*` packages, and the private geobuf dependency is gone. A
 `1.0.0-rc.1` pre-release precedes it.
 
+Maps mapped with `type: OBJECT` or `NESTED` are typed maps: `dynamic_templates` give every key the
+value type (new `value_type` option), and the query compiler, sorts and codec treat keys as typed
+fields ([ADR 0010](docs/adr/0010-typed-maps-through-dynamic-templates.md)). This changes the content
+hash of indices with such maps; `flattened` maps are unchanged.
+
 `RangeValue.min` and `max` are now proto3 `optional`, so `NUM_RANGE` supports open-ended ranges
 (`Values.atLeast`, `greaterThan`, `atMost`, `lessThan`, `onOrAfter`, `after`, `onOrBefore`,
 `before` and `between(Instant, Instant)`; the same steps on `Criteria`). Only the bounds that are

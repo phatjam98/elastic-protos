@@ -126,6 +126,24 @@ class JsonRestEngineSpec extends Specification {
     read == [properties: [meta: [type: 'flattened'], doc: [properties: [inner: [type: 'flattened']]]]]
   }
 
+  def "flattened values of typed map templates are spelled flat_object on OpenSearch"() {
+    given:
+    def templates = [['ep:s.*': [path_match: 's.*', mapping: [type: 'flattened']]],
+                     ['ep:k.*': [path_match: 'k.*', mapping: [type: 'keyword']]], 'other']
+    http.enqueue(200, OS_ROOT).enqueue(200)
+        .enqueue(200, ['docs-v1': [mappings: [dynamic_templates: [['ep:s.*': [path_match: 's.*', mapping: [type: 'flat_object']]]]]]])
+
+    when:
+    engine.createIndex('docs-v1', [:], [dynamic_templates: templates, properties: [:]], [] as Set)
+    def read = engine.getMappings('docs-v1')
+
+    then:
+    http.requests[1].json().mappings.dynamic_templates == [
+        ['ep:s.*': [path_match: 's.*', mapping: [type: 'flat_object']]],
+        ['ep:k.*': [path_match: 'k.*', mapping: [type: 'keyword']]], 'other']
+    read.dynamic_templates == [['ep:s.*': [path_match: 's.*', mapping: [type: 'flattened']]]]
+  }
+
   def "flattened fields are sent unchanged to Elasticsearch, and mappings without them skip the lookup"() {
     given:
     http.enqueue(200, ES_ROOT).enqueue(200).enqueue(200)

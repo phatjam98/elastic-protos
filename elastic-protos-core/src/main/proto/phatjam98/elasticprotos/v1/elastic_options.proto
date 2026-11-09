@@ -65,7 +65,7 @@ enum EsType {
   DATE_NANOS = 10;
   GEO_POINT = 11;
   GEO_SHAPE = 12;
-  OBJECT = 13;  // on a map field: object with dynamic: true instead of the default flattened
+  OBJECT = 13;  // on a map field: a typed object whose keys take the value type (see value_type)
   NESTED = 14;
   FLATTENED = 15;
   BINARY = 16;
@@ -100,4 +100,9 @@ message FieldOpts {
   string raw_mapping_json = 15; // merged last into this field's mapping
   Bool3 coerce = 16;
   string null_value = 17;
+  // Type of the values of a map field mapped as OBJECT or NESTED; ignored on other fields.
+  // AUTO applies the default rules for the value type. analyzer, search_analyzer,
+  // keyword_subfield, ignore_above, normalizer, format, index, doc_values, coerce and null_value
+  // apply to the values where they fit the value type.
+  EsType value_type = 18;
 }

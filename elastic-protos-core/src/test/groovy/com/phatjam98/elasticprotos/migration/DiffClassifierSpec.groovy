@@ -60,6 +60,55 @@ class DiffClassifierSpec extends Specification {
     'dynamic strict: children still compared'   | root([o: [dynamic: 'strict', properties: [a: KEYWORD]]])     | root([o: [type: 'object', dynamic: 'strict', properties: [a: KEYWORD, b: KEYWORD]]]) | ['o.b'] | []    | []          | []                   | Action.PUT_MAPPING
   }
 
+  static Map template(String pathMatch, Map mapping) {
+    [("ep:${pathMatch}".toString()): [path_match: pathMatch, mapping: mapping]]
+  }
+
+  static final Map COUNTERS = template('counters.*', [type: 'long'])
+  static final Map NOTES = template('notes.*', [type: 'text'])
+  static final Map NOTES_KEYWORD = template('notes.*', [type: 'keyword'])
+  static final Map CHILD = template('children.*.count', [type: 'long'])
+  static final Map CHILD_ROOT = [('ep:children.*'): [path_match: 'children.*', match_mapping_type: 'object',
+                                                    mapping: [type: 'object', dynamic: true]]]
+  static final Map CHILD_NAME = template('children.*.name', [type: 'keyword'])
+  static final Map INNER = template('o.counters.*', [type: 'long'])
+
+  @Unroll
+  def "dynamic templates: #description"() {
+    when:
+    MappingDiff diff = DiffClassifier.diff(existing, desired, [:], [:])
+
+    then:
+    diff.added()*.path == added
+    diff.paramChanged()*.path == paramChanged
+    DiffClassifier.classify(diff, RemovedFieldPolicy.KEEP) == action
+
+    where:
+    description                              | existing                                                                  | desired                                                                                       | added                | paramChanged                   | action
+    'unchanged'                              | root([counters: DYN], [dynamic_templates: [COUNTERS]])                    | root([counters: [type: 'object', dynamic: true]], [dynamic_templates: [COUNTERS]])            | []                   | []                             | Action.NO_OP
+    'first typed map added'                  | root([a: KEYWORD])                                                        | root([a: KEYWORD, counters: DYN], [dynamic_templates: [COUNTERS]])                            | ['counters']         | ['<root>:dynamic_templates']   | Action.PUT_MAPPING
+    'typed map added next to another'        | root([counters: DYN], [dynamic_templates: [COUNTERS]])                    | root([counters: DYN, notes: DYN, children: DYN], [dynamic_templates: [CHILD, COUNTERS, NOTES]]) | ['children', 'notes'] | ['<root>:dynamic_templates'] | Action.PUT_MAPPING
+    'template of an existing map changed'    | root([notes: DYN], [dynamic_templates: [NOTES]])                          | root([notes: DYN], [dynamic_templates: [NOTES_KEYWORD]])                                      | []                   | ['<root>:dynamic_templates']   | Action.REINDEX
+    'typed map removed, fields kept'         | root([a: KEYWORD, notes: DYN], [dynamic_templates: [NOTES]])              | root([a: KEYWORD])                                                                            | []                   | ['<root>:dynamic_templates']   | Action.NO_OP
+    'typed map removed with another added'   | root([notes: DYN], [dynamic_templates: [NOTES]])                          | root([counters: DYN], [dynamic_templates: [COUNTERS]])                                        | ['counters']         | ['<root>:dynamic_templates']   | Action.PUT_MAPPING
+    'value leaf removed from an existing map' | root([children: DYN], [dynamic_templates: [CHILD, CHILD_NAME, CHILD_ROOT]]) | root([children: DYN], [dynamic_templates: [CHILD, CHILD_ROOT]])                            | []                   | ['<root>:dynamic_templates']   | Action.REINDEX
+    'typed map inside an added object'       | root([a: KEYWORD])                                                        | root([a: KEYWORD, o: [properties: [counters: DYN]]], [dynamic_templates: [INNER]])            | ['o']                | ['<root>:dynamic_templates']   | Action.PUT_MAPPING
+    'value leaf added to an existing map'    | root([children: DYN], [dynamic_templates: [CHILD, CHILD_ROOT]])          | root([children: DYN], [dynamic_templates: [CHILD, CHILD_NAME, CHILD_ROOT]])                   | []                   | ['<root>:dynamic_templates']   | Action.PUT_MAPPING
+    'untyped map becomes typed'              | root([children: DYN], [dynamic_templates: [CHILD_ROOT]])                  | root([children: DYN], [dynamic_templates: [CHILD, CHILD_ROOT]])                               | []                   | ['<root>:dynamic_templates']   | Action.REINDEX
+    'template of a map in an existing object' | root([o: [properties: [a: KEYWORD]]])                                    | root([o: [properties: [a: KEYWORD, counters: DYN]]], [dynamic_templates: [INNER]])            | ['o.counters']       | ['<root>:dynamic_templates']   | Action.PUT_MAPPING
+    'a template that is not ours'            | root([a: KEYWORD])                                                        | root([a: KEYWORD, m: DYN], [dynamic_templates: [[custom: [match: 'm*', mapping: KEYWORD]]]])  | ['m']                | ['<root>:dynamic_templates']   | Action.REINDEX
+    'an ep: template without a pattern'      | root([a: KEYWORD])                                                        | root([a: KEYWORD, m: DYN], [dynamic_templates: [['ep:m': [match: 'm', mapping: KEYWORD]]]])   | ['m']                | ['<root>:dynamic_templates']   | Action.REINDEX
+  }
+
+  def "a removed typed map reindexes when removed fields reindex"() {
+    when:
+    MappingDiff diff = DiffClassifier.diff(root([a: KEYWORD, notes: DYN], [dynamic_templates: [NOTES]]),
+        root([a: KEYWORD]), [:], [:])
+
+    then:
+    DiffClassifier.classify(diff, RemovedFieldPolicy.REINDEX) == Action.REINDEX
+  }
+
   @Unroll
   def "additions: #description"() {
     when:
