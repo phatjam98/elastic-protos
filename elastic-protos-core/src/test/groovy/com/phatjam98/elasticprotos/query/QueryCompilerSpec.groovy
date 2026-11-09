@@ -1024,6 +1024,13 @@ class QueryCompilerSpec extends Specification {
     config.withAllowScriptSort(true).allowScriptSort()
     config.withAllowRegex(true).allowRegex()
     config.withMaxPageSize(70).maxPageSize() == 70
+    config.maxTermsSize() == QueryCompilerConfig.DEFAULT_MAX_TERMS_SIZE
+    config.maxTermsSize() == 1000
+    config.withMaxTermsSize(5).maxTermsSize() == 5
+    config.withMaxTermsSize(5) != config
+    config.withMaxTermsSize(5).hashCode() != config.hashCode()
+    config.withMaxTermsSize(5).toString().contains('maxTermsSize=5')
+    config.withMaxTermsSize(5).toBuilder().build() == config.withMaxTermsSize(5)
     config.withLenient(true).lenient()
     config.withAllowLeadingWildcards(true).allowLeadingWildcards()
     !config.withGroupNested(false).groupNested()
@@ -1055,6 +1062,8 @@ class QueryCompilerSpec extends Specification {
     'null keep-alive'     | { it.withDefaultKeepAlive(null) }                 || NullPointerException
     'null totals'         | { it.withTrackTotalHits(null) }                   || NullPointerException
     'zero keep-alive'     | { it.withDefaultKeepAlive(Duration.ZERO) }        || IllegalArgumentException
+    'zero terms size'     | { it.withMaxTermsSize(0) }                        || IllegalArgumentException
+    'negative terms size' | { it.withMaxTermsSize(-3) }                       || IllegalArgumentException
   }
 
   def "compiled searches copy warnings"() {

@@ -31,6 +31,15 @@ import java.util.TreeMap;
  * inclusive, {@code +Infinity} min or {@code -Infinity} max) fails with a {@link
  * QueryCompileException} in strict and lenient mode alike.
  *
+ * <p>Aggregations ({@code SearchCriteria.aggregation}) compile into {@code aggs}, checked against
+ * the mapped type of each field: terms, date histograms, histograms, ranges and single-value
+ * metrics, with one level of sub-aggregations. Aggregations on fields inside nested objects are
+ * wrapped in {@code nested} aggregations named {@code <name>__nested} (then {@code
+ * <name>__nested2}, ...) and, to step out of a nested bucket, a {@code reverse_nested} named
+ * {@code <name>__reverse}; names therefore must not contain {@code __}. {@link
+ * AggregationResults} unwraps them. Highlighting ({@code SearchCriteria.highlight}) compiles into
+ * {@code highlight} over text fields outside nested objects.
+ *
  * <p>Instances are immutable and thread-safe.
  */
 public final class QueryCompiler {
@@ -60,7 +69,10 @@ public final class QueryCompiler {
 
   /**
    * Compiles a full search body: {@code query}, {@code sort}, paging ({@code from}/{@code size} or
-   * {@code pit}/{@code search_after}) and {@code track_total_hits}. A page larger than {@link
+   * {@code pit}/{@code search_after}), {@code track_total_hits}, and {@code aggs} and {@code
+   * highlight} when the criteria ask for them (read aggregation results with {@link
+   * AggregationResults}). A negative {@code pagination.size} compiles to {@code size: 0}, for
+   * searches that only aggregate. A page larger than {@link
    * QueryCompilerConfig#maxPageSize()}, or, without a point in time, a {@code from + size} beyond
    * {@link QueryCompilerConfig#maxResultWindow()}, is rejected.
    *
@@ -75,7 +87,7 @@ public final class QueryCompiler {
     body.put("query", query(criteria, index, warnings));
     List<Object> sort =
         new SortCompiler(config, index, warnings).compile(criteria.getSortingCriteriaList());
-    boolean pit = paging(criteria, sort, body, warnings);
+    final boolean pit = paging(criteria, sort, body, warnings);
     if (!sort.isEmpty()) {
       body.put("sort", sort);
     }
@@ -83,11 +95,31 @@ public final class QueryCompiler {
     if (trackTotalHits != null) {
       body.put("track_total_hits", trackTotalHits);
     }
+    aggregationsAndHighlight(criteria, index, body, warnings);
     return new CompiledSearch(body, warnings, pit);
   }
 
+  private void aggregationsAndHighlight(SearchCriteria criteria, IndexDefinition index,
+      Map<String, Object> body, List<String> warnings) {
+    if (criteria.getAggregationCount() > 0) {
+      Map<String, Object> aggs = new AggregationCompiler(config, index, warnings)
+          .compile(criteria.getAggregationList());
+      if (!aggs.isEmpty()) {
+        body.put("aggs", aggs);
+      }
+    }
+    if (criteria.hasHighlight()) {
+      Map<String, Object> highlight = new HighlightCompiler(config, index, warnings)
+          .compile(criteria.getHighlight());
+      if (highlight != null) {
+        body.put("highlight", highlight);
+      }
+    }
+  }
+
   /**
-   * Compiles only the {@code query} clause, ignoring sorting and paging.
+   * Compiles only the {@code query} clause, ignoring sorting, paging, aggregations and
+   * highlighting.
    *
    * @param criteria what to search for
    * @param index the index searched

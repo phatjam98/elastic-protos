@@ -49,12 +49,17 @@ import java.util.Objects;
  *       arbitrarily expensive, so it is disabled by default
  *   <li>{@code maxPageSize}: the largest page {@code size}, with or without a point in time;
  *       default {@value #DEFAULT_MAX_PAGE_SIZE}, the default {@code index.max_result_window}
+ *   <li>{@code maxTermsSize}: the largest {@code size} of a terms aggregation; default {@value
+ *       #DEFAULT_MAX_TERMS_SIZE}
  * </ul>
  */
 public final class QueryCompilerConfig {
 
   /** The default {@link #maxPageSize()}. */
   public static final int DEFAULT_MAX_PAGE_SIZE = 10_000;
+
+  /** The default {@link #maxTermsSize()}. */
+  public static final int DEFAULT_MAX_TERMS_SIZE = 1_000;
 
   private final boolean allowLeadingWildcards;
   private final boolean lenient;
@@ -67,6 +72,7 @@ public final class QueryCompilerConfig {
   private final boolean allowScriptSort;
   private final boolean allowRegex;
   private final int maxPageSize;
+  private final int maxTermsSize;
 
   private QueryCompilerConfig(Builder builder) {
     if (builder.maxResultWindow <= 0) {
@@ -79,6 +85,10 @@ public final class QueryCompilerConfig {
     }
     if (builder.maxPageSize <= 0) {
       throw new IllegalArgumentException("maxPageSize must be positive: " + builder.maxPageSize);
+    }
+    if (builder.maxTermsSize <= 0) {
+      throw new IllegalArgumentException(
+          "maxTermsSize must be positive: " + builder.maxTermsSize);
     }
     if (builder.defaultSize > builder.maxPageSize) {
       throw new IllegalArgumentException("defaultSize " + builder.defaultSize
@@ -101,12 +111,14 @@ public final class QueryCompilerConfig {
     this.allowScriptSort = builder.allowScriptSort;
     this.allowRegex = builder.allowRegex;
     this.maxPageSize = builder.maxPageSize;
+    this.maxTermsSize = builder.maxTermsSize;
   }
 
   /**
    * Returns the defaults: strict fields, no leading wildcards, no script sorts, no regular
    * expressions, exact totals, a result window of 10000, pages of 10 and at most 10000, a one
-   * minute keep-alive, nested grouping and the {@code _shard_doc} tiebreaker.
+   * minute keep-alive, nested grouping, the {@code _shard_doc} tiebreaker and terms aggregations
+   * of at most 1000 buckets.
    */
   public static QueryCompilerConfig standard() {
     return builder().build();
@@ -177,6 +189,11 @@ public final class QueryCompilerConfig {
     return maxPageSize;
   }
 
+  /** Returns the largest {@code size} of a terms aggregation. */
+  public int maxTermsSize() {
+    return maxTermsSize;
+  }
+
   /** Returns a copy with {@code allowLeadingWildcards} replaced. */
   public QueryCompilerConfig withAllowLeadingWildcards(boolean value) {
     return toBuilder().allowLeadingWildcards(value).build();
@@ -237,6 +254,11 @@ public final class QueryCompilerConfig {
     return toBuilder().maxPageSize(value).build();
   }
 
+  /** Returns a copy with {@code maxTermsSize} replaced. */
+  public QueryCompilerConfig withMaxTermsSize(int value) {
+    return toBuilder().maxTermsSize(value).build();
+  }
+
   @Override
   public boolean equals(Object other) {
     return other instanceof QueryCompilerConfig that
@@ -250,14 +272,15 @@ public final class QueryCompilerConfig {
         && shardDocTiebreaker == that.shardDocTiebreaker
         && allowScriptSort == that.allowScriptSort
         && allowRegex == that.allowRegex
-        && maxPageSize == that.maxPageSize;
+        && maxPageSize == that.maxPageSize
+        && maxTermsSize == that.maxTermsSize;
   }
 
   @Override
   public int hashCode() {
     return Objects.hash(allowLeadingWildcards, lenient, trackTotalHits, maxResultWindow,
         defaultSize, defaultKeepAlive, groupNested, shardDocTiebreaker, allowScriptSort,
-        allowRegex, maxPageSize);
+        allowRegex, maxPageSize, maxTermsSize);
   }
 
   @Override
@@ -272,7 +295,8 @@ public final class QueryCompilerConfig {
         + ", shardDocTiebreaker=" + shardDocTiebreaker
         + ", allowScriptSort=" + allowScriptSort
         + ", allowRegex=" + allowRegex
-        + ", maxPageSize=" + maxPageSize + "]";
+        + ", maxPageSize=" + maxPageSize
+        + ", maxTermsSize=" + maxTermsSize + "]";
   }
 
   /** Builds a {@link QueryCompilerConfig}; starts from the {@link #standard()} settings. */
@@ -289,6 +313,7 @@ public final class QueryCompilerConfig {
     private boolean allowScriptSort = false;
     private boolean allowRegex = false;
     private int maxPageSize = DEFAULT_MAX_PAGE_SIZE;
+    private int maxTermsSize = DEFAULT_MAX_TERMS_SIZE;
 
     private Builder() {}
 
@@ -304,6 +329,7 @@ public final class QueryCompilerConfig {
       this.allowScriptSort = config.allowScriptSort;
       this.allowRegex = config.allowRegex;
       this.maxPageSize = config.maxPageSize;
+      this.maxTermsSize = config.maxTermsSize;
     }
 
     /** Sets whether wildcard queries may start with {@code *}; default false. */
@@ -374,6 +400,15 @@ public final class QueryCompilerConfig {
     /** Sets the largest page size; default {@value QueryCompilerConfig#DEFAULT_MAX_PAGE_SIZE}. */
     public Builder maxPageSize(int value) {
       this.maxPageSize = value;
+      return this;
+    }
+
+    /**
+     * Sets the largest {@code size} of a terms aggregation; default {@value
+     * QueryCompilerConfig#DEFAULT_MAX_TERMS_SIZE}.
+     */
+    public Builder maxTermsSize(int value) {
+      this.maxTermsSize = value;
       return this;
     }
 

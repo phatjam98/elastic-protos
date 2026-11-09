@@ -1,0 +1,40 @@
+{
+  "aggs" : {
+    "average" : {
+      "avg" : {
+        "field" : "size_bytes"
+      }
+    },
+    "firms" : {
+      "cardinality" : {
+        "field" : "firm_id"
+      }
+    },
+    "latest" : {
+      "max" : {
+        "field" : "filed_at"
+      }
+    },
+    "smallest" : {
+      "min" : {
+        "field" : "size_bytes"
+      }
+    },
+    "titled" : {
+      "value_count" : {
+        "field" : "title.keyword"
+      }
+    },
+    "total" : {
+      "sum" : {
+        "field" : "size_bytes"
+      }
+    }
+  },
+  "from" : 0,
+  "query" : {
+    "match_all" : { }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

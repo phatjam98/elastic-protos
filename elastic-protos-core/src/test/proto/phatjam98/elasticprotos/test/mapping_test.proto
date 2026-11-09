@@ -169,3 +169,17 @@ message ScalarsReordered {
   float float_value = 117;
   double double_value = 118;
 }
+
+// Sibling and nested-in-nested paths, for aggregations that move between nested contexts.
+message Library {
+  string id = 1;
+  string city = 2;
+  repeated Shelf shelves = 3;   // nested
+  repeated Child staff = 4;     // nested, a sibling of shelves
+}
+
+message Shelf {
+  string label = 1;
+  int32 position = 2;
+  repeated Child books = 3;     // nested inside shelves
+}

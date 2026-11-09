@@ -1,0 +1,25 @@
+{
+  "aggs" : {
+    "sizes" : {
+      "range" : {
+        "field" : "size_bytes",
+        "ranges" : [ {
+          "key" : "small",
+          "to" : 50000
+        }, {
+          "from" : 50000,
+          "key" : "medium",
+          "to" : 500000
+        }, {
+          "from" : 500000
+        } ]
+      }
+    }
+  },
+  "from" : 0,
+  "query" : {
+    "match_all" : { }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

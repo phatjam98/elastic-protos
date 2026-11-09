@@ -1,0 +1,15 @@
+{
+  "aggs" : {
+    "by_type" : {
+      "terms" : {
+        "field" : "type"
+      }
+    }
+  },
+  "from" : 0,
+  "query" : {
+    "match_all" : { }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

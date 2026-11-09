@@ -1,0 +1,22 @@
+{
+  "aggs" : {
+    "roles__nested" : {
+      "aggs" : {
+        "roles" : {
+          "terms" : {
+            "field" : "parties.role"
+          }
+        }
+      },
+      "nested" : {
+        "path" : "parties"
+      }
+    }
+  },
+  "from" : 0,
+  "query" : {
+    "match_all" : { }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

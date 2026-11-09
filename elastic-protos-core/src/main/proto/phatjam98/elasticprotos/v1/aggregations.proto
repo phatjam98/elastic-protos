@@ -1,0 +1,209 @@
+syntax = "proto3";
+
+package phatjam98.elasticprotos.v1;
+
+import "google/protobuf/timestamp.proto";
+import "phatjam98/elasticprotos/v1/flat_struct.proto";
+import "phatjam98/elasticprotos/v1/sorting_criteria.proto";
+
+option java_package = "com.phatjam98.elasticprotos.proto";
+option java_multiple_files = true;
+option java_outer_classname = "AggregationProtos";
+
+// One aggregation of a search, compiled into the search body's "aggs" and validated against the
+// mapped type of its field. Bucket aggregations (terms, date_histogram, histogram, range) may carry
+// one level of sub-aggregations; metrics carry none. Fields inside nested objects are wrapped in
+// "nested" / "reverse_nested" aggregations named "<name>__nested" and "<name>__reverse"; read the
+// results with com.phatjam98.elasticprotos.query.AggregationResults, which unwraps them.
+message Aggregation {
+  // The name of the aggregation in the response; required and unique among its siblings. It must
+  // not contain "__" (reserved for the wrappers) nor equal a key of the engine's bucket objects:
+  // key, key_as_string, doc_count, buckets, value, value_as_string, from, to, from_as_string,
+  // to_as_string, sum_other_doc_count, doc_count_error_upper_bound or meta.
+  string name = 1;
+  // The dotted index path of the field to aggregate, such as "type" or "parties.role". Text fields
+  // aggregate through their keyword sub-field; keys of a flattened field are allowed for terms.
+  string field = 2;
+  // What to compute; exactly one must be set.
+  oneof kind {
+    // Buckets per distinct value.
+    TermsAggregation terms = 3;
+    // Buckets per calendar or fixed time interval of a date field.
+    DateHistogramAggregation date_histogram = 4;
+    // Buckets per fixed numeric interval of a numeric field.
+    HistogramAggregation histogram = 5;
+    // Buckets per explicit [from, to) range of a numeric or date field.
+    RangeAggregation range = 6;
+    // A single-value metric over the field.
+    MetricType metric = 7;
+  }
+  // Aggregations computed inside every bucket of this one. Only one level is supported: the
+  // sub-aggregations themselves must have none, and metrics take none at all.
+  repeated Aggregation sub_aggregation = 8;
+}
+
+// A terms aggregation: one bucket per distinct value of a keyword, numeric, date, boolean or ip
+// field, a text field with a keyword sub-field, or a key of a flattened field.
+message TermsAggregation {
+  // The number of buckets to return; 0 means the engine default (10). At most
+  // QueryCompilerConfig.maxTermsSize.
+  int32 size = 1;
+  // The order of the buckets; unset means by document count, descending.
+  TermsOrder order = 2;
+  // The minimum document count of a returned bucket; unset means the engine default (1).
+  optional int64 min_doc_count = 3;
+  // The value that documents without the field are counted under; unset counts them nowhere.
+  PrimitiveValue missing = 4;
+}
+
+// The order of the buckets of a terms aggregation.
+message TermsOrder {
+  // What to order by.
+  TermsOrderBy by = 1;
+  // For BY_METRIC: the name of a metric sub-aggregation of this terms aggregation.
+  string metric = 2;
+  // The direction; unset means DESC for BY_COUNT and BY_METRIC and ASC for BY_KEY.
+  SortingOrder direction = 3;
+}
+
+// What a terms aggregation orders its buckets by.
+enum TermsOrderBy {
+  // The engine default: document count, descending.
+  ORDER_BY_DEFAULT = 0;
+  // The document count of the bucket ("_count").
+  BY_COUNT = 1;
+  // The bucket key ("_key").
+  BY_KEY = 2;
+  // The value of a metric sub-aggregation, named by TermsOrder.metric.
+  BY_METRIC = 3;
+}
+
+// A date_histogram aggregation over a date field. Bucket keys are epoch milliseconds at the start
+// of each interval.
+message DateHistogramAggregation {
+  // The bucket width; exactly one must be set.
+  oneof interval {
+    // A calendar-aware interval (months and years of varying length, daylight saving time).
+    CalendarInterval calendar_interval = 1;
+    // A fixed interval: a positive whole number and a unit of ms, s, m, h or d, such as "90m".
+    string fixed_interval = 2;
+  }
+  // The time zone that places bucket boundaries, as a java.time.ZoneId such as "UTC", "+01:00"
+  // or "Europe/Berlin"; empty means UTC.
+  string time_zone = 3;
+  // The date format of key_as_string, such as "yyyy-MM"; empty means the field's format.
+  string format = 4;
+  // The minimum document count of a returned bucket; unset means the engine default (0, with
+  // empty buckets only between the first and the last non-empty one unless extended_bounds is
+  // set).
+  optional int64 min_doc_count = 5;
+  // Forces buckets from min to max even when they are empty; takes effect with min_doc_count 0.
+  DateBounds extended_bounds = 6;
+}
+
+// A calendar interval of a date histogram.
+enum CalendarInterval {
+  // Not set; use DateHistogramAggregation.fixed_interval instead.
+  CALENDAR_INTERVAL_UNSPECIFIED = 0;
+  // One minute ("1m").
+  MINUTE = 1;
+  // One hour ("1h").
+  HOUR = 2;
+  // One day ("1d").
+  DAY = 3;
+  // One week, starting on Monday ("1w").
+  WEEK = 4;
+  // One month ("1M").
+  MONTH = 5;
+  // One quarter ("1q").
+  QUARTER = 6;
+  // One year ("1y").
+  YEAR = 7;
+}
+
+// The bounds of a date histogram's forced buckets; either may be left unset.
+message DateBounds {
+  // The start of the first bucket to force.
+  google.protobuf.Timestamp min = 1;
+  // A time inside the last bucket to force.
+  google.protobuf.Timestamp max = 2;
+}
+
+// A histogram aggregation over a numeric field. Bucket keys are the lower bound of each interval.
+message HistogramAggregation {
+  // The bucket width; must be positive.
+  double interval = 1;
+  // The minimum document count of a returned bucket; unset means the engine default (0, with
+  // empty buckets only between the first and the last non-empty one).
+  optional int64 min_doc_count = 2;
+  // Shifts the bucket boundaries by this amount; 0 puts them at multiples of interval.
+  double offset = 3;
+}
+
+// A range aggregation over a numeric field, or a date_range over a date field (bounds in epoch
+// milliseconds).
+message RangeAggregation {
+  // The buckets, in order; at least one is required.
+  repeated RangeBucket ranges = 1;
+}
+
+// One bucket of a range aggregation: the documents with from <= value < to, as in the engines.
+message RangeBucket {
+  // The bucket key in the response; empty lets the engine derive one from the bounds.
+  string key = 1;
+  // The inclusive lower bound; unset means none. Epoch milliseconds for dates.
+  optional double from = 2;
+  // The exclusive upper bound; unset means none. Epoch milliseconds for dates.
+  optional double to = 3;
+}
+
+// A single-value metric aggregation.
+enum MetricType {
+  // Not set; invalid.
+  METRIC_UNSPECIFIED = 0;
+  // The smallest value of a numeric or date field.
+  MIN = 1;
+  // The largest value of a numeric or date field.
+  MAX = 2;
+  // The average of a numeric field.
+  AVG = 3;
+  // The sum of a numeric field.
+  SUM = 4;
+  // The number of values of a field, counting every value of an array.
+  VALUE_COUNT = 5;
+  // The approximate number of distinct values of a field.
+  CARDINALITY = 6;
+}
+
+// Highlighting of the full-text fields a search matched. The fragments come back on each hit
+// (com.phatjam98.elasticprotos.engine.Hit#highlight). Only text fields outside nested objects can
+// be highlighted.
+message Highlight {
+  // The fields to highlight; empty means every default full-text field of the index that is text
+  // and not inside a nested object.
+  repeated HighlightField fields = 1;
+  // The size of a fragment in characters; 0 means the engine default (100).
+  int32 fragment_size = 2;
+  // The maximum number of fragments per field; unset means the engine default (5); 0 returns the
+  // whole field value, highlighted.
+  optional int32 number_of_fragments = 3;
+  // The tag inserted before a highlighted term; empty means "<em>".
+  string pre_tag = 4;
+  // The tag inserted after a highlighted term; empty means "</em>".
+  string post_tag = 5;
+  // Whether only the fields the query matched on are highlighted; unset means the engine default
+  // (true).
+  optional bool require_field_match = 6;
+  // Whether the field text is HTML-escaped before the tags are inserted (encoder "html").
+  bool html_encode = 7;
+}
+
+// One highlighted field, with optional per-field settings.
+message HighlightField {
+  // The dotted index path of a text field.
+  string field = 1;
+  // The size of a fragment in characters for this field; 0 means the Highlight setting.
+  int32 fragment_size = 2;
+  // The maximum number of fragments for this field; unset means the Highlight setting.
+  optional int32 number_of_fragments = 3;
+}

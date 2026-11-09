@@ -1,11 +1,14 @@
 package com.phatjam98.elasticprotos.query;
 
+import com.phatjam98.elasticprotos.proto.Aggregation;
 import com.phatjam98.elasticprotos.proto.DistanceUnit;
 import com.phatjam98.elasticprotos.proto.FieldCondition;
 import com.phatjam98.elasticprotos.proto.FieldSort;
 import com.phatjam98.elasticprotos.proto.FlatValue;
 import com.phatjam98.elasticprotos.proto.FullTextOptions;
 import com.phatjam98.elasticprotos.proto.GeoDistanceSort;
+import com.phatjam98.elasticprotos.proto.Highlight;
+import com.phatjam98.elasticprotos.proto.HighlightField;
 import com.phatjam98.elasticprotos.proto.LatLon;
 import com.phatjam98.elasticprotos.proto.Pagination;
 import com.phatjam98.elasticprotos.proto.ScoreSort;
@@ -40,6 +43,9 @@ import java.util.function.Consumer;
  *     .fullText("merger agreement")
  *     .sortByScore(SortingOrder.DESC)
  *     .pageSize(20)
+ *     .aggregate(Aggs.terms("by_type", "type")
+ *         .addSubAggregation(Aggs.sum("total_size", "size_bytes")))
+ *     .highlight("title", "body")
  *     .build();
  *
  * SearchCriteria simple = Criteria.where("status").equalTo("ACTIVE").build();
@@ -53,7 +59,9 @@ public final class Criteria {
   private final List<Branch> branches = new ArrayList<>();
   private final List<FieldCondition> everyBranch = new ArrayList<>();
   private final List<SortingCriteria> sorts = new ArrayList<>();
+  private final List<Aggregation> aggregations = new ArrayList<>();
   private Pagination.Builder pagination;
+  private Highlight.Builder highlight;
 
   private Criteria() {}
 
@@ -188,6 +196,70 @@ public final class Criteria {
   }
 
   /**
+   * Adds aggregations, typically made with {@link Aggs}.
+   *
+   * @param aggregations the aggregations
+   * @return this builder
+   */
+  public Criteria aggregate(Aggregation... aggregations) {
+    for (Aggregation aggregation : aggregations) {
+      this.aggregations.add(Objects.requireNonNull(aggregation, "aggregation"));
+    }
+    return this;
+  }
+
+  /**
+   * Adds aggregations from builders, such as those returned by {@link Aggs}.
+   *
+   * @param aggregations the aggregation builders; each is built when added
+   * @return this builder
+   */
+  public Criteria aggregate(Aggregation.Builder... aggregations) {
+    for (Aggregation.Builder aggregation : aggregations) {
+      this.aggregations.add(Objects.requireNonNull(aggregation, "aggregation").build());
+    }
+    return this;
+  }
+
+  /**
+   * Returns no hits, only aggregations and the total: sets the page size to {@code -1}, which
+   * compiles to {@code size: 0}.
+   *
+   * @return this builder
+   */
+  public Criteria aggregationsOnly() {
+    pagination().setSize(-1);
+    return this;
+  }
+
+  /**
+   * Highlights matches in text fields with the default {@code <em>} tags.
+   *
+   * @param fields the text fields; none means every default full-text field of the index that is
+   *     text and outside nested objects
+   * @return this builder
+   */
+  public Criteria highlight(String... fields) {
+    Highlight.Builder builder = highlightBuilder();
+    for (String field : fields) {
+      builder.addFields(HighlightField.newBuilder().setField(Objects.requireNonNull(field,
+          "field")));
+    }
+    return this;
+  }
+
+  /**
+   * Highlights matches with custom settings, such as tags, fragment sizes and HTML encoding.
+   *
+   * @param options receives the highlight builder
+   * @return this builder
+   */
+  public Criteria highlight(Consumer<Highlight.Builder> options) {
+    options.accept(highlightBuilder());
+    return this;
+  }
+
+  /**
    * Builds the criteria.
    *
    * @return the {@link SearchCriteria}
@@ -205,7 +277,18 @@ public final class Criteria {
     if (pagination != null) {
       criteria.setPagination(pagination);
     }
+    criteria.addAllAggregation(aggregations);
+    if (highlight != null) {
+      criteria.setHighlight(highlight);
+    }
     return criteria.build();
+  }
+
+  private Highlight.Builder highlightBuilder() {
+    if (highlight == null) {
+      highlight = Highlight.newBuilder();
+    }
+    return highlight;
   }
 
   private Pagination.Builder pagination() {

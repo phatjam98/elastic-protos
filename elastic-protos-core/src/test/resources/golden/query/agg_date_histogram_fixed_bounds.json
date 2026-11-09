@@ -1,0 +1,21 @@
+{
+  "aggs" : {
+    "half_days" : {
+      "date_histogram" : {
+        "extended_bounds" : {
+          "max" : 1719791999000,
+          "min" : 1704067200000
+        },
+        "field" : "filed_at",
+        "fixed_interval" : "12h",
+        "min_doc_count" : 0
+      }
+    }
+  },
+  "from" : 0,
+  "query" : {
+    "match_all" : { }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

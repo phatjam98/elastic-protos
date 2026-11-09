@@ -29,6 +29,14 @@ import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
 import com.phatjam98.elasticprotos.proto.example.TypedMaps
 import com.phatjam98.elasticprotos.proto.test.Geo
+import com.phatjam98.elasticprotos.proto.test.Library
+import com.phatjam98.elasticprotos.proto.CalendarInterval
+import com.phatjam98.elasticprotos.proto.DateBounds
+import com.phatjam98.elasticprotos.proto.HistogramAggregation
+import com.phatjam98.elasticprotos.proto.TermsAggregation
+import com.phatjam98.elasticprotos.proto.TermsOrder
+import com.phatjam98.elasticprotos.proto.TermsOrderBy
+import com.google.protobuf.util.Timestamps
 import java.time.Instant
 import spock.lang.Shared
 import spock.lang.Specification
@@ -41,6 +49,7 @@ class QueryCompilerGoldenSpec extends Specification {
   @Shared IndexDefinition firm = mapper.map(Firm)
   @Shared IndexDefinition geo = mapper.map(Geo)
   @Shared IndexDefinition typedMaps = mapper.map(TypedMaps)
+  @Shared IndexDefinition library = mapper.map(Library)
   @Shared QueryCompiler strict = QueryCompiler.withDefaults()
   @Shared QueryCompiler wildcards =
       QueryCompiler.of(QueryCompilerConfig.standard().withAllowLeadingWildcards(true))
@@ -172,5 +181,50 @@ class QueryCompilerGoldenSpec extends Specification {
         fc('name', EQUALS, str('Acme LLP')),
         fc('offices.headcount', NUM_RANGE, range(10, 100)),
         fc('offices.address.city', EQUALS, str('Reno'), true))
+  }
+
+  @Unroll
+  def "aggregation #name compiles to its golden body"() {
+    when:
+    CompiledSearch compiled = strict.compile(criteria.build(), index)
+
+    then:
+    compiled.warnings().isEmpty()
+    Golden.assertMatches("query/agg_${name}", compiled.body())
+
+    where:
+    name                       | index    | criteria
+    'terms_keyword'            | document | Criteria.builder().aggregate(Aggs.terms('by_type', 'type'))
+    'terms_text_keyword'       | firm     | Criteria.builder().aggregate(Aggs.terms('names', 'name'))
+    'terms_options'            | document | Criteria.builder().aggregate(Aggs.terms('tags', 'tags').setTerms(TermsAggregation.newBuilder().setSize(5).setMinDocCount(2).setMissing(prim('none')).setOrder(TermsOrder.newBuilder().setBy(TermsOrderBy.BY_KEY).setDirection(SortingOrder.DESC))))
+    'terms_order_metric'       | document | Criteria.builder().aggregate(Aggs.sub(Aggs.terms('by_type', 'type').setTerms(TermsAggregation.newBuilder().setOrder(TermsOrder.newBuilder().setBy(TermsOrderBy.BY_METRIC).setMetric('total'))), Aggs.sum('total', 'size_bytes'), Aggs.avg('average', 'size_bytes')))
+    'terms_flattened_key'      | firm     | Criteria.builder().aggregate(Aggs.terms('tiers', 'labels.tier'))
+    'date_histogram_calendar'  | document | Criteria.builder().aggregate(Aggs.dateHistogram('per_month', 'filed_at', CalendarInterval.MONTH).tap { dateHistogramBuilder.setTimeZone('Europe/Berlin').setFormat('yyyy-MM') })
+    'date_histogram_fixed_bounds' | document | Criteria.builder().aggregate(Aggs.dateHistogram('half_days', 'filed_at', '12h').tap { dateHistogramBuilder.setMinDocCount(0).setExtendedBounds(DateBounds.newBuilder().setMin(Timestamps.fromMillis(1704067200000L)).setMax(Timestamps.fromMillis(1719791999000L))) })
+    'histogram'                | document | Criteria.builder().aggregate(Aggs.histogram('sizes', 'size_bytes', 100000).setHistogram(HistogramAggregation.newBuilder().setInterval(100000).setMinDocCount(1).setOffset(50)))
+    'range_numeric'            | document | Criteria.builder().aggregate(Aggs.range('sizes', 'size_bytes', Aggs.bucket('small', null, 50000d), Aggs.bucket('medium', 50000d, 500000d), Aggs.bucket(null, 500000d, null)))
+    'range_date'               | document | Criteria.builder().aggregate(Aggs.range('q1', 'filed_at', Aggs.bucket('q1_2024', 1704067200000d, 1711929600000d)))
+    'metrics_all'              | document | Criteria.builder().aggregate(Aggs.min('smallest', 'size_bytes'), Aggs.max('latest', 'filed_at'), Aggs.avg('average', 'size_bytes'), Aggs.sum('total', 'size_bytes'), Aggs.count('titled', 'title'), Aggs.cardinality('firms', 'firm_id'))
+    'nested_terms'             | document | Criteria.builder().aggregate(Aggs.terms('roles', 'parties.role'))
+    'nested_reverse_metric'    | document | Criteria.builder().aggregate(Aggs.sub(Aggs.terms('roles', 'parties.role'), Aggs.cardinality('firms', 'firm_id'), Aggs.count('emails', 'parties.email')))
+    'nested_order_reverse_metric' | document | Criteria.builder().aggregate(Aggs.sub(Aggs.terms('roles', 'parties.role').setTerms(TermsAggregation.newBuilder().setOrder(TermsOrder.newBuilder().setBy(TermsOrderBy.BY_METRIC).setMetric('firms').setDirection(SortingOrder.ASC))), Aggs.cardinality('firms', 'firm_id')))
+    'nested_divergent'         | library  | Criteria.builder().aggregate(Aggs.sub(Aggs.terms('books', 'shelves.books.name'), Aggs.max('staff_rank', 'staff.rank'), Aggs.max('position', 'shelves.position'), Aggs.sum('ranks', 'shelves.books.rank')), Aggs.sub(Aggs.terms('cities', 'city'), Aggs.count('book_count', 'shelves.books.name')))
+    'only_size_zero'           | document | Criteria.where('type').equalTo('FILING').end().aggregate(Aggs.terms('tags', 'tags')).aggregationsOnly()
+  }
+
+  @Unroll
+  def "highlight #name compiles to its golden body"() {
+    when:
+    CompiledSearch compiled = strict.compile(criteria.build(), document)
+
+    then:
+    compiled.warnings().isEmpty()
+    Golden.assertMatches("query/${name}", compiled.body())
+
+    where:
+    name                       | criteria
+    'highlight_default_fields' | Criteria.builder().fullText('merger agreement').highlight()
+    'highlight_options'        | Criteria.builder().fullText('merger').highlight { it.addFields(com.phatjam98.elasticprotos.proto.HighlightField.newBuilder().setField('title').setNumberOfFragments(0)).addFields(com.phatjam98.elasticprotos.proto.HighlightField.newBuilder().setField('body').setFragmentSize(80).setNumberOfFragments(2)).setFragmentSize(150).setNumberOfFragments(3).setPreTag('<b>').setPostTag('</b>').setRequireFieldMatch(false).setHtmlEncode(true) }
+    'search_aggs_and_highlight' | Criteria.where('type').equalTo('FILING').end().fullText('agreement').sortByScore(SortingOrder.DESC).page(20, 0).aggregate(Aggs.sub(Aggs.terms('by_firm', 'firm_id').setTerms(TermsAggregation.newBuilder().setSize(3)), Aggs.max('latest', 'filed_at')), Aggs.dateHistogram('per_month', 'filed_at', CalendarInterval.MONTH)).highlight('title')
   }
 }

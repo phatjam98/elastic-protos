@@ -1,0 +1,70 @@
+{
+  "aggs" : {
+    "by_firm" : {
+      "aggs" : {
+        "latest" : {
+          "max" : {
+            "field" : "filed_at"
+          }
+        }
+      },
+      "terms" : {
+        "field" : "firm_id",
+        "size" : 3
+      }
+    },
+    "per_month" : {
+      "date_histogram" : {
+        "calendar_interval" : "1M",
+        "field" : "filed_at"
+      }
+    }
+  },
+  "from" : 0,
+  "highlight" : {
+    "fields" : {
+      "title" : { }
+    },
+    "post_tags" : [ "</em>" ],
+    "pre_tags" : [ "<em>" ]
+  },
+  "query" : {
+    "bool" : {
+      "filter" : [ {
+        "term" : {
+          "type" : "FILING"
+        }
+      } ],
+      "must" : [ {
+        "bool" : {
+          "minimum_should_match" : 1,
+          "should" : [ {
+            "multi_match" : {
+              "fields" : [ "body", "title^3" ],
+              "query" : "agreement",
+              "type" : "best_fields"
+            }
+          }, {
+            "nested" : {
+              "path" : "parties",
+              "query" : {
+                "multi_match" : {
+                  "fields" : [ "parties.name" ],
+                  "query" : "agreement",
+                  "type" : "best_fields"
+                }
+              }
+            }
+          } ]
+        }
+      } ]
+    }
+  },
+  "size" : 20,
+  "sort" : [ {
+    "_score" : {
+      "order" : "desc"
+    }
+  } ],
+  "track_total_hits" : true
+}

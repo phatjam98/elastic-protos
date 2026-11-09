@@ -27,6 +27,10 @@ import java.util.function.Consumer;
  * page size. Empty pages are never returned. The point in time requires Elasticsearch 7.10+ or
  * OpenSearch 2.4+.
  *
+ * <p>Aggregations of the criteria are computed over every match, so they are sent with the first
+ * request only: read them from the first page ({@link AggregationResults#of(SearchResult)}).
+ * Highlighting applies to every page.
+ *
  * <p>Not thread-safe.
  */
 public final class SearchPager implements Iterator<SearchResult>, AutoCloseable {
@@ -42,6 +46,7 @@ public final class SearchPager implements Iterator<SearchResult>, AutoCloseable 
   private SearchResult pending;
   private boolean done;
   private boolean closed;
+  private boolean first = true;
 
   private SearchPager(SearchEngine engine, QueryCompiler compiler, List<String> indices,
       SearchCriteria criteria, IndexDefinition index, int pageSize) {
@@ -113,7 +118,13 @@ public final class SearchPager implements Iterator<SearchResult>, AutoCloseable 
     if (done || closed) {
       return false;
     }
-    SearchCriteria request = criteria.toBuilder().setPagination(pagination).build();
+    SearchCriteria.Builder builder = criteria.toBuilder().setPagination(pagination);
+    if (!first) {
+      // aggregations cover every match already on the first page; highlighting stays per page
+      builder.clearAggregation();
+    }
+    first = false;
+    SearchCriteria request = builder.build();
     SearchResult result = engine.search(indices, compiler.compile(request, index).body());
     pagination = PaginationSupport.next(pagination, result);
     if (result.hits().size() < pageSize) {
