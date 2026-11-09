@@ -122,7 +122,7 @@ jobs:
 
       # -Pversion goes to every Gradle invocation so build, stageAll and JReleaser agree on the version.
       - name: Build
-        run: ./gradlew build -Pversion="${{ steps.version.outputs.version }}"
+        run: ./gradlew build verifyPublishedMetadata -Pversion="${{ steps.version.outputs.version }}"
 
       - name: Release with JReleaser
         run: |

@@ -45,6 +45,7 @@ def verifyPublishedMetadata = tasks.register('verifyPublishedMetadata') {
     description = 'Fails when a staged .module exports a platform or a staged POM imports a foreign BOM.'
     dependsOn stageAll
     def dir = stagingDir
+    def expected = publishedModules.size()
     doLast {
         def root = dir.get().asFile
         def problems = []
@@ -57,7 +58,7 @@ def verifyPublishedMetadata = tasks.register('verifyPublishedMetadata') {
                 def json = new groovy.json.JsonSlurper().parse(file)
                 json.variants.findAll { it.name in ['apiElements', 'runtimeElements'] }.each { variant ->
                     variant.dependencies?.each { dep ->
-                        if (dep.attributes?.get('org.gradle.category') == 'platform') {
+                        if (dep.attributes?.get('org.gradle.category') in ['platform', 'enforced-platform']) {
                             problems << "${rel}: ${variant.name} exports platform ${dep.group}:${dep.module}"
                         }
                     }
@@ -78,8 +79,9 @@ def verifyPublishedMetadata = tasks.register('verifyPublishedMetadata') {
                 }
             }
         }
-        if (modules == 0 || poms == 0) {
-            throw new GradleException("verifyPublishedMetadata: nothing staged in ${root}")
+        if (modules != expected || poms != expected) {
+            throw new GradleException("verifyPublishedMetadata: expected ${expected} .module and .pom files "
+                    + "(one per published module) in ${root}, found ${modules} and ${poms}")
         }
         if (!problems.isEmpty()) {
             throw new GradleException('Published metadata exports dependency management to consumers:\n  '
