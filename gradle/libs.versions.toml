@@ -15,11 +15,6 @@ junit = "5.14.4"
 testcontainers = "2.0.5"
 os-testcontainers = "4.1.0"
 micronaut-platform = "4.10.23"
-# The micronaut-core version that micronaut-platform above manages. Published modules depend on
-# micronaut-inject/-context with this explicit version instead of exporting the platform BOM, so
-# keep it equal to the platform's (./gradlew :elastic-protos-micronaut:dependencyInsight
-# --configuration testRuntimeClasspath --dependency micronaut-inject).
-micronaut-core = "4.10.36"
 jreleaser = "1.27.0"
 jacoco = "0.8.16"
 checkstyle = "12.3.1"
@@ -43,8 +38,8 @@ testcontainers-elasticsearch = { module = "org.testcontainers:testcontainers-ela
 testcontainers-spock = { module = "org.testcontainers:testcontainers-spock", version.ref = "testcontainers" }
 os-testcontainers = { module = "org.opensearch:opensearch-testcontainers", version.ref = "os-testcontainers" }
 micronaut-platform = { module = "io.micronaut.platform:micronaut-platform", version.ref = "micronaut-platform" }
-micronaut-inject = { module = "io.micronaut:micronaut-inject", version.ref = "micronaut-core" }
-micronaut-context = { module = "io.micronaut:micronaut-context", version.ref = "micronaut-core" }
+micronaut-inject = { module = "io.micronaut:micronaut-inject" }
+micronaut-context = { module = "io.micronaut:micronaut-context" }
 micronaut-annotation-processor = { module = "io.micronaut:micronaut-inject-java" }
 micronaut-test-spock = { module = "io.micronaut.test:micronaut-test-spock" }
 micronaut-inject-groovy = { module = "io.micronaut:micronaut-inject-groovy" }
