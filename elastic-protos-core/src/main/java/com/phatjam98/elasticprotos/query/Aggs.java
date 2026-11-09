@@ -1,13 +1,16 @@
 package com.phatjam98.elasticprotos.query;
 
+import com.google.protobuf.Timestamp;
 import com.phatjam98.elasticprotos.proto.Aggregation;
 import com.phatjam98.elasticprotos.proto.CalendarInterval;
 import com.phatjam98.elasticprotos.proto.DateHistogramAggregation;
 import com.phatjam98.elasticprotos.proto.HistogramAggregation;
+import com.phatjam98.elasticprotos.proto.MetricAggregation;
 import com.phatjam98.elasticprotos.proto.MetricType;
 import com.phatjam98.elasticprotos.proto.RangeAggregation;
 import com.phatjam98.elasticprotos.proto.RangeBucket;
 import com.phatjam98.elasticprotos.proto.TermsAggregation;
+import java.time.Instant;
 import java.util.Objects;
 
 /**
@@ -95,6 +98,33 @@ public final class Aggs {
     return bucket.build();
   }
 
+  /**
+   * Returns a date range bucket {@code [from, to)} with Timestamp bounds; for date fields only.
+   *
+   * @param key the bucket key, or null to let the engine derive one
+   * @param from the inclusive lower bound, or null for none
+   * @param to the exclusive upper bound, or null for none
+   * @return the bucket
+   */
+  public static RangeBucket bucket(String key, Instant from, Instant to) {
+    RangeBucket.Builder bucket = RangeBucket.newBuilder();
+    if (key != null) {
+      bucket.setKey(key);
+    }
+    if (from != null) {
+      bucket.setFromTime(timestamp(from));
+    }
+    if (to != null) {
+      bucket.setToTime(timestamp(to));
+    }
+    return bucket.build();
+  }
+
+  private static Timestamp timestamp(Instant instant) {
+    return Timestamp.newBuilder().setSeconds(instant.getEpochSecond()).setNanos(instant.getNano())
+        .build();
+  }
+
   /** Starts a {@code min} metric over a numeric or date field. */
   public static Aggregation.Builder min(String name, String field) {
     return metric(name, field, MetricType.MIN);
@@ -127,7 +157,8 @@ public final class Aggs {
 
   /** Starts a single-value metric of the given type. */
   public static Aggregation.Builder metric(String name, String field, MetricType type) {
-    return named(name, field).setMetric(Objects.requireNonNull(type, "type"));
+    return named(name, field).setMetric(
+        MetricAggregation.newBuilder().setType(Objects.requireNonNull(type, "type")));
   }
 
   /**

@@ -114,7 +114,7 @@ class HighlightCompilerSpec extends Specification {
     expect:
     strict.compile(highlight(Highlight.newBuilder()
         .addFields(HighlightField.newBuilder().setField('title').setFragmentSize(50).setNumberOfFragments(0))
-        .setFragmentSize(120).setNumberOfFragments(2).setPreTag('<mark>').setPostTag('</mark>')
+        .setFragmentSize(120).setNumberOfFragments(2).addPreTags('<mark>').addPostTags('</mark>')
         .setRequireFieldMatch(true).setHtmlEncode(true)), document).body().highlight ==
         [fields: [title: [fragment_size: 50, number_of_fragments: 0]], pre_tags: ['<mark>'], post_tags: ['</mark>'],
          fragment_size: 120, number_of_fragments: 2, require_field_match: true, encoder: 'html']

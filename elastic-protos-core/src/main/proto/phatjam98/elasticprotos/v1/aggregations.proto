@@ -17,12 +17,14 @@ option java_outer_classname = "AggregationProtos";
 // results with com.phatjam98.elasticprotos.query.AggregationResults, which unwraps them.
 message Aggregation {
   // The name of the aggregation in the response; required and unique among its siblings. It must
-  // not contain "__" (reserved for the wrappers) nor equal a key of the engine's bucket objects:
-  // key, key_as_string, doc_count, buckets, value, value_as_string, from, to, from_as_string,
-  // to_as_string, sum_other_doc_count, doc_count_error_upper_bound or meta.
+  // not contain "__" (reserved for the wrappers), "[", "]", ">" or ".", must not end with "_", and
+  // must not equal a key of the engine's bucket objects: key, key_as_string, doc_count, buckets,
+  // value, value_as_string, from, to, from_as_string, to_as_string, sum_other_doc_count,
+  // doc_count_error_upper_bound or meta.
   string name = 1;
-  // The dotted index path of the field to aggregate, such as "type" or "parties.role". Text fields
-  // aggregate through their keyword sub-field; keys of a flattened field are allowed for terms.
+  // The dotted index path of the field to aggregate, such as "type" or "parties.role"; required by
+  // every current kind. Text fields aggregate through their keyword sub-field; keys of a flattened
+  // field are allowed for terms, value_count and cardinality.
   string field = 2;
   // What to compute; exactly one must be set.
   oneof kind {
@@ -35,7 +37,7 @@ message Aggregation {
     // Buckets per explicit [from, to) range of a numeric or date field.
     RangeAggregation range = 6;
     // A single-value metric over the field.
-    MetricType metric = 7;
+    MetricAggregation metric = 7;
   }
   // Aggregations computed inside every bucket of this one. Only one level is supported: the
   // sub-aggregations themselves must have none, and metrics take none at all.
@@ -48,10 +50,11 @@ message TermsAggregation {
   // The number of buckets to return; 0 means the engine default (10). At most
   // QueryCompilerConfig.maxTermsSize.
   int32 size = 1;
-  // The order of the buckets; unset means by document count, descending.
-  TermsOrder order = 2;
+  // The order of the buckets: by the first criterion, then by the next for ties; empty means the
+  // engine default (document count, descending).
+  repeated TermsOrder order = 2;
   // The minimum document count of a returned bucket; unset means the engine default (1).
-  optional int64 min_doc_count = 3;
+  optional int32 min_doc_count = 3;
   // The value that documents without the field are counted under; unset counts them nowhere.
   PrimitiveValue missing = 4;
 }
@@ -96,7 +99,7 @@ message DateHistogramAggregation {
   // The minimum document count of a returned bucket; unset means the engine default (0, with
   // empty buckets only between the first and the last non-empty one unless extended_bounds is
   // set).
-  optional int64 min_doc_count = 5;
+  optional int32 min_doc_count = 5;
   // Forces buckets from min to max even when they are empty; takes effect with min_doc_count 0.
   DateBounds extended_bounds = 6;
 }
@@ -135,29 +138,47 @@ message HistogramAggregation {
   double interval = 1;
   // The minimum document count of a returned bucket; unset means the engine default (0, with
   // empty buckets only between the first and the last non-empty one).
-  optional int64 min_doc_count = 2;
+  optional int32 min_doc_count = 2;
   // Shifts the bucket boundaries by this amount; 0 puts them at multiples of interval.
   double offset = 3;
 }
 
-// A range aggregation over a numeric field, or a date_range over a date field (bounds in epoch
-// milliseconds).
+// A range aggregation over a numeric field, or a date_range over a date field.
 message RangeAggregation {
   // The buckets, in order; at least one is required.
   repeated RangeBucket ranges = 1;
 }
 
 // One bucket of a range aggregation: the documents with from <= value < to, as in the engines.
+// Numeric bounds are doubles, so on long fields they are exact only up to 2^53 (about 9.0e15).
+// Date fields take either a Timestamp or a double of epoch milliseconds; the compiler sends epoch
+// milliseconds either way.
 message RangeBucket {
   // The bucket key in the response; empty lets the engine derive one from the bounds.
   string key = 1;
-  // The inclusive lower bound; unset means none. Epoch milliseconds for dates.
-  optional double from = 2;
-  // The exclusive upper bound; unset means none. Epoch milliseconds for dates.
-  optional double to = 3;
+  // The inclusive lower bound; unset means none.
+  oneof lower {
+    // A number; epoch milliseconds on date fields.
+    double from = 2;
+    // A point in time; date fields only.
+    google.protobuf.Timestamp from_time = 4;
+  }
+  // The exclusive upper bound; unset means none.
+  oneof upper {
+    // A number; epoch milliseconds on date fields.
+    double to = 3;
+    // A point in time; date fields only.
+    google.protobuf.Timestamp to_time = 5;
+  }
 }
 
-// A single-value metric aggregation.
+// A single-value metric aggregation over the field.
+message MetricAggregation {
+  // What to compute; required.
+  MetricType type = 1;
+}
+
+// The kind of a single-value metric aggregation.
 enum MetricType {
   // Not set; invalid.
   METRIC_UNSPECIFIED = 0;
@@ -187,10 +208,11 @@ message Highlight {
   // The maximum number of fragments per field; unset means the engine default (5); 0 returns the
   // whole field value, highlighted.
   optional int32 number_of_fragments = 3;
-  // The tag inserted before a highlighted term; empty means "<em>".
-  string pre_tag = 4;
-  // The tag inserted after a highlighted term; empty means "</em>".
-  string post_tag = 5;
+  // The tags inserted before highlighted terms (several are used by importance with the fvh
+  // highlighter); empty means ["<em>"].
+  repeated string pre_tags = 4;
+  // The tags inserted after highlighted terms, matching pre_tags; empty means ["</em>"].
+  repeated string post_tags = 5;
   // Whether only the fields the query matched on are highlighted; unset means the engine default
   // (true).
   optional bool require_field_match = 6;

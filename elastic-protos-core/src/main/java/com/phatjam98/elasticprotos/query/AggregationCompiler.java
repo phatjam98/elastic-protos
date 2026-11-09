@@ -2,6 +2,7 @@ package com.phatjam98.elasticprotos.query;
 
 import static com.phatjam98.elasticprotos.query.NestedPathResolver.object;
 
+import com.google.protobuf.Timestamp;
 import com.google.protobuf.util.Timestamps;
 import com.phatjam98.elasticprotos.mapping.FieldInfo;
 import com.phatjam98.elasticprotos.mapping.FieldKind;
@@ -49,6 +50,8 @@ final class AggregationCompiler {
 
   /** Separates a user name from a wrapper suffix; user names must not contain it. */
   static final String WRAPPER = "__";
+
+  private static final List<String> FORBIDDEN_CHARACTERS = List.of("[", "]", ">", ".");
 
   private static final Pattern FIXED_INTERVAL = Pattern.compile("[1-9][0-9]*(ms|s|m|h|d)");
 
@@ -100,6 +103,17 @@ final class AggregationCompiler {
     if (name.contains(WRAPPER)) {
       throw new QueryCompileException("Aggregation name '" + name + "' must not contain '"
           + WRAPPER + "', which is reserved for the nested wrappers", null);
+    }
+    for (String forbidden : FORBIDDEN_CHARACTERS) {
+      if (name.contains(forbidden)) {
+        throw new QueryCompileException("Aggregation name '" + name + "' must not contain '"
+            + forbidden + "': the engines reject '[', ']' and '>' in names, and '.' and '>'"
+            + " break the paths that order terms by a metric", null);
+      }
+    }
+    if (name.endsWith("_")) {
+      throw new QueryCompileException("Aggregation name '" + name + "' must not end with '_',"
+          + " so that the nested wrapper suffixes can be told apart from it", null);
     }
     if (RESERVED_NAMES.contains(name)) {
       throw new QueryCompileException("Aggregation name '" + name + "' is reserved: it is a key"
@@ -186,7 +200,7 @@ final class AggregationCompiler {
         putSubs(inner, level(aggregation.getSubAggregationList(), fieldPaths, depth + 1).body());
         break;
       default:
-        inner = metric(name, aggregation.getMetric(), field, flattenedKey);
+        inner = metric(name, aggregation.getMetric().getType(), field, flattenedKey);
         break;
     }
     return wrap(name, context, fieldPaths, inner);
@@ -262,11 +276,17 @@ final class AggregationCompiler {
     if (terms.getMissing().getKindCase() != PrimitiveValue.KindCase.KIND_NOT_SET) {
       body.put("missing", ValueConversions.scalar(field, ValueConversions.of(terms.getMissing())));
     }
-    if (terms.hasOrder()) {
-      Map<String, Object> order = order(name, terms.getOrder(), field, subs, declared);
-      if (order != null) {
-        body.put("order", order);
+    List<Object> orders = new ArrayList<>();
+    for (TermsOrder order : terms.getOrderList()) {
+      Map<String, Object> compiled = order(name, order, field, subs, declared);
+      if (compiled != null) {
+        orders.add(compiled);
       }
+    }
+    if (orders.size() == 1) {
+      body.put("order", orders.get(0));
+    } else if (!orders.isEmpty()) {
+      body.put("order", orders);
     }
     return object("terms", body);
   }
@@ -490,36 +510,55 @@ final class AggregationCompiler {
   }
 
   private static Map<String, Object> bucket(String name, RangeBucket bucket, FieldInfo field) {
-    if ((bucket.hasFrom() && Double.isNaN(bucket.getFrom()))
-        || (bucket.hasTo() && Double.isNaN(bucket.getTo()))) {
+    Double from = bucket.getLowerCase() == RangeBucket.LowerCase.FROM_TIME
+        ? millis(name, bucket.getFromTime(), field)
+        : bucket.hasFrom() ? bucket.getFrom() : null;
+    Double to = bucket.getUpperCase() == RangeBucket.UpperCase.TO_TIME
+        ? millis(name, bucket.getToTime(), field)
+        : bucket.hasTo() ? bucket.getTo() : null;
+    if ((from != null && from.isNaN()) || (to != null && to.isNaN())) {
       throw new QueryCompileException("Range aggregation '" + name + "' has a NaN bound",
           field.path());
     }
     // Only the natural-side infinity means "unset", as for NUM_RANGE.
-    boolean hasFrom = bucket.hasFrom() && bucket.getFrom() != Double.NEGATIVE_INFINITY;
-    boolean hasTo = bucket.hasTo() && bucket.getTo() != Double.POSITIVE_INFINITY;
+    boolean hasFrom = from != null && from != Double.NEGATIVE_INFINITY;
+    boolean hasTo = to != null && to != Double.POSITIVE_INFINITY;
     if (!hasFrom && !hasTo) {
       throw new QueryCompileException("Range aggregation '" + name + "' has a bucket"
           + describe(bucket) + " without from or to", field.path());
     }
-    if ((hasFrom && Double.isInfinite(bucket.getFrom()))
-        || (hasTo && Double.isInfinite(bucket.getTo()))
-        || (hasFrom && hasTo && bucket.getFrom() >= bucket.getTo())) {
+    if ((hasFrom && from.isInfinite()) || (hasTo && to.isInfinite())
+        || (hasFrom && hasTo && from >= to)) {
       throw new QueryCompileException("Range aggregation '" + name + "' has an empty bucket"
-          + describe(bucket) + ": from " + (hasFrom ? bucket.getFrom() : "-") + ", to "
-          + (hasTo ? bucket.getTo() : "-") + " (buckets are [from, to))", field.path());
+          + describe(bucket) + ": from " + (hasFrom ? from : "-") + ", to "
+          + (hasTo ? to : "-") + " (buckets are [from, to))", field.path());
     }
     Map<String, Object> out = new TreeMap<>();
     if (!bucket.getKey().isEmpty()) {
       out.put("key", bucket.getKey());
     }
     if (hasFrom) {
-      out.put("from", ValueConversions.number(field.kind(), bucket.getFrom()));
+      out.put("from", ValueConversions.number(field.kind(), from));
     }
     if (hasTo) {
-      out.put("to", ValueConversions.number(field.kind(), bucket.getTo()));
+      out.put("to", ValueConversions.number(field.kind(), to));
     }
     return out;
+  }
+
+  /** Converts a Timestamp bound to epoch millis; only date fields take Timestamp bounds. */
+  private static Double millis(String name, Timestamp time, FieldInfo field) {
+    if (!field.kind().isDate()) {
+      throw new QueryCompileException("Range aggregation '" + name + "' has a from_time or"
+          + " to_time bound, but '" + field.path() + "' is mapped as " + field.kind()
+          + "; Timestamp bounds are for date fields, use from / to", field.path());
+    }
+    try {
+      return (double) Timestamps.toMillis(Timestamps.checkValid(time));
+    } catch (IllegalArgumentException e) {
+      throw new QueryCompileException("Range aggregation '" + name + "' has an invalid"
+          + " timestamp bound: " + e.getMessage(), field.path());
+    }
   }
 
   private static String describe(RangeBucket bucket) {
@@ -598,7 +637,7 @@ final class AggregationCompiler {
         + " field but '" + field.path() + "' is mapped as " + field.kind(), field.path());
   }
 
-  private static long minDocCount(String name, long value, FieldInfo field) {
+  private static int minDocCount(String name, int value, FieldInfo field) {
     if (value < 0) {
       throw new QueryCompileException("Aggregation '" + name + "' has a negative min_doc_count: "
           + value, field.path());

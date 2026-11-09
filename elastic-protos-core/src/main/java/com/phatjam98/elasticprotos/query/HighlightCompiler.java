@@ -60,10 +60,10 @@ final class HighlightCompiler {
     }
     Map<String, Object> body = new TreeMap<>();
     body.put("fields", fields);
-    body.put("pre_tags", List.of(highlight.getPreTag().isEmpty()
-        ? DEFAULT_PRE_TAG : highlight.getPreTag()));
-    body.put("post_tags", List.of(highlight.getPostTag().isEmpty()
-        ? DEFAULT_POST_TAG : highlight.getPostTag()));
+    body.put("pre_tags", highlight.getPreTagsCount() == 0 ? List.of(DEFAULT_PRE_TAG)
+        : List.copyOf(highlight.getPreTagsList()));
+    body.put("post_tags", highlight.getPostTagsCount() == 0 ? List.of(DEFAULT_POST_TAG)
+        : List.copyOf(highlight.getPostTagsList()));
     if (highlight.getFragmentSize() < 0) {
       throw new QueryCompileException(
           "highlight.fragment_size must not be negative: " + highlight.getFragmentSize(), null);

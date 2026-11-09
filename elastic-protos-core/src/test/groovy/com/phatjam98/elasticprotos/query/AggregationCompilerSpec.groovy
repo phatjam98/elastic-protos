@@ -10,6 +10,7 @@ import com.phatjam98.elasticprotos.proto.CalendarInterval
 import com.phatjam98.elasticprotos.proto.DateBounds
 import com.phatjam98.elasticprotos.proto.DateHistogramAggregation
 import com.phatjam98.elasticprotos.proto.HistogramAggregation
+import com.phatjam98.elasticprotos.proto.MetricAggregation
 import com.phatjam98.elasticprotos.proto.MetricType
 import com.phatjam98.elasticprotos.proto.RangeBucket
 import com.phatjam98.elasticprotos.proto.SortingOrder
@@ -90,6 +91,11 @@ class AggregationCompilerSpec extends Specification {
     'key'         | 'is reserved'
     'value'       | 'is reserved'
     'meta'        | 'is reserved'
+    'a[0]'        | "must not contain '['"
+    'a]'          | "must not contain ']'"
+    'a>b'         | "must not contain '>'"
+    'a.b'         | "must not contain '.'"
+    'total_'      | "must not end with '_'"
   }
 
   def "sibling names must be unique, but a sub-aggregation may reuse a name of another level"() {
@@ -104,7 +110,7 @@ class AggregationCompilerSpec extends Specification {
   def "an aggregation needs a kind and a field"() {
     expect:
     error(document, Aggregation.newBuilder().setName('x').setField('type')).contains('sets no kind')
-    error(document, Aggregation.newBuilder().setName('x').setMetric(MetricType.MAX)).contains('needs a field')
+    error(document, Aggregation.newBuilder().setName('x').setMetric(MetricAggregation.newBuilder().setType(MetricType.MAX))).contains('needs a field')
   }
 
   def "metrics take no sub-aggregations and sub-aggregations take none of their own"() {
@@ -178,15 +184,15 @@ class AggregationCompilerSpec extends Specification {
   def "terms options: size, min_doc_count, missing typed for the field, and order"() {
     expect:
     aggs(document, terms('x', 'size_bytes') { size = 3; minDocCount = 0; missing = prim('7') }).x ==
-        [terms: [field: 'size_bytes', size: 3, min_doc_count: 0L, missing: 7L]]
+        [terms: [field: 'size_bytes', size: 3, min_doc_count: 0, missing: 7L]]
     aggs(document, terms('x', 'type') { missing = prim('NONE') }).x.terms.missing == 'NONE'
-    aggs(document, terms('x', 'type') { order = order(TermsOrderBy.BY_COUNT, '', SortingOrder.ASC) }).x.terms.order ==
+    aggs(document, terms('x', 'type') { addOrder(order(TermsOrderBy.BY_COUNT, '', SortingOrder.ASC)) }).x.terms.order ==
         [_count: 'asc']
-    aggs(document, terms('x', 'type') { order = order(TermsOrderBy.BY_COUNT) }).x.terms.order == [_count: 'desc']
-    aggs(document, terms('x', 'type') { order = order(TermsOrderBy.BY_KEY) }).x.terms.order == [_key: 'asc']
-    aggs(document, terms('x', 'type') { order = order(TermsOrderBy.ORDER_BY_DEFAULT, '', SortingOrder.ASC) }).x.terms.order ==
+    aggs(document, terms('x', 'type') { addOrder(order(TermsOrderBy.BY_COUNT)) }).x.terms.order == [_count: 'desc']
+    aggs(document, terms('x', 'type') { addOrder(order(TermsOrderBy.BY_KEY)) }).x.terms.order == [_key: 'asc']
+    aggs(document, terms('x', 'type') { addOrder(order(TermsOrderBy.ORDER_BY_DEFAULT, '', SortingOrder.ASC)) }).x.terms.order ==
         [_count: 'asc']
-    !aggs(document, terms('x', 'type') { order = order(TermsOrderBy.ORDER_BY_DEFAULT) }).x.terms.containsKey('order')
+    !aggs(document, terms('x', 'type') { addOrder(order(TermsOrderBy.ORDER_BY_DEFAULT)) }).x.terms.containsKey('order')
   }
 
   def "terms options are validated"() {
@@ -195,9 +201,9 @@ class AggregationCompilerSpec extends Specification {
     error(document, terms('x', 'type') { size = -1 }).contains('negative size')
     error(document, terms('x', 'type') { minDocCount = -1 }).contains('negative min_doc_count')
     error(document, terms('x', 'size_bytes') { missing = prim('abc') }).contains('cannot take string_value "abc"')
-    error(document, terms('x', 'type') { order = order(TermsOrderBy.BY_KEY, 'm') }).contains('set by = BY_METRIC')
-    error(document, terms('x', 'type') { order = TermsOrder.newBuilder().setByValue(42).build() }).contains('unknown order')
-    error(document, terms('x', 'type') { order = TermsOrder.newBuilder().setBy(TermsOrderBy.BY_KEY).setDirectionValue(42).build() })
+    error(document, terms('x', 'type') { addOrder(order(TermsOrderBy.BY_KEY, 'm')) }).contains('set by = BY_METRIC')
+    error(document, terms('x', 'type') { addOrder(TermsOrder.newBuilder().setByValue(42).build()) }).contains('unknown order')
+    error(document, terms('x', 'type') { addOrder(TermsOrder.newBuilder().setBy(TermsOrderBy.BY_KEY).setDirectionValue(42).build()) })
         .contains('unknown order direction')
   }
 
@@ -217,24 +223,36 @@ class AggregationCompilerSpec extends Specification {
     compile(small, document, terms('x', 'type') { size = 5 }).body().aggs.x.terms.size == 5
   }
 
+  def "several orders compile to a compound order, the first deciding"() {
+    expect:
+    aggs(document, Aggs.sub(terms('x', 'type') {
+      addOrder(order(TermsOrderBy.BY_METRIC, 'm'))
+      addOrder(order(TermsOrderBy.BY_KEY))
+    }, Aggs.sum('m', 'size_bytes'))).x.terms.order == [[m: 'desc'], [_key: 'asc']]
+    !aggs(document, terms('x', 'type') {
+      addOrder(order(TermsOrderBy.ORDER_BY_DEFAULT))
+      addOrder(order(TermsOrderBy.ORDER_BY_DEFAULT))
+    }).x.terms.containsKey('order')
+  }
+
   def "ordering by a metric names a metric sub-aggregation"() {
     expect:
-    aggs(document, Aggs.sub(terms('x', 'type') { order = order(TermsOrderBy.BY_METRIC, 'm') },
+    aggs(document, Aggs.sub(terms('x', 'type') { addOrder(order(TermsOrderBy.BY_METRIC, 'm')) },
         Aggs.sum('m', 'size_bytes'))).x.terms.order == [m: 'desc']
-    aggs(document, Aggs.sub(terms('x', 'type') { order = order(TermsOrderBy.BY_METRIC, 'm', SortingOrder.ASC) },
+    aggs(document, Aggs.sub(terms('x', 'type') { addOrder(order(TermsOrderBy.BY_METRIC, 'm', SortingOrder.ASC)) },
         Aggs.sum('m', 'size_bytes'))).x.terms.order == [m: 'asc']
 
     and:
-    error(document, terms('x', 'type') { order = order(TermsOrderBy.BY_METRIC) }).contains('names no metric')
-    error(document, Aggs.sub(terms('x', 'type') { order = order(TermsOrderBy.BY_METRIC, 'other') },
+    error(document, terms('x', 'type') { addOrder(order(TermsOrderBy.BY_METRIC)) }).contains('names no metric')
+    error(document, Aggs.sub(terms('x', 'type') { addOrder(order(TermsOrderBy.BY_METRIC, 'other')) },
         Aggs.sum('m', 'size_bytes'))).contains("orders by 'other', which is not one of its sub-aggregations")
-    error(document, Aggs.sub(terms('x', 'type') { order = order(TermsOrderBy.BY_METRIC, 'b') },
+    error(document, Aggs.sub(terms('x', 'type') { addOrder(order(TermsOrderBy.BY_METRIC, 'b')) },
         Aggs.terms('b', 'tags'))).contains("which is a bucket aggregation")
   }
 
   def "in lenient mode an order metric that was skipped leaves the default order"() {
     when:
-    def compiled = compile(lenient, document, Aggs.sub(terms('x', 'type') { order = order(TermsOrderBy.BY_METRIC, 'm') },
+    def compiled = compile(lenient, document, Aggs.sub(terms('x', 'type') { addOrder(order(TermsOrderBy.BY_METRIC, 'm')) },
         Aggs.sum('m', 'nope')))
 
     then:
@@ -291,7 +309,7 @@ class AggregationCompilerSpec extends Specification {
       calendarInterval = CalendarInterval.DAY; timeZone = '-05:00'; format = 'yyyy-MM-dd'; minDocCount = 2
       extendedBounds = DateBounds.newBuilder().setMin(Timestamp.newBuilder().setSeconds(10)).build()
     }).h.date_histogram == [field: 'filed_at', calendar_interval: '1d', time_zone: '-05:00', format: 'yyyy-MM-dd',
-                            min_doc_count: 2L, extended_bounds: [min: 10_000L]]
+                            min_doc_count: 2, extended_bounds: [min: 10_000L]]
     !aggs(document, dateHistogram('h', 'filed_at') {
       calendarInterval = CalendarInterval.DAY; extendedBounds = DateBounds.defaultInstance
     }).h.date_histogram.containsKey('extended_bounds')
@@ -321,7 +339,7 @@ class AggregationCompilerSpec extends Specification {
     aggs(document, Aggs.histogram('h', 'size_bytes', 2.5)).h == [histogram: [field: 'size_bytes', interval: 2.5d]]
     aggs(document, Aggs.histogram('h', 'size_bytes', 10).setHistogram(
         HistogramAggregation.newBuilder().setInterval(10).setOffset(2.5).setMinDocCount(1))).h.histogram ==
-        [field: 'size_bytes', interval: 10L, offset: 2.5d, min_doc_count: 1L]
+        [field: 'size_bytes', interval: 10L, offset: 2.5d, min_doc_count: 1]
 
     and:
     error(document, Aggs.histogram('h', 'size_bytes', interval)).contains('positive, finite interval')
@@ -335,6 +353,24 @@ class AggregationCompilerSpec extends Specification {
   }
 
   // ---- ranges --------------------------------------------------------------------------------
+
+  def "date range buckets take Timestamp bounds as epoch millis, numeric fields refuse them"() {
+    expect:
+    aggs(document, Aggs.range('r', 'filed_at', Aggs.bucket('q1', java.time.Instant.parse('2024-01-01T00:00:00Z'),
+        java.time.Instant.parse('2024-04-01T00:00:00.250Z')), Aggs.bucket(null, java.time.Instant.parse('2024-04-01T00:00:00Z'),
+        (java.time.Instant) null))).r.date_range.ranges == [[key: 'q1', from: 1704067200000L, to: 1711929600250L],
+                                                            [from: 1711929600000L]]
+    aggs(document, Aggs.range('r', 'filed_at', RangeBucket.newBuilder().setFrom(5).setToTime(Timestamp.newBuilder().setSeconds(10)).build()))
+        .r.date_range.ranges == [[from: 5L, to: 10_000L]]
+
+    and:
+    error(document, Aggs.range('r', 'size_bytes', Aggs.bucket('k', java.time.Instant.EPOCH, (java.time.Instant) null)))
+        .contains("has a from_time or to_time bound, but 'size_bytes' is mapped as LONG")
+    error(document, Aggs.range('r', 'filed_at', RangeBucket.newBuilder().setToTime(Timestamp.newBuilder().setSeconds(Long.MAX_VALUE)).build()))
+        .contains('invalid timestamp bound')
+    error(document, Aggs.range('r', 'filed_at', Aggs.bucket(null, java.time.Instant.parse('2024-02-01T00:00:00Z'),
+        java.time.Instant.parse('2024-01-01T00:00:00Z')))).contains('empty bucket')
+  }
 
   def "range buckets are [from, to), and natural-side infinities mean unset"() {
     expect:
@@ -353,7 +389,7 @@ class AggregationCompilerSpec extends Specification {
     where:
     field        | buckets                                                  || reason
     'size_bytes' | []                                                       || 'needs at least one bucket'
-    'size_bytes' | [Aggs.bucket('k', null, null)]                           || "bucket 'k' without from or to"
+    'size_bytes' | [Aggs.bucket('k', (Double) null, (Double) null)]                           || "bucket 'k' without from or to"
     'size_bytes' | [Aggs.bucket(null, 5d, 5d)]                              || 'empty bucket'
     'size_bytes' | [Aggs.bucket('k', 6d, 5d)]                               || "empty bucket 'k'"
     'size_bytes' | [Aggs.bucket(null, Double.POSITIVE_INFINITY, null)]      || 'empty bucket'
@@ -383,7 +419,7 @@ class AggregationCompilerSpec extends Specification {
     error(document, Aggs.sum('a', 'type')).contains('needs a numeric field')
     error(document, Aggs.count('a', 'parties')).contains('mapped as NESTED')
     error(document, Aggs.metric('a', 'size_bytes', MetricType.METRIC_UNSPECIFIED)).contains('no valid metric')
-    error(document, Aggregation.newBuilder().setName('a').setField('size_bytes').setMetricValue(99)).contains('no valid metric')
+    error(document, Aggregation.newBuilder().setName('a').setField('size_bytes').setMetric(MetricAggregation.newBuilder().setTypeValue(99))).contains('no valid metric')
   }
 
   // ---- nested --------------------------------------------------------------------------------

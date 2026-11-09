@@ -4,6 +4,7 @@ import com.phatjam98.elasticprotos.proto.Aggregation
 import com.phatjam98.elasticprotos.proto.CalendarInterval
 import com.phatjam98.elasticprotos.proto.Highlight
 import com.phatjam98.elasticprotos.proto.HighlightField
+import com.phatjam98.elasticprotos.proto.MetricAggregation
 import com.phatjam98.elasticprotos.proto.MetricType
 import com.phatjam98.elasticprotos.proto.RangeBucket
 import com.phatjam98.elasticprotos.proto.TermsAggregation
@@ -22,15 +23,15 @@ class AggsSpec extends Specification {
     Aggs.histogram('h', 'size', 2.5).build().histogram.interval == 2.5d
     Aggs.range('r', 'size', Aggs.bucket('a', null, 1d), Aggs.bucket(null, 1d, null)).build().range.rangesList ==
         [RangeBucket.newBuilder().setKey('a').setTo(1).build(), RangeBucket.newBuilder().setFrom(1).build()]
-    Aggs.bucket(null, null, null) == RangeBucket.defaultInstance
-    !Aggs.bucket(null, null, null).hasFrom()
+    Aggs.bucket(null, (Double) null, (Double) null) == RangeBucket.defaultInstance
+    !Aggs.bucket(null, (Double) null, (Double) null).hasFrom()
   }
 
   @Unroll
   def "#factory is the #type metric"() {
     expect:
     Aggs."${factory}"('m', 'f').build() ==
-        Aggregation.newBuilder().setName('m').setField('f').setMetric(type).build()
+        Aggregation.newBuilder().setName('m').setField('f').setMetric(MetricAggregation.newBuilder().setType(type)).build()
 
     where:
     factory       | type
@@ -80,13 +81,13 @@ class AggsSpec extends Specification {
         .aggregate(Aggs.max('m', 'size').build())
         .aggregationsOnly()
         .highlight('title')
-        .highlight { it.setPreTag('<b>').addFields(HighlightField.newBuilder().setField('body')) }
+        .highlight { it.addPreTags('<b>').addFields(HighlightField.newBuilder().setField('body')) }
         .build()
 
     then:
     criteria.aggregationList*.name == ['t', 'm']
     criteria.pagination.size == -1
-    criteria.highlight == Highlight.newBuilder().setPreTag('<b>')
+    criteria.highlight == Highlight.newBuilder().addPreTags('<b>')
         .addFields(HighlightField.newBuilder().setField('title'))
         .addFields(HighlightField.newBuilder().setField('body')).build()
 
