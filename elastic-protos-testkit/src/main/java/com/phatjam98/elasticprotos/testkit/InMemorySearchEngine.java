@@ -16,6 +16,7 @@ import com.phatjam98.elasticprotos.engine.ReindexRequest;
 import com.phatjam98.elasticprotos.engine.ReindexResult;
 import com.phatjam98.elasticprotos.engine.SearchEngine;
 import com.phatjam98.elasticprotos.engine.SearchResult;
+import com.phatjam98.elasticprotos.engine.UpdateByQueryRequest;
 import com.phatjam98.elasticprotos.util.Json;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -31,6 +32,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -52,7 +54,26 @@ import java.util.regex.Pattern;
  *       #rejectTypeChanges(boolean)} (on by default) it refuses to change an existing field's type.
  *   <li>{@link #updateAliases} validates every action before applying any.
  *   <li>Writes to a write-blocked index fail with {@code BLOCKED} and status 403.
+ *   <li>Every write takes the next value of one global sequence number counter (the primary term
+ *       is always 1) and increments the document's version. {@link #get} always returns version,
+ *       sequence number and primary term; {@link #search} returns the version when the body asks
+ *       {@code "version": true} and the other two when it asks {@code "seq_no_primary_term":
+ *       true}. Writes and bulk items with {@code ifSeqNo}/{@code ifPrimaryTerm} that do not match
+ *       the stored document fail with {@code CONFLICT} and status 409.
+ *   <li>{@link #reindex} copies from a snapshot of the source taken when the call starts, honours
+ *       {@code source.query} (the same queries as search), and with {@link
+ *       ReindexRequest.VersionType#EXTERNAL} keeps the source versions and skips documents whose
+ *       destination version is the same or newer: counted as {@code versionConflicts} when the
+ *       request proceeds on conflicts, otherwise the copy stops at the first conflict and reports
+ *       it as a failure, like the real engines.
+ *   <li>{@link #updateByQuery} rewrites every matching document, bumping version and sequence
+ *       number. {@link #putSettings} merges into the stored settings ({@code blocks.write} sets
+ *       the write block).
  * </ul>
+ *
+ * <p>Test hooks: {@link #duringReindex} runs after a reindex took its snapshot and before it
+ * copies, so a spec can write to the source concurrently; {@link #afterAliasUpdate} runs after
+ * {@link #updateAliases} applied its actions.
  *
  * <p>Limits: documents are never validated against mappings; every write is immediately visible
  * (refresh is a no-op); writes to unknown indices fail instead of auto-creating them; {@link
@@ -66,7 +87,8 @@ import java.util.regex.Pattern;
  * {@code from}, {@code size}, {@code track_total_hits}, {@code pit} and {@code search_after}. Hits
  * always come in insertion order; when the body has a {@code sort}, whatever it says, each hit's
  * only sort value is its position among the matches, and {@code search_after} resumes after that
- * position, which is enough for point-in-time paging. Anything else fails with {@code
+ * position, which is enough for point-in-time paging. A {@code highlight} in the body is
+ * accepted and ignored: hits never carry highlights. Any other query fails with {@code
  * BAD_REQUEST}.
  *
  * <p>Every call is recorded in {@link #log()} as the operation name and its target, for example
@@ -74,6 +96,8 @@ import java.util.regex.Pattern;
  */
 public class InMemorySearchEngine implements SearchEngine {
 
+  /** The engine never fails over, so every write has primary term 1. */
+  private static final Long PRIMARY_TERM = 1L;
   private static final Pattern ASSIGN =
       Pattern.compile("ctx\\._source\\.([A-Za-z0-9_]+)\\s*=\\s*params\\.([A-Za-z0-9_]+)\\s*;?");
   private static final Pattern REMOVE =
@@ -86,6 +110,9 @@ public class InMemorySearchEngine implements SearchEngine {
   private int dataNodes = 1;
   private boolean rejectTypeChanges = true;
   private long generatedIds;
+  private long seqNo = -1;
+  private Consumer<ReindexRequest> duringReindex = request -> {};
+  private Runnable afterAliasUpdate = () -> {};
 
   /** Creates an empty engine. */
   public InMemorySearchEngine() {}
@@ -107,6 +134,23 @@ public class InMemorySearchEngine implements SearchEngine {
   /** Sets whether {@link #putMappings} refuses to change the type of an existing field. */
   public InMemorySearchEngine rejectTypeChanges(boolean value) {
     this.rejectTypeChanges = value;
+    return this;
+  }
+
+  /**
+   * Sets a hook that {@link #reindex} runs after it took the snapshot of the source and before it
+   * copies, for example to write to the source while a reindex is in flight; null removes it.
+   */
+  public InMemorySearchEngine duringReindex(Consumer<ReindexRequest> hook) {
+    this.duringReindex = hook == null ? request -> {} : hook;
+    return this;
+  }
+
+  /**
+   * Sets a hook that {@link #updateAliases} runs after it applied its actions; null removes it.
+   */
+  public InMemorySearchEngine afterAliasUpdate(Runnable hook) {
+    this.afterAliasUpdate = hook == null ? () -> {} : hook;
     return this;
   }
 
@@ -288,6 +332,43 @@ public class InMemorySearchEngine implements SearchEngine {
       state.aliases.clear();
       state.aliases.addAll(aliases);
     });
+    afterAliasUpdate.run();
+  }
+
+  /**
+   * Merges settings into every index behind a name. Keys may be flat ({@code index.x.y}) or
+   * nested under {@code index}; they are stored without the {@code index.} prefix, so {@link
+   * #getSettings} keeps its shape. A null value removes a setting; {@code blocks.write} sets the
+   * write block.
+   */
+  @Override
+  public void putSettings(String index, Map<String, Object> settings) {
+    record("putSettings", index + " " + new TreeMap<>(settings));
+    List<IndexState> targets = existing(index);
+    Map<String, Object> flat = flattenSettings(settings);
+    Object block = flat.remove("blocks.write");
+    if (flat.get("blocks") instanceof Map<?, ?> blocks && blocks.containsKey("write")) {
+      block = blocks.get("write");
+      Map<String, Object> rest = new TreeMap<>(map(blocks));
+      rest.remove("write");
+      if (rest.isEmpty()) {
+        flat.remove("blocks");
+      } else {
+        flat.put("blocks", rest);
+      }
+    }
+    for (IndexState state : targets) {
+      flat.forEach((key, value) -> {
+        if (value == null) {
+          state.settings.remove(key);
+        } else {
+          state.settings.put(key, value);
+        }
+      });
+      if (block != null) {
+        state.writeBlocked = Boolean.parseBoolean(block.toString());
+      }
+    }
   }
 
   @Override
@@ -317,23 +398,62 @@ public class InMemorySearchEngine implements SearchEngine {
     }
     checkWritable(request.dest(), dest);
     List<String> statements = request.script() == null ? List.of() : parse(request.script());
-    long created = 0;
-    long updated = 0;
-    long total = 0;
+    Map<String, Object> query = request.query() == null ? Map.of() : request.query();
+    List<Snapshot> snapshot = new ArrayList<>();
     for (String source : sources) {
-      for (Map.Entry<String, Map<String, Object>> doc : indices.get(source).docs.entrySet()) {
-        Map<String, Object> copy = Json.sortedCopy(doc.getValue());
-        apply(statements, copy, request.scriptParams());
-        total++;
-        if (dest.docs.put(doc.getKey(), copy) == null) {
-          created++;
-        } else {
-          updated++;
+      IndexState state = indices.get(source);
+      for (Map.Entry<String, Map<String, Object>> doc : state.docs.entrySet()) {
+        if (matches(query, doc.getKey(), doc.getValue())) {
+          snapshot.add(new Snapshot(doc.getKey(), Json.sortedCopy(doc.getValue()),
+              state.versions.getOrDefault(doc.getKey(), 1L)));
         }
-        dest.bumpVersion(doc.getKey());
       }
     }
-    return new ReindexResult(total, created, updated, List.of(), 0, false);
+    duringReindex.accept(request);
+    boolean external = request.versionType() == ReindexRequest.VersionType.EXTERNAL;
+    long created = 0;
+    long updated = 0;
+    long conflicts = 0;
+    List<Map<String, Object>> failures = new ArrayList<>();
+    for (Snapshot doc : snapshot) {
+      Long current = dest.versions.get(doc.id());
+      if (external && current != null && current >= doc.version()) {
+        conflicts++;
+        if (!request.proceedOnConflicts()) {
+          failures.add(versionConflict(request.dest(), doc.id(), doc.version(), current));
+          break;
+        }
+        continue;
+      }
+      Map<String, Object> copy = doc.source();
+      apply(statements, copy, request.scriptParams());
+      if (dest.docs.put(doc.id(), copy) == null) {
+        created++;
+      } else {
+        updated++;
+      }
+      stamp(dest, doc.id(), external ? doc.version() : null);
+    }
+    long total = failures.isEmpty() ? snapshot.size() : created + updated + conflicts;
+    return new ReindexResult(total, created, updated, failures, 0, false, 0, 0, conflicts);
+  }
+
+  /** Rewrites every matching document in place, bumping its version and sequence number. */
+  @Override
+  public ReindexResult updateByQuery(UpdateByQueryRequest request) {
+    record("updateByQuery", request.index());
+    long updated = 0;
+    for (String name : existingNames(request.index())) {
+      IndexState state = indices.get(name);
+      checkWritable(name, state);
+      for (Map.Entry<String, Map<String, Object>> doc : state.docs.entrySet()) {
+        if (matches(request.query(), doc.getKey(), doc.getValue())) {
+          stamp(state, doc.getKey(), null);
+          updated++;
+        }
+      }
+    }
+    return new ReindexResult(updated, 0, updated, List.of(), 0, false);
   }
 
   // ---------------------------------------------------------------- documents
@@ -350,8 +470,11 @@ public class InMemorySearchEngine implements SearchEngine {
       throw new EngineException(Kind.CONFLICT, 409,
           "version_conflict_engine_exception: [" + docId + "]: document already exists");
     }
+    checkMatch(state, docId, options.ifSeqNo(), options.ifPrimaryTerm());
     boolean existed = state.docs.put(docId, Json.sortedCopy(document)) != null;
-    return new IndexResult(name, docId, existed ? "updated" : "created", state.bumpVersion(docId));
+    long version = stamp(state, docId, null);
+    return new IndexResult(name, docId, existed ? "updated" : "created", version,
+        state.seqNos.get(docId), PRIMARY_TERM);
   }
 
   @Override
@@ -366,7 +489,8 @@ public class InMemorySearchEngine implements SearchEngine {
           "document_missing_exception: [" + id + "]: document missing");
     }
     state.docs.put(id, Json.deepMerge(current, partial));
-    return new IndexResult(name, id, "updated", state.bumpVersion(id));
+    long version = stamp(state, id, null);
+    return new IndexResult(name, id, "updated", version, state.seqNos.get(id), PRIMARY_TERM);
   }
 
   /**
@@ -386,21 +510,26 @@ public class InMemorySearchEngine implements SearchEngine {
       return Optional.empty();
     }
     String name = names.get(0);
-    Map<String, Object> doc = indices.get(name).docs.get(id);
+    IndexState state = indices.get(name);
+    Map<String, Object> doc = state.docs.get(id);
     return doc == null
         ? Optional.empty()
-        : Optional.of(new Hit(name, id, null, Json.sortedCopy(doc), List.of()));
+        : Optional.of(new Hit(name, id, null, Json.sortedCopy(doc), List.of(),
+            state.versions.get(id), state.seqNos.get(id), PRIMARY_TERM, Map.of()));
   }
 
-  /** Deletes one document; the refresh option is accepted and ignored, writes are visible. */
+  /**
+   * Deletes one document; the refresh option is accepted and ignored, writes are visible. A
+   * conditional delete of a missing document fails with {@code CONFLICT}, like the engines.
+   */
   @Override
   public boolean delete(String index, String id, IndexOptions options) {
     record("delete", index + "/" + id);
     String name = writeTarget(index);
     IndexState state = indices.get(name);
     checkWritable(name, state);
-    state.versions.remove(id);
-    return state.docs.remove(id) != null;
+    checkMatch(state, id, options.ifSeqNo(), options.ifPrimaryTerm());
+    return remove(state, id);
   }
 
   @Override
@@ -420,6 +549,13 @@ public class InMemorySearchEngine implements SearchEngine {
       boolean exists = state.docs.containsKey(id);
       int status;
       String error = null;
+      String mismatch = op.ifSeqNo() == null ? null
+          : mismatch(state, id, op.ifSeqNo(), op.ifPrimaryTerm());
+      if (mismatch != null) {
+        errors = true;
+        items.add(new BulkResult.Item(opName, name, id, 409, mismatch));
+        continue;
+      }
       switch (op.type()) {
         case CREATE:
           if (exists) {
@@ -427,14 +563,14 @@ public class InMemorySearchEngine implements SearchEngine {
             error = "version_conflict_engine_exception: document already exists";
           } else {
             state.docs.put(id, Json.sortedCopy(op.source()));
-            state.bumpVersion(id);
+            stamp(state, id, null);
             status = 201;
           }
           break;
         case UPDATE:
           if (exists) {
             state.docs.put(id, Json.deepMerge(state.docs.get(id), op.source()));
-            state.bumpVersion(id);
+            stamp(state, id, null);
             status = 200;
           } else {
             status = 404;
@@ -442,13 +578,12 @@ public class InMemorySearchEngine implements SearchEngine {
           }
           break;
         case DELETE:
-          state.docs.remove(id);
-          state.versions.remove(id);
+          remove(state, id);
           status = exists ? 200 : 404;
           break;
         default:
           state.docs.put(id, Json.sortedCopy(op.source()));
-          state.bumpVersion(id);
+          stamp(state, id, null);
           status = exists ? 200 : 201;
           break;
       }
@@ -484,6 +619,8 @@ public class InMemorySearchEngine implements SearchEngine {
     }
 
     Map<String, Object> query = map(body.get("query"));
+    boolean withVersion = Boolean.TRUE.equals(body.get("version"));
+    boolean withSeqNo = Boolean.TRUE.equals(body.get("seq_no_primary_term"));
     List<Hit> matches = new ArrayList<>();
     for (String name : names) {
       IndexState state = indices.get(name);
@@ -492,8 +629,12 @@ public class InMemorySearchEngine implements SearchEngine {
       }
       for (Map.Entry<String, Map<String, Object>> doc : state.docs.entrySet()) {
         if (matches(query, doc.getKey(), doc.getValue())) {
-          matches.add(new Hit(name, doc.getKey(), 1.0, Json.sortedCopy(doc.getValue()),
-              List.of()));
+          String id = doc.getKey();
+          matches.add(new Hit(name, id, 1.0, Json.sortedCopy(doc.getValue()), List.of(),
+              withVersion ? state.versions.get(id) : null,
+              withSeqNo ? state.seqNos.get(id) : null,
+              withSeqNo ? PRIMARY_TERM : null,
+              Map.of()));
         }
       }
     }
@@ -501,7 +642,7 @@ public class InMemorySearchEngine implements SearchEngine {
       for (int i = 0; i < matches.size(); i++) {
         Hit hit = matches.get(i);
         matches.set(i, new Hit(hit.index(), hit.id(), hit.score(), hit.source(),
-            List.of((long) i)));
+            List.of((long) i), hit.version(), hit.seqNo(), hit.primaryTerm(), hit.highlight()));
       }
     }
     int from = intValue(body.get("from"), 0);
@@ -537,6 +678,61 @@ public class InMemorySearchEngine implements SearchEngine {
   }
 
   // ---------------------------------------------------------------- internals
+
+  /**
+   * Records a write: takes the next sequence number and sets the version, to {@code version} when
+   * given (external versioning), else one more than before.
+   */
+  private long stamp(IndexState state, String id, Long version) {
+    long next = version != null ? version : state.versions.getOrDefault(id, 0L) + 1;
+    state.versions.put(id, next);
+    state.seqNos.put(id, ++seqNo);
+    return next;
+  }
+
+  private boolean remove(IndexState state, String id) {
+    state.versions.remove(id);
+    state.seqNos.remove(id);
+    seqNo++;
+    return state.docs.remove(id) != null;
+  }
+
+  /** Fails with {@code CONFLICT} when a conditional write does not match the stored document. */
+  private static void checkMatch(IndexState state, String id, Long ifSeqNo, Long ifPrimaryTerm) {
+    String mismatch = ifSeqNo == null ? null : mismatch(state, id, ifSeqNo, ifPrimaryTerm);
+    if (mismatch != null) {
+      throw new EngineException(Kind.CONFLICT, 409, mismatch);
+    }
+  }
+
+  /** Describes how a conditional write fails to match, or returns null when it matches. */
+  private static String mismatch(IndexState state, String id, long ifSeqNo, long ifPrimaryTerm) {
+    Long current = state.seqNos.get(id);
+    String required = "version_conflict_engine_exception: [" + id + "]: version conflict,"
+        + " required seqNo [" + ifSeqNo + "], primary term [" + ifPrimaryTerm + "]";
+    if (current == null) {
+      return required + " but no document was found";
+    }
+    if (current != ifSeqNo || ifPrimaryTerm != PRIMARY_TERM) {
+      return required + ". current document has seqNo [" + current + "] and primary term ["
+          + PRIMARY_TERM + "]";
+    }
+    return null;
+  }
+
+  private static Map<String, Object> versionConflict(String index, String id, long version,
+      long current) {
+    Map<String, Object> cause = new TreeMap<>();
+    cause.put("type", "version_conflict_engine_exception");
+    cause.put("reason", "[" + id + "]: version conflict, current version [" + current
+        + "] is higher or equal to the one provided [" + version + "]");
+    Map<String, Object> failure = new TreeMap<>();
+    failure.put("index", index);
+    failure.put("id", id);
+    failure.put("status", 409);
+    failure.put("cause", cause);
+    return failure;
+  }
 
   private void record(String operation, String target) {
     log.add(target.isEmpty() ? operation : operation + " " + target);
@@ -853,10 +1049,10 @@ public class InMemorySearchEngine implements SearchEngine {
     private final Set<String> aliases = new TreeSet<>();
     private final Map<String, Map<String, Object>> docs = new LinkedHashMap<>();
     private final Map<String, Long> versions = new TreeMap<>();
+    private final Map<String, Long> seqNos = new TreeMap<>();
     private boolean writeBlocked;
-
-    long bumpVersion(String id) {
-      return versions.merge(id, 1L, Long::sum);
-    }
   }
+
+  /** A source document as a reindex saw it when it started. */
+  private record Snapshot(String id, Map<String, Object> source, long version) {}
 }

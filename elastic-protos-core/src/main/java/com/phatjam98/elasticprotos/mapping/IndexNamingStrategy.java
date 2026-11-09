@@ -53,8 +53,22 @@ public interface IndexNamingStrategy {
   }
 
   /**
+   * Returns the name of the index that holds migration locks, one document per alias being
+   * migrated, so that concurrent migrations of the same alias exclude each other. Nothing creates
+   * it yet: it is reserved for the upcoming zero-downtime reindex. Strategies that separate
+   * environments sharing one cluster should return a distinct name per environment, as {@link
+   * #prefixed} does.
+   *
+   * @return {@code elastic-protos-locks} by default
+   */
+  default String lockIndex() {
+    return "elastic-protos-locks";
+  }
+
+  /**
    * Returns a strategy that prefixes every alias, for example per environment:
-   * {@code prefixed("dev")} turns {@code documents} into {@code dev-documents}.
+   * {@code prefixed("dev")} turns {@code documents} into {@code dev-documents}, and the lock index
+   * into {@code dev-elastic-protos-locks}.
    *
    * <p>The prefix is lower-cased, since index names must be lower case. It must not be empty,
    * must not start with {@code -}, {@code _} or {@code +}, and must not contain whitespace or any
@@ -75,6 +89,11 @@ public interface IndexNamingStrategy {
       @Override
       public String alias(String declaredAlias) {
         return checked + "-" + declaredAlias;
+      }
+
+      @Override
+      public String lockIndex() {
+        return checked + "-" + IndexNamingStrategy.super.lockIndex();
       }
     };
   }

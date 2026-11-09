@@ -66,17 +66,39 @@ public interface SearchEngine extends AutoCloseable {
   /** Copies documents between indices and waits for completion. */
   ReindexResult reindex(ReindexRequest request);
 
+  /**
+   * Rewrites the matching documents of an index in place and waits for completion. Each rewritten
+   * document is re-indexed under the current mapping and gets a new version and sequence number.
+   *
+   * @param request the index, query and options
+   * @return the outcome; {@link ReindexResult#updated()} counts the rewritten documents
+   */
+  ReindexResult updateByQuery(UpdateByQueryRequest request);
+
+  /**
+   * Updates dynamic settings of an index or of the indices behind an alias.
+   *
+   * @param index the index or alias
+   * @param settings the settings, either as flat keys ({@code "index.refresh_interval": "5s"}) or
+   *     nested ({@code {"index": {"refresh_interval": "5s"}}}); sent unchanged
+   */
+  void putSettings(String index, Map<String, Object> settings);
+
   /** Blocks or unblocks writes to an index. */
   void setWriteBlock(String index, boolean blocked);
 
   /**
    * Writes one document.
    *
+   * <p>With {@link IndexOptions#ifSeqNo()} and {@link IndexOptions#ifPrimaryTerm()} the write
+   * only succeeds while the stored document has that sequence number and primary term, and
+   * otherwise fails with {@link EngineException.Kind#CONFLICT}.
+   *
    * @param index the index or alias
    * @param id the document id, or null to have one generated
    * @param document the document body
    * @param options write options
-   * @return what happened
+   * @return what happened, with the sequence number and primary term of the write
    */
   IndexResult index(String index, String id, Map<String, Object> document, IndexOptions options);
 
@@ -89,8 +111,8 @@ public interface SearchEngine extends AutoCloseable {
    *
    * @param index a concrete index, or an alias that resolves to exactly one index
    * @param id the document id
-   * @return the document as a hit without score or sort values, or empty when the document or the
-   *     index does not exist
+   * @return the document as a hit without score or sort values but with its version, sequence
+   *     number and primary term, or empty when the document or the index does not exist
    */
   Optional<Hit> get(String index, String id);
 
@@ -113,8 +135,10 @@ public interface SearchEngine extends AutoCloseable {
    *
    * @param index the index or alias
    * @param id the document id
-   * @param options only {@link IndexOptions#refresh()} applies: when the deletion becomes visible
-   *     to search; {@code createOnly} is ignored
+   * @param options {@link IndexOptions#refresh()}: when the deletion becomes visible to search;
+   *     {@link IndexOptions#ifSeqNo()} and {@link IndexOptions#ifPrimaryTerm()}: delete only
+   *     while the document has them, else fail with {@link EngineException.Kind#CONFLICT};
+   *     {@code createOnly} is ignored
    * @return true if it existed
    */
   boolean delete(String index, String id, IndexOptions options);

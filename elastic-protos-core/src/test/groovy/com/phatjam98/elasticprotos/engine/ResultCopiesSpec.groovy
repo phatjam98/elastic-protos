@@ -55,6 +55,72 @@ class ResultCopiesSpec extends Specification {
     new Hit('i', 'id', null, null, null).sort() == null
   }
 
+  def "the five-argument hit has no version metadata and no highlights"() {
+    when:
+    def hit = new Hit('i', 'id', 1.0d, [a: 1], [])
+
+    then:
+    hit.version() == null
+    hit.seqNo() == null
+    hit.primaryTerm() == null
+    hit.highlight() == [:]
+    hit == new Hit('i', 'id', 1.0d, [a: 1], [], null, null, null, [:])
+  }
+
+  def "a hit copies its highlights and each fragment list, and a null highlight is empty"() {
+    given:
+    def fragments = ['<em>a</em>', 'b']
+    def highlight = [title: fragments, body: null]
+    def hit = new Hit('i', 'id', null, [:], [], 3L, 7L, 1L, highlight)
+
+    when:
+    fragments << 'c'
+    highlight.extra = ['x']
+
+    then:
+    hit.version() == 3L
+    hit.seqNo() == 7L
+    hit.primaryTerm() == 1L
+    hit.highlight() == [title: ['<em>a</em>', 'b'], body: []]
+    hit.highlight().keySet().toList() == ['title', 'body']
+    new Hit('i', 'id', null, null, null, null, null, null, null).highlight() == [:]
+
+    when:
+    hit.highlight().put('more', [])
+
+    then:
+    thrown(UnsupportedOperationException)
+
+    when:
+    hit.highlight().title.add('d')
+
+    then:
+    thrown(UnsupportedOperationException)
+  }
+
+  def "the four-argument index result has no sequence number or primary term"() {
+    expect:
+    new IndexResult('i', '1', 'created', 1).seqNo() == null
+    new IndexResult('i', '1', 'created', 1).primaryTerm() == null
+    new IndexResult('i', '1', 'created', 1, 5L, 2L).seqNo() == 5L
+    new IndexResult('i', '1', 'created', 1, 5L, 2L).primaryTerm() == 2L
+  }
+
+  def "the six-argument reindex result has no noops, deletions or conflicts, and accounted adds them all up"() {
+    given:
+    def legacy = new ReindexResult(5, 3, 2, [], 1, false)
+
+    expect:
+    legacy.noops() == 0
+    legacy.deleted() == 0
+    legacy.versionConflicts() == 0
+    legacy.accounted()
+    legacy == new ReindexResult(5, 3, 2, [], 1, false, 0, 0, 0)
+    new ReindexResult(10, 1, 2, [], 0, false, 3, 2, 2).accounted()
+    !new ReindexResult(10, 1, 2, [], 0, false, 3, 2, 1).accounted()
+    !new ReindexResult(4, 3, 0, [], 0, false).accounted()
+  }
+
   def "a search result copies its hits and aggregations"() {
     given:
     def hits = [new Hit('i', '1', null, [:], [1])]

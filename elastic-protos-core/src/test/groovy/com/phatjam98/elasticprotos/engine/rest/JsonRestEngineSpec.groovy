@@ -8,6 +8,7 @@ import com.phatjam98.elasticprotos.engine.IndexOptions
 import com.phatjam98.elasticprotos.engine.Pit
 import com.phatjam98.elasticprotos.engine.ReindexRequest
 import com.phatjam98.elasticprotos.engine.SearchResult
+import com.phatjam98.elasticprotos.engine.UpdateByQueryRequest
 import spock.lang.Specification
 import spock.lang.Unroll
 
@@ -216,6 +217,169 @@ class JsonRestEngineSpec extends Specification {
     http.requests*.path == ['/_reindex', '/_tasks/node:1', '/_tasks/node:1']
     http.requests[0].params == [refresh: 'true', wait_for_completion: 'false']
     http.requests[0].json() == [dest: [index: 'docs-v2'], script: [lang: 'painless', params: [v: 1], source: 'ctx._source.x = params.v'], source: [index: 'docs']]
+  }
+
+  def "reindex sends conflicts, the source query and the external version type, and reads every counter"() {
+    given:
+    http.enqueue(200, [task: 'node:2'])
+        .enqueue(200, [completed: true, response: [total: 9, created: 1, updated: 2, noops: 1, deleted: 2,
+            version_conflicts: 3, failures: [], took: 5, timed_out: false]])
+
+    when:
+    def result = engine.reindex(ReindexRequest.builder().source('docs').dest('docs-v2')
+        .versionType(ReindexRequest.VersionType.EXTERNAL).proceedOnConflicts(true)
+        .query([ids: [values: ['1', '2']]]).refresh(false).build())
+
+    then:
+    http.requests[0].params == [refresh: 'false', wait_for_completion: 'false']
+    http.requests[0].body == '{"conflicts":"proceed","dest":{"index":"docs-v2","version_type":"external"},' +
+        '"source":{"index":"docs","query":{"ids":{"values":["1","2"]}}}}'
+    result.total() == 9
+    result.created() == 1
+    result.updated() == 2
+    result.noops() == 1
+    result.deleted() == 2
+    result.versionConflicts() == 3
+    result.accounted()
+    result.ok()
+  }
+
+  def "a default reindex leaves out conflicts, the query and the version type"() {
+    given:
+    http.enqueue(200, [task: 't']).enqueue(200, [completed: true, response: [total: 0]])
+
+    when:
+    def result = engine.reindex(ReindexRequest.of('a', 'b'))
+
+    then:
+    http.requests[0].body == '{"dest":{"index":"b"},"source":{"index":"a"}}'
+    result.versionConflicts() == 0
+    result.accounted()
+  }
+
+  def "updateByQuery starts a task on the index, polls it and reports the outcome"() {
+    given:
+    http.enqueue(200, [task: 'node:3'])
+        .enqueue(200, [completed: false])
+        .enqueue(200, [completed: true, response: [total: 4, updated: 3, version_conflicts: 1, noops: 0, failures: [], took: 9]])
+
+    when:
+    def result = engine.updateByQuery(UpdateByQueryRequest.builder().index('docs')
+        .query([ids: [values: ['1']]]).proceedOnConflicts(true).build())
+
+    then:
+    http.requests.collect { "${it.method} ${it.path}".toString() } ==
+        ['POST /docs/_update_by_query', 'GET /_tasks/node:3', 'GET /_tasks/node:3']
+    http.requests[0].params == [conflicts: 'proceed', refresh: 'true', wait_for_completion: 'false']
+    http.requests[0].json() == [query: [ids: [values: ['1']]]]
+    result.total() == 4
+    result.updated() == 3
+    result.versionConflicts() == 1
+    result.tookMs() == 9
+    result.accounted()
+    result.ok()
+  }
+
+  def "updateByQuery without proceedOnConflicts aborts on conflicts and matches everything by default"() {
+    given:
+    http.enqueue(200, [task: 'n:1']).enqueue(200, [completed: true, response: [total: 0]])
+
+    when:
+    engine.updateByQuery(UpdateByQueryRequest.of('docs').withRefresh(false))
+
+    then:
+    http.requests[0].params == [refresh: 'false', wait_for_completion: 'false']
+    http.requests[0].json() == [query: [match_all: [:]]]
+  }
+
+  def "updateByQuery retries transient poll failures like reindex"() {
+    given:
+    http.enqueue(200, [task: 'n:1'])
+        .enqueue(503, [error: [type: 'unavailable', reason: 'busy']])
+        .enqueueFailure(new IOException('connection reset'))
+        .enqueue(200, [completed: true, response: [total: 2, updated: 2]])
+
+    when:
+    def result = engine.updateByQuery(UpdateByQueryRequest.of('docs'))
+
+    then:
+    result.updated() == 2
+    http.requests*.path == ['/docs/_update_by_query'] + ['/_tasks/n:1'] * 3
+  }
+
+  def "an updateByQuery that times out is cancelled and named in the error"() {
+    given:
+    http.enqueue(200, [task: 'n:8'])
+        .enqueue(200, [completed: false])
+        .enqueue(200, [nodes: [:]])
+        .enqueue(200, [completed: true, error: [type: 'task_cancelled_exception', reason: 'by user request']])
+
+    when:
+    engine.updateByQuery(UpdateByQueryRequest.of('docs').withTimeout(Duration.ofNanos(1)))
+
+    then:
+    def e = thrown(EngineException)
+    e.kind == EngineException.Kind.TIMEOUT
+    e.message.startsWith('update by query task n:8 did not finish')
+    e.message.contains('the task was cancelled')
+    http.requests.collect { "${it.method} ${it.path}".toString() } == [
+        'POST /docs/_update_by_query', 'GET /_tasks/n:8', 'POST /_tasks/n:8/_cancel', 'GET /_tasks/n:8']
+  }
+
+  def "a failing updateByQuery poll cancels the task, and a task error is reported"() {
+    given:
+    def failing = new FakeHttp().enqueue(200, [task: 'n:1'])
+        .enqueue(403, [error: [type: 'security_exception', reason: 'no']])
+        .enqueue(404, [error: [type: 'resource_not_found_exception', reason: 'gone']])
+        .enqueue(404, [error: [type: 'resource_not_found_exception', reason: 'gone']])
+    def errored = new FakeHttp().enqueue(200, [task: 'n:2'])
+        .enqueue(200, [completed: true, error: [reason: 'script_exception']])
+
+    when:
+    new JsonRestEngine(failing, Duration.ofMillis(1)).updateByQuery(UpdateByQueryRequest.of('docs'))
+
+    then:
+    def e = thrown(EngineException)
+    e.kind == EngineException.Kind.UNAUTHORIZED
+    e.message.startsWith('polling update by query task n:1 failed')
+    e.message.contains('the task was cancelled')
+
+    when:
+    new JsonRestEngine(errored, Duration.ofMillis(1)).updateByQuery(UpdateByQueryRequest.of('docs'))
+
+    then:
+    def error = thrown(EngineException)
+    error.message == 'update by query task n:2 failed: script_exception'
+  }
+
+  def "putSettings sends the settings unchanged, and setWriteBlock goes through it"() {
+    given:
+    http.enqueue(200, [acknowledged: true]).enqueue(200, [acknowledged: true]).enqueue(200, [acknowledged: true])
+
+    when:
+    engine.putSettings('docs-v1', ['index.refresh_interval': '5s'])
+    engine.putSettings('docs', [index: [number_of_replicas: 0]])
+    engine.setWriteBlock('docs-v1', false)
+
+    then:
+    http.requests*.method == ['PUT', 'PUT', 'PUT']
+    http.requests*.path == ['/docs-v1/_settings', '/docs/_settings', '/docs-v1/_settings']
+    http.requests[0].json() == ['index.refresh_interval': '5s']
+    http.requests[1].json() == [index: [number_of_replicas: 0]]
+    http.requests[2].json() == ['index.blocks.write': false]
+  }
+
+  def "putSettings reports failures"() {
+    given:
+    http.enqueue(400, [error: [type: 'illegal_argument_exception', reason: 'unknown setting [index.nope]']])
+
+    when:
+    engine.putSettings('docs', ['index.nope': 1])
+
+    then:
+    def e = thrown(EngineException)
+    e.kind == EngineException.Kind.BAD_REQUEST
+    e.message == 'illegal_argument_exception: unknown setting [index.nope]'
   }
 
   def "reindex surfaces failures, task errors and timeouts"() {
@@ -460,6 +624,54 @@ class JsonRestEngineSpec extends Specification {
     http.last.path == '/a,b-*/_doc/%C3%A9'
   }
 
+  def "writes return the sequence number and primary term the engine reports"() {
+    given:
+    http.enqueue(201, [_index: 'docs-v1', _id: '1', result: 'created', _version: 1, _seq_no: 12, _primary_term: 3])
+        .enqueue(200, [_index: 'docs-v1', _id: '1', result: 'updated', _version: 2, _seq_no: 13, _primary_term: 3])
+        .enqueue(200, [_index: 'docs-v1', _id: '1', result: 'updated', _version: 3])
+
+    when:
+    def indexed = engine.index('docs', '1', [a: 1], IndexOptions.defaults())
+    def updated = engine.update('docs', '1', [a: 2])
+    def old = engine.index('docs', '1', [a: 3], IndexOptions.defaults())
+
+    then:
+    indexed.seqNo() == 12L
+    indexed.primaryTerm() == 3L
+    updated.seqNo() == 13L
+    updated.primaryTerm() == 3L
+    old.seqNo() == null
+    old.primaryTerm() == null
+  }
+
+  def "conditional index and delete send if_seq_no and if_primary_term, and a mismatch is a CONFLICT"() {
+    given:
+    http.enqueue(200, [_index: 'docs-v1', _id: '1', result: 'updated', _version: 2, _seq_no: 5, _primary_term: 1])
+        .enqueue(200, [_index: 'docs-v1', _id: '1', result: 'deleted', _version: 3])
+        .enqueue(409, [error: [type: 'version_conflict_engine_exception',
+            reason: '[1]: version conflict, required seqNo [4], primary term [1]. current document has seqNo [5] and primary term [1]'],
+            status: 409])
+
+    when:
+    engine.index('docs', '1', [a: 1], IndexOptions.ifMatch(4, 1).withRefresh(IndexOptions.Refresh.WAIT_FOR))
+    engine.delete('docs', '1', IndexOptions.ifMatch(5, 1))
+
+    then:
+    http.requests[0].method == 'PUT'
+    http.requests[0].path == '/docs/_doc/1'
+    http.requests[0].params == [if_primary_term: '1', if_seq_no: '4', refresh: 'wait_for']
+    http.requests[1].method == 'DELETE'
+    http.requests[1].params == [if_primary_term: '1', if_seq_no: '5']
+
+    when:
+    engine.index('docs', '1', [a: 2], IndexOptions.ifMatch(4, 1))
+
+    then:
+    def e = thrown(EngineException)
+    e.kind == EngineException.Kind.CONFLICT
+    e.status == 409
+  }
+
   def "delete passes the refresh policy"() {
     given:
     http.enqueue(200, [_index: 'docs-v1', _id: '1', result: 'deleted', _version: 2])
@@ -490,6 +702,10 @@ class JsonRestEngineSpec extends Specification {
     hit.get().score() == null
     hit.get().sort() == []
     hit.get().source() == [a: 1]
+    hit.get().version() == 3L
+    hit.get().seqNo() == 4L
+    hit.get().primaryTerm() == 1L
+    hit.get().highlight() == [:]
   }
 
   def "get is empty for a missing document or index: #body"() {
@@ -552,6 +768,60 @@ class JsonRestEngineSpec extends Specification {
     result.items()[0].ok() && result.items()[0].op() == 'index' && result.items()[0].status() == 201
     result.failures()*.id() == ['2']
     result.failures()[0].error() == 'version_conflict_engine_exception: exists'
+  }
+
+  def "bulk puts if_seq_no and if_primary_term into the action metadata of conditional operations"() {
+    given:
+    http.enqueue(200, [took: 1, errors: true, items: [
+        [index: [_index: 'docs-v1', _id: '1', status: 200, _seq_no: 9, _primary_term: 2]],
+        [delete: [_index: 'docs-v1', _id: '2', status: 409, error: [type: 'version_conflict_engine_exception', reason: 'stale']]],
+    ]])
+
+    when:
+    def result = engine.bulk([
+        BulkOp.indexIfMatch('docs', '1', [a: 1], 8, 2),
+        BulkOp.deleteIfMatch('docs', '2', 3, 1),
+    ])
+
+    then:
+    http.last.body == '{"index":{"_id":"1","_index":"docs","if_primary_term":2,"if_seq_no":8}}\n{"a":1}\n' +
+        '{"delete":{"_id":"2","_index":"docs","if_primary_term":1,"if_seq_no":3}}\n'
+    result.failures()*.id() == ['2']
+    result.failures()[0].status() == 409
+  }
+
+  def "search reads version, sequence number, primary term and highlights when the engine returns them"() {
+    given:
+    http.enqueue(200, [took: 1, hits: [total: [value: 2, relation: 'eq'], hits: [
+        [_index: 'docs-v1', _id: '1', _version: 4, _seq_no: 17, _primary_term: 2, _score: 1.0, _source: [a: 1],
+            highlight: [title: ['<em>merger</em> agreement'], body: ['a <em>merger</em>', 'the <em>merger</em>']]],
+        [_index: 'docs-v1', _id: '2', _score: 0.5, _source: [a: 2]],
+    ]]])
+
+    when:
+    def result = engine.search(['docs'], [version: true, seq_no_primary_term: true, highlight: [fields: [title: [:], body: [:]]]])
+
+    then:
+    http.last.json() == [highlight: [fields: [body: [:], title: [:]]], seq_no_primary_term: true, version: true]
+    def first = result.hits()[0]
+    first.version() == 4L
+    first.seqNo() == 17L
+    first.primaryTerm() == 2L
+    first.highlight() == [body: ['a <em>merger</em>', 'the <em>merger</em>'], title: ['<em>merger</em> agreement']]
+    def second = result.hits()[1]
+    second.version() == null
+    second.seqNo() == null
+    second.primaryTerm() == null
+    second.highlight() == [:]
+  }
+
+  def "a highlight entry that is not a list has no fragments"() {
+    given:
+    http.enqueue(200, [hits: [total: [value: 1, relation: 'eq'], hits: [
+        [_index: 'i', _id: '1', _source: [:], highlight: [odd: 'text', some: ['x', null]]]]]])
+
+    expect:
+    engine.search(['i'], [:]).hits()[0].highlight() == [odd: [], some: ['x', null]]
   }
 
   def "search parses hits, totals, sort values, aggregations and the pit id"() {

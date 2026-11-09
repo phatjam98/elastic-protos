@@ -16,6 +16,7 @@ import com.phatjam98.elasticprotos.engine.ReindexRequest;
 import com.phatjam98.elasticprotos.engine.ReindexResult;
 import com.phatjam98.elasticprotos.engine.SearchEngine;
 import com.phatjam98.elasticprotos.engine.SearchResult;
+import com.phatjam98.elasticprotos.engine.UpdateByQueryRequest;
 import com.phatjam98.elasticprotos.util.Json;
 import java.io.IOException;
 import java.net.URLEncoder;
@@ -49,7 +50,7 @@ public final class JsonRestEngine implements SearchEngine {
 
   private static final Logger LOG = LoggerFactory.getLogger(JsonRestEngine.class);
   private static final Duration DEFAULT_POLL = Duration.ofMillis(500);
-  /** Transient failures tolerated in a row while polling a reindex task. */
+  /** Transient failures tolerated in a row while polling a reindex or update-by-query task. */
   private static final int POLL_RETRIES = 3;
   private static final Duration DEFAULT_CANCEL_WAIT = Duration.ofSeconds(30);
   private static final String FLATTENED = "flattened";
@@ -195,8 +196,21 @@ public final class JsonRestEngine implements SearchEngine {
   @Override
   public ReindexResult reindex(ReindexRequest request) {
     Map<String, Object> body = new TreeMap<>();
-    body.put("source", Map.of("index", request.source()));
-    body.put("dest", Map.of("index", request.dest()));
+    if (request.proceedOnConflicts()) {
+      body.put("conflicts", "proceed");
+    }
+    Map<String, Object> source = new TreeMap<>();
+    source.put("index", request.source());
+    if (request.query() != null) {
+      source.put("query", request.query());
+    }
+    body.put("source", source);
+    Map<String, Object> dest = new TreeMap<>();
+    dest.put("index", request.dest());
+    if (request.versionType() == ReindexRequest.VersionType.EXTERNAL) {
+      dest.put("version_type", "external");
+    }
+    body.put("dest", dest);
     if (request.script() != null) {
       Map<String, Object> script = new TreeMap<>();
       script.put("lang", "painless");
@@ -211,9 +225,31 @@ public final class JsonRestEngine implements SearchEngine {
     params.put("refresh", Boolean.toString(request.refresh()));
     Map<String, Object> started =
         object(require(perform("POST", "/_reindex", params, Json.canonical(body), RawHttp.JSON)));
-    String task = string(started.get("task"));
+    return taskResult(awaitTask(string(started.get("task")), request.timeout(), "reindex"));
+  }
 
-    long deadline = System.nanoTime() + request.timeout().toNanos();
+  @Override
+  public ReindexResult updateByQuery(UpdateByQueryRequest request) {
+    Map<String, String> params = new TreeMap<>();
+    params.put("wait_for_completion", "false");
+    params.put("refresh", Boolean.toString(request.refresh()));
+    if (request.proceedOnConflicts()) {
+      params.put("conflicts", "proceed");
+    }
+    Map<String, Object> started = object(require(perform("POST",
+        "/" + request.index() + "/_update_by_query", params,
+        Json.canonical(Map.of("query", request.query())), RawHttp.JSON)));
+    return taskResult(awaitTask(string(started.get("task")), request.timeout(),
+        "update by query"));
+  }
+
+  /**
+   * Polls a task started with {@code wait_for_completion=false} until it completes and returns
+   * its {@code response}. Transient poll failures are retried; a failure that persists, the
+   * timeout and an interrupt cancel the task.
+   */
+  private Map<String, Object> awaitTask(String task, Duration timeout, String label) {
+    long deadline = System.nanoTime() + timeout.toNanos();
     int pollFailures = 0;
     while (true) {
       Map<String, Object> status;
@@ -223,45 +259,51 @@ public final class JsonRestEngine implements SearchEngine {
       } catch (EngineException e) {
         if (isRetryable(e) && pollFailures < POLL_RETRIES) {
           pollFailures++;
-          LOG.warn("polling reindex task {} failed (attempt {} of {}), retrying: {}", task,
+          LOG.warn("polling {} task {} failed (attempt {} of {}), retrying: {}", label, task,
               pollFailures, POLL_RETRIES + 1, e.getMessage());
-          pauseOrCancel(task, reindexPoll.multipliedBy(pollFailures));
+          pauseOrCancel(task, reindexPoll.multipliedBy(pollFailures), label);
           continue;
         }
         throw new EngineException(e.getKind(), e.getStatus(),
-            "polling reindex task " + task + " failed: " + e.getMessage() + "; "
-                + cancelTask(task), e);
+            "polling " + label + " task " + task + " failed: " + e.getMessage() + "; "
+                + cancelTask(task, label), e);
       }
       if (Boolean.TRUE.equals(status.get("completed"))) {
-        Map<String, Object> response = map(status.get("response"));
         Map<String, Object> error = map(status.get("error"));
         if (!error.isEmpty()) {
           throw new EngineException(Kind.OTHER, 0,
-              "reindex task " + task + " failed: " + error.get("reason"));
+              label + " task " + task + " failed: " + error.get("reason"));
         }
-        return new ReindexResult(
-            number(response.get("total")),
-            number(response.get("created")),
-            number(response.get("updated")),
-            list(response.get("failures")),
-            number(response.get("took")),
-            Boolean.TRUE.equals(response.get("timed_out")));
+        return map(status.get("response"));
       }
       if (System.nanoTime() > deadline) {
         throw new EngineException(Kind.TIMEOUT, 0,
-            "reindex task " + task + " did not finish within " + request.timeout() + "; "
-                + cancelTask(task));
+            label + " task " + task + " did not finish within " + timeout + "; "
+                + cancelTask(task, label));
       }
-      pauseOrCancel(task, reindexPoll);
+      pauseOrCancel(task, reindexPoll, label);
     }
   }
 
+  private static ReindexResult taskResult(Map<String, Object> response) {
+    return new ReindexResult(
+        number(response.get("total")),
+        number(response.get("created")),
+        number(response.get("updated")),
+        list(response.get("failures")),
+        number(response.get("took")),
+        Boolean.TRUE.equals(response.get("timed_out")),
+        number(response.get("noops")),
+        number(response.get("deleted")),
+        number(response.get("version_conflicts")));
+  }
+
   /** Sleeps between polls; when interrupted, asks the engine to cancel the task and rethrows. */
-  private void pauseOrCancel(String task, Duration duration) {
+  private void pauseOrCancel(String task, Duration duration, String label) {
     try {
       pause(duration);
     } catch (EngineException interrupted) {
-      LOG.warn("interrupted while waiting for reindex task {}; cancelling it", task);
+      LOG.warn("interrupted while waiting for {} task {}; cancelling it", label, task);
       try {
         perform("POST", taskPath(task) + "/_cancel", Map.of(), null, RawHttp.JSON);
       } catch (EngineException e) {
@@ -272,18 +314,18 @@ public final class JsonRestEngine implements SearchEngine {
   }
 
   /**
-   * Cancels a reindex task and waits, for at most the cancel wait (30 seconds by default), until
+   * Cancels a task and waits, for at most the cancel wait (30 seconds by default), until
    * the engine reports it completed, so that the destination index is no longer being written when
    * the caller cleans up. Never throws.
    *
    * @return a description of what happened, for the caller's error message
    */
-  private String cancelTask(String task) {
+  private String cancelTask(String task, String label) {
     try {
       require(perform("POST", taskPath(task) + "/_cancel", Map.of(), null, RawHttp.JSON));
     } catch (EngineException e) {
       if (e.getKind() != Kind.NOT_FOUND) {
-        LOG.warn("could not cancel reindex task {}: {}", task, e.getMessage());
+        LOG.warn("could not cancel {} task {}: {}", label, task, e.getMessage());
         return "cancelling the task failed (" + e.getMessage() + "); it may still be running";
       }
       // not running any more; the status below says how it ended
@@ -294,7 +336,7 @@ public final class JsonRestEngine implements SearchEngine {
       try {
         Map<String, Object> status = object(require(getRequest(taskPath(task), Map.of())));
         if (Boolean.TRUE.equals(status.get("completed"))) {
-          LOG.info("reindex task {} was cancelled", task);
+          LOG.info("{} task {} was cancelled", label, task);
           return "the task was cancelled";
         }
       } catch (EngineException e) {
@@ -304,7 +346,7 @@ public final class JsonRestEngine implements SearchEngine {
         lastError = e.getMessage();
       }
       if (System.nanoTime() > deadline) {
-        LOG.warn("reindex task {} was asked to cancel but did not stop within {}{}", task,
+        LOG.warn("{} task {} was asked to cancel but did not stop within {}{}", label, task,
             cancelWait, lastError == null ? "" : " (last error: " + lastError + ")");
         return "the task was asked to cancel but had not stopped within " + cancelWait;
       }
@@ -325,15 +367,20 @@ public final class JsonRestEngine implements SearchEngine {
   }
 
   @Override
+  public void putSettings(String index, Map<String, Object> settings) {
+    require(perform("PUT", "/" + index + "/_settings", Map.of(), Json.canonical(settings),
+        RawHttp.JSON));
+  }
+
+  @Override
   public void setWriteBlock(String index, boolean blocked) {
-    require(perform("PUT", "/" + index + "/_settings", Map.of(),
-        Json.canonical(Map.of("index.blocks.write", blocked)), RawHttp.JSON));
+    putSettings(index, Map.of("index.blocks.write", blocked));
   }
 
   @Override
   public IndexResult index(
       String index, String id, Map<String, Object> document, IndexOptions options) {
-    Map<String, String> params = refreshParam(options.refresh());
+    Map<String, String> params = writeParams(options);
     String path;
     String method;
     if (id == null) {
@@ -367,13 +414,14 @@ public final class JsonRestEngine implements SearchEngine {
       return Optional.empty();
     }
     return Optional.of(new Hit(string(doc.get("_index")), string(doc.get("_id")), null,
-        map(doc.get("_source")), List.of()));
+        map(doc.get("_source")), List.of(), optionalNumber(doc.get("_version")),
+        optionalNumber(doc.get("_seq_no")), optionalNumber(doc.get("_primary_term")), Map.of()));
   }
 
   @Override
   public boolean delete(String index, String id, IndexOptions options) {
     RawHttp.Response response = perform("DELETE", "/" + index + "/_doc/" + pathSegment(id),
-        refreshParam(options.refresh()), null, RawHttp.JSON);
+        writeParams(options), null, RawHttp.JSON);
     if (response.status() == 404) {
       return false;
     }
@@ -389,6 +437,10 @@ public final class JsonRestEngine implements SearchEngine {
       meta.put("_index", op.index());
       if (op.id() != null) {
         meta.put("_id", op.id());
+      }
+      if (op.ifSeqNo() != null) {
+        meta.put("if_seq_no", op.ifSeqNo());
+        meta.put("if_primary_term", op.ifPrimaryTerm());
       }
       String verb = op.type().name().toLowerCase(java.util.Locale.ROOT);
       ndjson.append(Json.canonical(Map.of(verb, meta))).append('\n');
@@ -451,7 +503,11 @@ public final class JsonRestEngine implements SearchEngine {
           string(hit.get("_id")),
           score instanceof Number ? ((Number) score).doubleValue() : null,
           map(hit.get("_source")),
-          hit.get("sort") instanceof List<?> sort ? new ArrayList<Object>(sort) : List.of()));
+          hit.get("sort") instanceof List<?> sort ? new ArrayList<Object>(sort) : List.of(),
+          optionalNumber(hit.get("_version")),
+          optionalNumber(hit.get("_seq_no")),
+          optionalNumber(hit.get("_primary_term")),
+          highlight(hit.get("highlight"))));
     }
     return new SearchResult(
         total,
@@ -583,15 +639,24 @@ public final class JsonRestEngine implements SearchEngine {
     return map(response.values().iterator().next());
   }
 
-  private static Map<String, String> refreshParam(IndexOptions.Refresh refresh) {
-    switch (refresh) {
+  /** The refresh policy and, for a conditional write, the sequence number and primary term. */
+  private static Map<String, String> writeParams(IndexOptions options) {
+    Map<String, String> params = new TreeMap<>();
+    switch (options.refresh()) {
       case IMMEDIATE:
-        return Map.of("refresh", "true");
+        params.put("refresh", "true");
+        break;
       case WAIT_FOR:
-        return Map.of("refresh", "wait_for");
+        params.put("refresh", "wait_for");
+        break;
       default:
-        return Map.of();
+        break;
     }
+    if (options.ifSeqNo() != null) {
+      params.put("if_seq_no", Long.toString(options.ifSeqNo()));
+      params.put("if_primary_term", Long.toString(options.ifPrimaryTerm()));
+    }
+    return params;
   }
 
   private static IndexResult indexResult(Map<String, Object> response) {
@@ -599,7 +664,24 @@ public final class JsonRestEngine implements SearchEngine {
         string(response.get("_index")),
         string(response.get("_id")),
         string(response.get("result")),
-        number(response.get("_version")));
+        number(response.get("_version")),
+        optionalNumber(response.get("_seq_no")),
+        optionalNumber(response.get("_primary_term")));
+  }
+
+  /** Reads a hit's {@code highlight} object: field name to fragments. */
+  private static Map<String, List<String>> highlight(Object value) {
+    Map<String, List<String>> out = new TreeMap<>();
+    map(value).forEach((field, fragments) -> {
+      List<String> strings = new ArrayList<>();
+      if (fragments instanceof List<?> items) {
+        for (Object item : items) {
+          strings.add(string(item));
+        }
+      }
+      out.put(field, strings);
+    });
+    return out;
   }
 
   private RawHttp.Response getRequest(String path, Map<String, String> params) {
@@ -720,5 +802,9 @@ public final class JsonRestEngine implements SearchEngine {
 
   private static long number(Object value) {
     return value instanceof Number ? ((Number) value).longValue() : 0L;
+  }
+
+  private static Long optionalNumber(Object value) {
+    return value instanceof Number ? ((Number) value).longValue() : null;
   }
 }
