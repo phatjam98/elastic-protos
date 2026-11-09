@@ -87,6 +87,7 @@ class QueryCompilerGoldenSpec extends Specification {
     'full_text_options'     | strict    | document | where(fullText('breach', fullTextOptions()))
     'map_key_equals_long'   | strict    | typedMaps | where(fc('counters.views', EQUALS, integer(5)))
     'map_key_num_range'     | strict    | typedMaps | where(fc('counters.views', NUM_RANGE, range(10, 100)))
+    'map_key_geo_distance'  | strict    | typedMaps | where(fc('places.home', GEO_DISTANCE, geoDistance()))
     'map_key_full_text'     | strict    | typedMaps | where(fullText('quarterly reports'), fc('notes.summary', TEXT_MATCHES, str('report')))
     'map_key_nested_message' | strict   | typedMaps | where(fc('children.alice.items.sku', EQUALS, str('A-1')), fc('children.alice.items.quantity', NUM_RANGE, range(1, 5)), fc('children.alice.count', EQUALS, integer(3)))
   }

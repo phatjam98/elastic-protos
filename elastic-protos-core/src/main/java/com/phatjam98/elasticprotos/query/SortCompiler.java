@@ -165,8 +165,9 @@ final class SortCompiler {
     }
     for (String nested : index.nestedAncestors(field.path())) {
       if (index.resolve(nested).map(FieldInfo::isDynamic).orElse(false)) {
-        throw new QueryCompileException("Cannot sort on '" + field.path()
-            + "': sorting under a typed nested map is not supported", field.path());
+        throw new QueryCompileException("Cannot sort on '" + field.path() + "': it is below the"
+            + " nested field '" + nested + "' inside typed map values, which is mapped only when"
+            + " a document uses the key; sorting under it is not supported", field.path());
       }
     }
   }

@@ -180,9 +180,11 @@ public record IndexDefinition(
   }
 
   /**
-   * Splits a path below the key of a typed map into the map path, the key and the rest.
+   * Splits a path below the key of a typed map into the map path, the key and the rest. A key with
+   * {@code *} is a pattern, not a concrete key, and is not resolved.
    *
-   * @return the parts, or null when the path is not below a typed map or the key is empty
+   * @return the parts, or null when the path is not below a typed map, or the key is empty or holds
+   *     {@code *}
    */
   private MapKey mapKey(String path) {
     if (dynamicFields.isEmpty()) {
@@ -197,7 +199,7 @@ public record IndexDefinition(
       int next = rest.indexOf('.');
       String key = next < 0 ? rest : rest.substring(0, next);
       String remainder = next < 0 ? "" : rest.substring(next + 1);
-      if (key.isEmpty() || (next >= 0 && remainder.isEmpty())) {
+      if (key.isEmpty() || key.indexOf('*') >= 0 || (next >= 0 && remainder.isEmpty())) {
         return null;
       }
       return new MapKey(map, key, remainder);

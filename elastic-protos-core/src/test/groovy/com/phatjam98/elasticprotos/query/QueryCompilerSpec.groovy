@@ -592,6 +592,42 @@ class QueryCompilerSpec extends Specification {
         [nested: [path: 'children.alice.items', ignore_unmapped: true, query: [match_all: [:]]]]
   }
 
+  def "geo queries on typed map keys ignore keys no document has used"() {
+    given:
+    def distance = FlatValue.newBuilder().setGeoDistanceValue(
+        GeoDistanceValue.newBuilder().setPoint(ll(1, 2)).setDistance('5km')).build()
+    def box = FlatValue.newBuilder().setGeoBoundingBoxValue(GeoBoundingBoxValue.newBuilder()
+        .setTopLeft(ll(2, 1)).setBottomRight(ll(1, 2))).build()
+
+    expect:
+    filter(typedMaps, fc('places.home', GEO_DISTANCE, distance)).geo_distance.ignore_unmapped == true
+    filter(typedMaps, fc('places.home', GEO_BOUNDING_BOX, box)).geo_bounding_box.ignore_unmapped == true
+    filter(geo, fc('point', GEO_BOUNDING_BOX, box)).geo_bounding_box.containsKey('ignore_unmapped') == false
+    filter(geo, fc('shape', GEO_INTERSECTS, FlatValue.newBuilder().setLatLonValue(ll(1, 2)).build()))
+        .geo_shape.containsKey('ignore_unmapped') == false
+  }
+
+  def "a typed map with nested values wraps every key in a nested query that ignores unmapped keys"() {
+    given:
+    def nestedValues = ProtoMapper.builder().overrides(MappingOverrides.builder()
+        .forField(Composite.descriptor, 'message_map') {
+          it.type = EsType.OBJECT
+          it.valueType = EsType.NESTED
+        }.build()).build().map(Composite)
+
+    expect:
+    filter(nestedValues, fc('message_map.k.grandchild.note', EQUALS, str('x'))) ==
+        [nested: [path: 'message_map.k', ignore_unmapped: true,
+                  query: [term: ['message_map.k.grandchild.note': 'x']]]]
+    filter(nestedValues, fc('message_map.k', EXISTS)) ==
+        [nested: [path: 'message_map.k', ignore_unmapped: true, query: [match_all: [:]]]]
+  }
+
+  def "a key segment with a wildcard is not a key"() {
+    expect:
+    failure { compiler.compile(where(fc('counters.*', EQUALS, str('1'))), typedMaps) }.field == 'counters.*'
+  }
+
   def "#op is rejected on a key of a typed map mapped as #kind"() {
     when:
     compiler.compile(where(fc(field, op, value)), typedMaps)
@@ -658,11 +694,12 @@ class QueryCompilerSpec extends Specification {
   def "sorting under a typed nested map is rejected"() {
     expect:
     failure { compiler.compile(sorted(fieldSort('children.k.items.quantity')), typedMaps) }.message ==
-        "Cannot sort on 'children.k.items.quantity': sorting under a typed nested map is not supported"
+        "Cannot sort on 'children.k.items.quantity': it is below the nested field 'children.k.items' inside" +
+        " typed map values, which is mapped only when a document uses the key; sorting under it is not supported"
     failure {
       compiler.compile(sorted(SortingCriteria.newBuilder().setGeoDistanceSort(GeoDistanceSort
           .newBuilder().setFieldName('children.k.items.quantity')).build()), typedMaps)
-    }.message.contains('typed nested map')
+    }.message.contains('inside typed map values')
     failure { compiler.compile(sorted(fieldSort('children.k')), typedMaps) }.message.contains('OBJECT')
   }
 

@@ -451,6 +451,7 @@ final class ConditionCompiler {
     query.put("distance", distance.getDistance());
     query.put("distance_type", distance.getDistanceType().name().toLowerCase(Locale.ROOT));
     query.put(field.path(), point(distance.getPoint()));
+    ignoreUnmapped(query, field);
     return clause(condition, field, Occur.FILTER, object("geo_distance", query));
   }
 
@@ -472,8 +473,9 @@ final class ConditionCompiler {
               + "both top_left and bottom_right, got " + ValueConversions.kindName(value),
           field.path());
     }
-    return clause(condition, field, Occur.FILTER,
-        object("geo_bounding_box", object(field.path(), corners)));
+    Map<String, Object> query = object(field.path(), corners);
+    ignoreUnmapped(query, field);
+    return clause(condition, field, Occur.FILTER, object("geo_bounding_box", query));
   }
 
   private Clause geoShape(FieldCondition condition, FieldInfo field, String relation) {
@@ -497,8 +499,20 @@ final class ConditionCompiler {
     Map<String, Object> spec = new TreeMap<>();
     spec.put("shape", shape);
     spec.put("relation", relation);
-    return clause(condition, field, Occur.FILTER,
-        object("geo_shape", object(field.path(), spec)));
+    Map<String, Object> query = object(field.path(), spec);
+    ignoreUnmapped(query, field);
+    return clause(condition, field, Occur.FILTER, object("geo_shape", query));
+  }
+
+  /**
+   * Adds {@code ignore_unmapped} to a geo query on a key of a typed map: the key is mapped only
+   * once a document uses it, and unlike term-level queries the geo queries fail on an unmapped
+   * field.
+   */
+  private static void ignoreUnmapped(Map<String, Object> query, FieldInfo field) {
+    if (field.isDynamic()) {
+      query.put("ignore_unmapped", true);
+    }
   }
 
   private static Object shape(FieldInfo field, GeoShape shape) {
