@@ -528,7 +528,8 @@ public final class IndexMigrator {
   private static IndexDefinition renamed(IndexDefinition target, String name) {
     return new IndexDefinition(target.descriptor(), target.alias(), name, target.contentHash(),
         target.settings(), target.mappings(), target.fields(), target.nestedPaths(),
-        target.fullTextFields(), target.ignoredPaths(), target.idField(), target.warnings());
+        target.fullTextFields(), target.ignoredPaths(), target.idField(), target.warnings(),
+        target.dynamicFields());
   }
 
   private static String upToDate(String hash) {

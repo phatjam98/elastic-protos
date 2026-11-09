@@ -1,5 +1,6 @@
 package com.phatjam98.elasticprotos.query;
 
+import com.phatjam98.elasticprotos.mapping.FieldInfo;
 import com.phatjam98.elasticprotos.mapping.IndexDefinition;
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -103,7 +104,7 @@ public final class NestedPathResolver {
 
   /** Wraps a clause on a field in one {@code nested} query per enclosing nested path. */
   public Map<String, Object> wrap(String fieldPath, Map<String, Object> query) {
-    return wrap(ancestors(fieldPath), query);
+    return wrapPaths(ancestors(fieldPath), query);
   }
 
   /**
@@ -116,12 +117,39 @@ public final class NestedPathResolver {
   public static Map<String, Object> wrap(List<String> nestedPath, Map<String, Object> query) {
     Map<String, Object> wrapped = query;
     for (int i = nestedPath.size() - 1; i >= 0; i--) {
-      Map<String, Object> nested = new TreeMap<>();
-      nested.put("path", nestedPath.get(i));
-      nested.put("query", wrapped);
-      wrapped = object("nested", nested);
+      wrapped = nested(nestedPath.get(i), wrapped, false);
     }
     return wrapped;
+  }
+
+  /**
+   * Wraps a clause in {@code nested} queries like {@link #wrap(List, Map)}, adding {@code
+   * "ignore_unmapped": true} for nested paths inside the values of a typed map: such a path is
+   * mapped only once a document uses its key, and a {@code nested} query on an unmapped path
+   * fails.
+   *
+   * @param nestedPath nested paths, outermost first
+   * @param query the clause
+   * @return the clause itself when the list is empty, otherwise the outermost {@code nested} query
+   */
+  public Map<String, Object> wrapPaths(List<String> nestedPath, Map<String, Object> query) {
+    Map<String, Object> wrapped = query;
+    for (int i = nestedPath.size() - 1; i >= 0; i--) {
+      wrapped = nested(nestedPath.get(i), wrapped,
+          index.resolve(nestedPath.get(i)).map(FieldInfo::isDynamic).orElse(false));
+    }
+    return wrapped;
+  }
+
+  private static Map<String, Object> nested(String path, Map<String, Object> query,
+      boolean ignoreUnmapped) {
+    Map<String, Object> nested = new TreeMap<>();
+    nested.put("path", path);
+    nested.put("query", query);
+    if (ignoreUnmapped) {
+      nested.put("ignore_unmapped", true);
+    }
+    return object("nested", nested);
   }
 
   /**
@@ -134,7 +162,7 @@ public final class NestedPathResolver {
     Map<Occur, List<Object>> out = new EnumMap<>(Occur.class);
     if (!groupNested) {
       for (Clause clause : clauses) {
-        add(out, clause.occur(), wrap(clause.nestedPath(), clause.query()));
+        add(out, clause.occur(), wrapPaths(clause.nestedPath(), clause.query()));
       }
       return render(out);
     }
@@ -156,11 +184,11 @@ public final class NestedPathResolver {
     return render(out);
   }
 
-  private static void emitGroup(Map<Occur, List<Object>> out, List<Clause> group) {
+  private void emitGroup(Map<Occur, List<Object>> out, List<Clause> group) {
     boolean anyPositive = group.stream().anyMatch(c -> c.occur() != Occur.MUST_NOT);
     if (group.size() == 1 || !anyPositive) {
       for (Clause clause : group) {
-        add(out, clause.occur(), wrap(clause.nestedPath(), clause.query()));
+        add(out, clause.occur(), wrapPaths(clause.nestedPath(), clause.query()));
       }
       return;
     }
@@ -169,7 +197,7 @@ public final class NestedPathResolver {
       add(inner, clause.occur(), clause.query());
     }
     Occur occur = inner.containsKey(Occur.MUST) ? Occur.MUST : Occur.FILTER;
-    add(out, occur, wrap(group.get(0).nestedPath(), render(inner)));
+    add(out, occur, wrapPaths(group.get(0).nestedPath(), render(inner)));
   }
 
   private static void add(Map<Occur, List<Object>> out, Occur occur, Object query) {
