@@ -40,10 +40,19 @@ import java.util.Objects;
  *       to the old index for the duration of a copy and a killed process never lifts it). Set this
  *       to false if you place write blocks on live indices yourself, or if another process may be
  *       reindexing the same alias at the same time (which is unsupported)
+ *   <li>{@code reindexMode}: how a reindex copies the old index; default {@link
+ *       ReindexMode#ZERO_DOWNTIME}, which never blocks writes to the live index; {@link
+ *       ReindexMode#BLOCKING} write-blocks it for the whole copy
+ *   <li>{@code swapGrace}: in a zero-downtime reindex, how long to wait after the alias swap
+ *       before the old index is write-blocked, so that writes that resolved the alias just before
+ *       the swap still land; default five seconds, zero or more
+ *   <li>{@code backfill}: whether additions that existing documents were never indexed into are
+ *       applied in place with an update by query ({@link Action#BACKFILL}); when false they are
+ *       reindexed; default true
  * </ul>
  *
  * <p>Null settings throw {@link NullPointerException}; a shard count below 1 or a timeout that is
- * not positive throws {@link IllegalArgumentException}.
+ * not positive, or a negative swap grace, throws {@link IllegalArgumentException}.
  */
 public final class MigrationOptions {
 
@@ -56,12 +65,20 @@ public final class MigrationOptions {
   private final Duration reindexTimeout;
   private final boolean dryRun;
   private final boolean clearStaleWriteBlock;
+  private final ReindexMode reindexMode;
+  private final Duration swapGrace;
+  private final boolean backfill;
 
   private MigrationOptions(Builder builder) {
     Objects.requireNonNull(builder.failure, "failure");
     Objects.requireNonNull(builder.removedFields, "removedFields");
     Objects.requireNonNull(builder.replicas, "replicas");
     Objects.requireNonNull(builder.reindexTimeout, "reindexTimeout");
+    Objects.requireNonNull(builder.reindexMode, "reindexMode");
+    Objects.requireNonNull(builder.swapGrace, "swapGrace");
+    if (builder.swapGrace.isNegative()) {
+      throw new IllegalArgumentException("swapGrace must not be negative: " + builder.swapGrace);
+    }
     if (builder.reindexTimeout.isNegative() || builder.reindexTimeout.isZero()) {
       throw new IllegalArgumentException(
           "reindexTimeout must be positive: " + builder.reindexTimeout);
@@ -79,12 +96,16 @@ public final class MigrationOptions {
     this.reindexTimeout = builder.reindexTimeout;
     this.dryRun = builder.dryRun;
     this.clearStaleWriteBlock = builder.clearStaleWriteBlock;
+    this.reindexMode = builder.reindexMode;
+    this.swapGrace = builder.swapGrace;
+    this.backfill = builder.backfill;
   }
 
   /**
    * Returns the defaults: fail fast, reindex allowed, old index retained, removed fields kept, one
    * shard, data nodes minus one replicas (at most 1), a ten minute reindex timeout, no dry run,
-   * stale write blocks cleared.
+   * stale write blocks cleared, zero-downtime reindexing with a five second swap grace, backfill
+   * enabled.
    */
   public static MigrationOptions standard() {
     return builder().build();
@@ -145,6 +166,21 @@ public final class MigrationOptions {
     return clearStaleWriteBlock;
   }
 
+  /** Returns how a reindex copies the old index. */
+  public ReindexMode reindexMode() {
+    return reindexMode;
+  }
+
+  /** Returns how long a zero-downtime reindex waits after the swap to freeze the old index. */
+  public Duration swapGrace() {
+    return swapGrace;
+  }
+
+  /** Returns whether unindexed additions are backfilled in place instead of reindexed. */
+  public boolean backfill() {
+    return backfill;
+  }
+
   /** Returns a copy with another failure policy. */
   public MigrationOptions withFailure(FailurePolicy value) {
     return toBuilder().failure(value).build();
@@ -190,6 +226,21 @@ public final class MigrationOptions {
     return toBuilder().clearStaleWriteBlock(value).build();
   }
 
+  /** Returns a copy with another reindex mode. */
+  public MigrationOptions withReindexMode(ReindexMode value) {
+    return toBuilder().reindexMode(value).build();
+  }
+
+  /** Returns a copy with another swap grace. */
+  public MigrationOptions withSwapGrace(Duration value) {
+    return toBuilder().swapGrace(value).build();
+  }
+
+  /** Returns a copy that backfills unindexed additions in place, or reindexes them. */
+  public MigrationOptions withBackfill(boolean value) {
+    return toBuilder().backfill(value).build();
+  }
+
   @Override
   public boolean equals(Object other) {
     return other instanceof MigrationOptions that
@@ -201,13 +252,16 @@ public final class MigrationOptions {
         && replicas.equals(that.replicas)
         && reindexTimeout.equals(that.reindexTimeout)
         && dryRun == that.dryRun
-        && clearStaleWriteBlock == that.clearStaleWriteBlock;
+        && clearStaleWriteBlock == that.clearStaleWriteBlock
+        && reindexMode == that.reindexMode
+        && swapGrace.equals(that.swapGrace)
+        && backfill == that.backfill;
   }
 
   @Override
   public int hashCode() {
     return Objects.hash(failure, allowReindex, deleteOldAfter, removedFields, defaultShards,
-        replicas, reindexTimeout, dryRun, clearStaleWriteBlock);
+        replicas, reindexTimeout, dryRun, clearStaleWriteBlock, reindexMode, swapGrace, backfill);
   }
 
   @Override
@@ -220,7 +274,10 @@ public final class MigrationOptions {
         + ", replicas=" + replicas
         + ", reindexTimeout=" + reindexTimeout
         + ", dryRun=" + dryRun
-        + ", clearStaleWriteBlock=" + clearStaleWriteBlock + "]";
+        + ", clearStaleWriteBlock=" + clearStaleWriteBlock
+        + ", reindexMode=" + reindexMode
+        + ", swapGrace=" + swapGrace
+        + ", backfill=" + backfill + "]";
   }
 
   /** Builds {@link MigrationOptions}; starts from the {@link #standard()} options. */
@@ -235,6 +292,9 @@ public final class MigrationOptions {
     private Duration reindexTimeout = Duration.ofMinutes(10);
     private boolean dryRun = false;
     private boolean clearStaleWriteBlock = true;
+    private ReindexMode reindexMode = ReindexMode.ZERO_DOWNTIME;
+    private Duration swapGrace = Duration.ofSeconds(5);
+    private boolean backfill = true;
 
     private Builder() {}
 
@@ -248,6 +308,9 @@ public final class MigrationOptions {
       this.reindexTimeout = options.reindexTimeout;
       this.dryRun = options.dryRun;
       this.clearStaleWriteBlock = options.clearStaleWriteBlock;
+      this.reindexMode = options.reindexMode;
+      this.swapGrace = options.swapGrace;
+      this.backfill = options.backfill;
     }
 
     /** Sets what to do after an index fails to migrate; default FAIL_FAST. */
@@ -304,13 +367,34 @@ public final class MigrationOptions {
       return this;
     }
 
+    /** Sets how a reindex copies the old index; default ZERO_DOWNTIME. */
+    public Builder reindexMode(ReindexMode value) {
+      this.reindexMode = value;
+      return this;
+    }
+
+    /**
+     * Sets how long a zero-downtime reindex waits after the alias swap before it write-blocks the
+     * old index; default five seconds.
+     */
+    public Builder swapGrace(Duration value) {
+      this.swapGrace = value;
+      return this;
+    }
+
+    /** Sets whether unindexed additions are backfilled in place; default true. */
+    public Builder backfill(boolean value) {
+      this.backfill = value;
+      return this;
+    }
+
     /**
      * Builds the options.
      *
      * @return the options
-     * @throws NullPointerException when a policy or the timeout is null
-     * @throws IllegalArgumentException when {@code defaultShards} is below 1 or the timeout is not
-     *     positive
+     * @throws NullPointerException when a policy, the mode, the timeout or the grace is null
+     * @throws IllegalArgumentException when {@code defaultShards} is below 1, the timeout is not
+     *     positive or the grace is negative
      */
     public MigrationOptions build() {
       return new MigrationOptions(this);

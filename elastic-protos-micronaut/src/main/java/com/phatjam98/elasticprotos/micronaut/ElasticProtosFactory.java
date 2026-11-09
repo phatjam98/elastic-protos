@@ -169,6 +169,9 @@ public class ElasticProtosFactory {
         .reindexTimeout(bootstrap.getReindexTimeout())
         .dryRun(bootstrap.isDryRun())
         .clearStaleWriteBlock(bootstrap.isClearStaleWriteBlock())
+        .reindexMode(bootstrap.getReindexMode())
+        .swapGrace(bootstrap.getSwapGrace())
+        .backfill(bootstrap.isBackfill())
         .build();
   }
 

@@ -38,21 +38,43 @@ public record MigrationResult(List<Outcome> outcomes) {
    * @param index the concrete index behind the alias afterwards (or that would be, for a dry run)
    * @param retainedIndices old indices kept write-blocked after a reindex
    * @param error the failure, or null
-   * @param sourceCount for a reindex, the documents counted in the old index after the copy;
-   *     otherwise null
-   * @param destCount for a reindex, the documents counted in the new index after the copy;
+   * @param sourceCount for a reindex, the documents counted in the old index after the copy (in a
+   *     zero-downtime reindex, once it was frozen); otherwise null
+   * @param destCount for a reindex, the documents counted in the new index after the copy (in a
+   *     zero-downtime reindex, after the reconcile, including writes made after the swap);
    *     otherwise null
    * @param warnings things that went through but deserve attention, for example a migration
    *     script that left the new index with a different document count
+   * @param reconcile for a zero-downtime reindex or a reverse-delta rollback that got past the
+   *     alias swap, what the reconcile and the sweep did; otherwise null
    */
   public record Outcome(
       IndexPlan plan, Status status, String index, List<String> retainedIndices,
-      Throwable error, Long sourceCount, Long destCount, List<String> warnings) {
+      Throwable error, Long sourceCount, Long destCount, List<String> warnings,
+      ReconcileStats reconcile) {
 
     /** Copies the lists. */
     public Outcome {
       retainedIndices = List.copyOf(retainedIndices);
       warnings = List.copyOf(warnings);
+    }
+
+    /**
+     * Creates an outcome without reconcile statistics.
+     *
+     * @param plan the item
+     * @param status how it ended
+     * @param index the concrete index behind the alias afterwards
+     * @param retainedIndices old indices kept write-blocked after a reindex
+     * @param error the failure, or null
+     * @param sourceCount documents counted in the old index, or null
+     * @param destCount documents counted in the new index, or null
+     * @param warnings things that deserve attention
+     */
+    public Outcome(
+        IndexPlan plan, Status status, String index, List<String> retainedIndices,
+        Throwable error, Long sourceCount, Long destCount, List<String> warnings) {
+      this(plan, status, index, retainedIndices, error, sourceCount, destCount, warnings, null);
     }
 
     /**
@@ -67,7 +89,7 @@ public record MigrationResult(List<Outcome> outcomes) {
     public Outcome(
         IndexPlan plan, Status status, String index, List<String> retainedIndices,
         Throwable error) {
-      this(plan, status, index, retainedIndices, error, null, null, List.of());
+      this(plan, status, index, retainedIndices, error, null, null, List.of(), null);
     }
 
     /** Returns whether this item neither failed nor was blocked. */
