@@ -3,6 +3,7 @@ package com.phatjam98.elasticprotos.testkit
 import static com.phatjam98.elasticprotos.proto.SearchOperationType.ANY_IN
 import static com.phatjam98.elasticprotos.proto.SearchOperationType.EQUALS
 import static com.phatjam98.elasticprotos.proto.SearchOperationType.EXISTS
+import static com.phatjam98.elasticprotos.proto.SearchOperationType.GEO_DISTANCE
 import static com.phatjam98.elasticprotos.proto.SearchOperationType.NUM_RANGE
 import static com.phatjam98.elasticprotos.proto.SearchOperationType.TEXT_CONTAINS
 import static com.phatjam98.elasticprotos.proto.SearchOperationType.TEXT_MATCHES
@@ -10,6 +11,7 @@ import static com.phatjam98.elasticprotos.proto.SearchOperationType.TEXT_PREFIX
 import static com.phatjam98.elasticprotos.proto.SearchOperationType.TEXT_REGEX
 
 import com.google.protobuf.Message
+import com.google.protobuf.Timestamp
 import com.phatjam98.elasticprotos.codec.ProtoDocumentCodec
 import com.phatjam98.elasticprotos.engine.BulkOp
 import com.phatjam98.elasticprotos.engine.EngineException
@@ -37,6 +39,8 @@ import com.phatjam98.elasticprotos.proto.EsType
 import com.phatjam98.elasticprotos.proto.FieldCondition
 import com.phatjam98.elasticprotos.proto.FieldSort
 import com.phatjam98.elasticprotos.proto.FlatValue
+import com.phatjam98.elasticprotos.proto.GeoDistanceValue
+import com.phatjam98.elasticprotos.proto.LatLon
 import com.phatjam98.elasticprotos.proto.Pagination
 import com.phatjam98.elasticprotos.proto.PrimitiveList
 import com.phatjam98.elasticprotos.proto.PrimitiveValue
@@ -50,6 +54,11 @@ import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
 import com.phatjam98.elasticprotos.proto.example.InboxItem
 import com.phatjam98.elasticprotos.proto.example.Office
+import com.phatjam98.elasticprotos.proto.example.TypedBag
+import com.phatjam98.elasticprotos.proto.example.TypedChild
+import com.phatjam98.elasticprotos.proto.example.TypedItem
+import com.phatjam98.elasticprotos.proto.example.TypedMapLevel
+import com.phatjam98.elasticprotos.proto.example.TypedMaps
 import com.phatjam98.elasticprotos.query.Criteria
 import com.phatjam98.elasticprotos.query.QueryCompiler
 import com.phatjam98.elasticprotos.query.QueryCompilerConfig
@@ -400,6 +409,103 @@ abstract class EngineIntegrationSpec extends Specification {
 
     expect:
     orderedIds(firms, criteria) == ['firm-1', 'firm-3', 'firm-2']
+  }
+
+  // ------------------------------------------------------------------ typed maps
+
+  def "typed maps: every key takes the value type through dynamic templates"() {
+    given: 'its own index under a separate prefix, so the shared sample indices stay untouched'
+    def tmMapper = ProtoMapper.builder().naming(IndexNamingStrategy.prefixed(prefix + '-tm')).build()
+    def tmCodec = ProtoDocumentCodec.of(tmMapper)
+    def tmMigrator = IndexMigrator.builder().engine(engine).mapper(tmMapper).build()
+    IndexDefinition typed = tmMapper.map(TypedMaps)
+    def typedIds = { SearchCriteria criteria -> docIds(criteria, typed) }
+    def due = Timestamp.newBuilder().setSeconds(1_709_528_767L).build()
+    def first = TypedMaps.newBuilder()
+        .setId('tm-1')
+        .putCounters('views', 5L)
+        .putNotes('summary', 'Quarterly reports are late')
+        .putDue('review', due)
+        .putLevels('east', TypedMapLevel.HIGH)
+        .putPlaces('home', LatLon.newBuilder().setLat(36.17d).setLon(-115.14d).build())
+        .putChildren('alice', TypedChild.newBuilder().setName('Alice').setCount(3L).setDisplayName('Ally')
+            .addItems(TypedItem.newBuilder().setSku('A-1').setQuantity(2))
+            .addItems(TypedItem.newBuilder().setSku('B-2').setQuantity(9)).build())
+        .putBags('b', TypedBag.newBuilder().putTags('k', 'v').build())
+        .putLabels('env', 'prod')
+        .build()
+    def second = TypedMaps.newBuilder()
+        .setId('tm-2')
+        .putCounters('views', 15L)
+        .putCounters('clicks', 2L)
+        .putNotes('other', 'nothing to see here')
+        .build()
+
+    when: 'bootstrapped'
+    def created = tmMigrator.bootstrap(TypedMaps)
+    def stored = engine.getMappings(typed.alias())
+
+    then: 'the engine stores the templates as sent, so a re-plan is a no-op'
+    created.ok()
+    typed.alias() == prefix + '-tm-typed_maps'
+    DiffClassifier.normalize(stored).dynamic_templates ==
+        DiffClassifier.normalize(typed.mappings()).dynamic_templates
+    tmMigrator.plan(TypedMaps).items()*.action() == [Action.NO_OP]
+
+    when: 'two documents are indexed'
+    def bulk = engine.bulk([first, second].collect {
+      BulkOp.index(typed.alias(), tmCodec.idOf(it).get(), tmCodec.toDocument(it))
+    })
+    engine.refresh(typed.alias())
+    def live = engine.getMappings(typed.alias()).properties
+
+    then: 'each key was mapped by its template, and the plan stays a no-op'
+    !bulk.errors()
+    live.counters.properties.views.type == 'long'
+    live.counters.properties.clicks.type == 'long'
+    live.due.properties.review.type == 'date'
+    live.notes.properties.summary.type == 'text'
+    live.notes.properties.summary.analyzer == 'english'
+    live.notes.properties.summary.fields.keyword.type == 'keyword'
+    live.levels.properties.east.type == 'keyword'
+    live.places.properties.home.type == 'geo_point'
+    live.children.properties.alice.properties.count.type == 'long'
+    live.children.properties.alice.properties.label.type == 'keyword'
+    live.children.properties.alice.properties.items.type == 'nested'
+    live.children.properties.alice.properties.items.properties.quantity.type == 'integer'
+    tmMigrator.plan(TypedMaps).items()*.action() == [Action.NO_OP]
+
+    and: 'keys are queried with the operations of their value type'
+    typedIds(where(fc('counters.views', NUM_RANGE, range(10, 100)))) == ['tm-2'] as Set
+    typedIds(where(fc('counters.views', EQUALS, integer(5)))) == ['tm-1'] as Set
+    typedIds(where(fc('counters.clicks', EXISTS))) == ['tm-2'] as Set
+    typedIds(where(fc('notes.summary', TEXT_MATCHES, str('report')))) == ['tm-1'] as Set
+    typedIds(where(fc('notes.summary', EQUALS, str('Quarterly reports are late')))) == ['tm-1'] as Set
+    typedIds(where(fullTextOn('notes.summary', 'reporting'))) == ['tm-1'] as Set
+    typedIds(Criteria.builder().fullText('quarterly').build()) == ['tm-1'] as Set
+    typedIds(where(fc('due.review', NUM_RANGE, range(1.7e12, 1.8e12)))) == ['tm-1'] as Set
+    typedIds(where(fc('levels.east', ANY_IN, list('HIGH', 'LOW')))) == ['tm-1'] as Set
+    typedIds(where(fc('places.home', GEO_DISTANCE, FlatValue.newBuilder().setGeoDistanceValue(
+        GeoDistanceValue.newBuilder().setPoint(SampleData.LAS_VEGAS).setDistance('10km')).build()))) == ['tm-1'] as Set
+    typedIds(where(fc('children.alice.label', EQUALS, str('Ally')))) == ['tm-1'] as Set
+
+    and: 'nested values match per element, and a key no document has used matches nothing'
+    typedIds(where(fc('children.alice.items.sku', EQUALS, str('A-1')),
+        fc('children.alice.items.quantity', NUM_RANGE, range(1, 5)))) == ['tm-1'] as Set
+    typedIds(where(fc('children.alice.items.sku', EQUALS, str('A-1')),
+        fc('children.alice.items.quantity', NUM_RANGE, range(5, 10)))).isEmpty()
+    typedIds(where(fc('children.bob.items.sku', EQUALS, str('A-1')))).isEmpty()
+
+    and: 'sorting by a key, including one no document has'
+    orderedIds(typed, sorted(fieldSort('counters.views', SortingOrder.DESC))) == ['tm-2', 'tm-1']
+    orderedIds(typed, sorted(fieldSort('counters.nobody', SortingOrder.ASC),
+        fieldSort('counters.views', SortingOrder.ASC))) == ['tm-1', 'tm-2']
+    orderedIds(typed, sorted(fieldSort('notes.nobody', SortingOrder.ASC),
+        fieldSort('counters.views', SortingOrder.DESC))) == ['tm-2', 'tm-1']
+
+    and: 'hits parse back into the messages'
+    engine.search([typed.alias()], compiler.compile(sorted(fieldSort('counters.views', SortingOrder.ASC)), typed).body())
+        .hits().collect { tmCodec.fromHit(it, TypedMaps) } == [first, second]
   }
 
   // ------------------------------------------------------------------ round trip
@@ -782,6 +888,11 @@ abstract class EngineIntegrationSpec extends Specification {
   static FieldCondition fc(String field, SearchOperationType op,
       FlatValue value = FlatValue.defaultInstance, boolean negate = false) {
     FieldCondition.newBuilder().setField(field).setOperation(op).setValue(value).setNegate(negate).build()
+  }
+
+  static FieldCondition fullTextOn(String field, String query) {
+    FieldCondition.newBuilder().setField(field).setOperation(SearchOperationType.FULL_TEXT)
+        .setValue(str(query)).build()
   }
 
   static SearchCriteria where(FieldCondition... conditions) {
