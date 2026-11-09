@@ -320,11 +320,14 @@ map<string, string> notes = 3 [(phatjam98.elasticprotos.v1.elastic_field) = {
 map<string, Child> children = 4 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
 ```
 
-Keys of a typed map must be non-empty and contain no `.` (the codec throws `CodecException`), and
-every distinct key adds fields to the index at index time, which count toward
-`index.mapping.total_fields.limit`; the mapper warns with the number of fields per key. Values whose
-message holds a map, `Struct` or `Any` at any depth stay untyped (`dynamic: true` only), with a
-warning. A typed map is a different mapping from a flattened one, so switching a map to or from
+The codec checks the keys of typed maps only (keys of flattened maps pass unchanged): they must not
+be blank and must contain no `.`, or it throws `CodecException`. Every distinct key adds fields to
+the index at index time (the key's object, plus every field of a message value), which count toward
+`index.mapping.total_fields.limit`; nested fields inside message values also count toward
+`index.mapping.nested_fields.limit` (default 50), so indexing fails at about the 51st distinct key
+of a map whose values hold a nested field. The mapper warns with both numbers per key. `Struct`,
+`Value`, `ListValue` and `Any` values, and values whose message holds a map, `Struct` or `Any` at
+any depth, stay untyped (`dynamic: true` only), with a warning. A typed map is a different mapping from a flattened one, so switching a map to or from
 `OBJECT` reindexes.
 
 The root mapping is `dynamic: strict`. `MappingDefaults` can change the string rule
@@ -488,8 +491,8 @@ MigrationResult result = migrator.apply(plan);
 |---|---|---|
 | `CREATE` | The alias does not exist | Creates the index with settings, mappings and the alias in one request |
 | `NO_OP` | Hash matches, or the mappings already match | Nothing |
-| `PUT_MAPPING` | Only fields were added that existing documents can be indexed into (new top-level fields, new properties under an object that already has typed properties, new typed maps with their `dynamic_templates`), or only `dynamic` changed | Extends the mapping of the current index in place |
-| `REINDEX` | A field changed type or any mapping parameter other than `dynamic` (analyzer, `search_analyzer`, format, `ignore_above`, normalizer, `copy_to`, `index`, `doc_values`, `null_value`, `coerce`, `enabled`, ...); the `dynamic_templates` of a typed map that already exists changed; a multi-field was added to an existing field (for example `name.keyword`); a typed property was added under an object whose current mapping is dynamic; or fields were removed under `RemovedFieldPolicy.REINDEX` | New index, copy, verify, swap the alias (below) |
+| `PUT_MAPPING` | Only fields were added that existing documents can be indexed into (new top-level fields, new properties under an object that already has typed properties, new typed maps with their `dynamic_templates`, new fields in the values of typed maps), or only `dynamic` changed | Extends the mapping of the current index in place |
+| `REINDEX` | A field changed type or any mapping parameter other than `dynamic` (analyzer, `search_analyzer`, format, `ignore_above`, normalizer, `copy_to`, `index`, `doc_values`, `null_value`, `coerce`, `enabled`, ...); a template of a typed map that already exists changed or went away (except a removed map under `RemovedFieldPolicy.KEEP`), or an untyped map became typed; a multi-field was added to an existing field (for example `name.keyword`); a typed property was added under an object whose current mapping is dynamic; or fields were removed under `RemovedFieldPolicy.REINDEX` | New index, copy, verify, swap the alias (below) |
 | `BLOCKED` | A concrete index is named like the alias; the alias points at several indices; or a breaking change with `allowReindex` off | Nothing; the outcome's status is `BLOCKED`, the plan's `reason` says why and `MigrationResult.ok()` is false |
 
 An added multi-field, or typed properties over what used to be a dynamic object, need a reindex
@@ -769,8 +772,11 @@ Notes:
   adds `unmapped_type` for the same reason, and sorts under such a nested field are rejected.
   `FULL_TEXT` searches a key when it is listed (`notes.summary`), all keys through the pattern
   (`notes.*`), and, opt-in with `full_text: TRUE` on the map, the pattern as part of the default
-  field set (text leaves `children.*.name` for message values). An unknown field below a typed map
-  names the value type in the error.
+  field set (text leaves `children.*.name` for message values). The engine expands a pattern such as
+  `notes.*` to every mapped field below it, which includes the `notes.<key>.keyword` sub-fields, so
+  an exact keyword match on a whole note also scores. Geo queries on a key add `ignore_unmapped:
+  true`, so a key no document has used matches nothing instead of failing. A key segment holding
+  `*` is not a key. An unknown field below a typed map names the value type in the error.
 - **Leading wildcards** scan every term and are off by default.
 - **Client-supplied criteria**: criteria often come straight from API callers, so the features that
   run code or can scan a whole field are opt-in. `TEXT_REGEX` needs `allowRegex`, and a pattern
@@ -1129,7 +1135,8 @@ before 3.3); `pager(...)` always adapts.
 - Settings of existing indices (shards, replicas, analysis) are never changed by a migration;
   settings-only changes need a mapping-visible step (see [Settings changes](#settings-changes)).
 - Keys of typed maps must not contain dots; dynamic keys count toward
-  `index.mapping.total_fields.limit` at index time; inner maps inside typed map values stay untyped.
+  `index.mapping.total_fields.limit` (and nested fields in their values toward
+  `index.mapping.nested_fields.limit`) at index time; inner maps inside typed map values stay untyped.
 - Plans are not coordinated across processes; concurrent bootstrap is unsupported and can be
   destructive. Run the bootstrap from one place.
 - `NUM_RANGE` has no open-ended bounds (proto3 `double` has no presence).

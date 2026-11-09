@@ -42,18 +42,22 @@ a new field decides its mapping. `*` in `path_match` matches any characters, dot
 - Ordering: because `*` crosses dots and the first match wins, templates are sorted by the number of
   `path_match` segments, deepest first, then by name. Names are `ep:` plus the `path_match`, unique
   by construction, so the list is deterministic and the content hash stable.
-- Values whose message holds a map, `Struct`/`Value`/`ListValue` or `Any` at any depth stay
-  untyped: only the root container template is emitted, with a warning. Typed maps inside typed map
+- `Struct`/`Value`/`ListValue` and `Any` values, and values whose message holds a map, one of
+  those types at any depth, stay untyped: only the root container template is emitted, with a
+  warning. Typed maps inside typed map
   values are left for later.
 - The `IndexDefinition` records the value fields as `dynamicFields` keyed by pattern;
   `resolve(path)` instantiates a pattern for a concrete key. The query compiler resolves fields
   through it, adds `ignore_unmapped: true` to `nested` queries on nested paths inside values and
   `unmapped_type` to sorts on keys (keys appear in the mapping only when a document uses them), and
-  rejects sorts under such nested paths. The codec converts every entry like a field of the value
+  rejects sorts under such nested paths. Geo queries on keys add `ignore_unmapped: true` for the
+  same reason (unlike term-level queries, they fail on an unmapped field). The codec converts every entry like a field of the value
   type and rejects empty keys and keys containing `.`.
-- A changed root `dynamic_templates` list is a `REINDEX`, unless every changed template belongs to
-  a map the same diff adds; then putting the mapping, which replaces the whole template list on both
-  engines, is enough.
+- Templates are compared by name. An added template is applied by putting the mapping (which
+  replaces the whole template list on both engines) when its map is added or its values were
+  already typed; a changed template only when its map, or an object enclosing it, is added; a
+  removed one is ignored when its map is removed and removed fields are kept. Anything else,
+  including an untyped map becoming typed, is a `REINDEX`.
 
 ## Consequences
 
@@ -61,9 +65,11 @@ a new field decides its mapping. `*` in `path_match` matches any characters, dot
   and nested matching inside message values.
 - Every distinct key adds fields at index time. They count toward
   `index.mapping.total_fields.limit`, but the mapper cannot count them up front; it warns with the
-  number of fields per key instead. Typed maps suit bounded key sets; flattened remains the right
-  choice for open-ended ones.
+  number of fields per key instead (the key's object, every field of a message value and its
+  sub-fields). Nested fields in message values also count toward `index.mapping.nested_fields.limit`
+  (default 50), so such a map fails at about its 51st distinct key; the warning names that limit
+  too. Typed maps suit bounded key sets; flattened remains the right choice for open-ended ones.
 - The content hash changes for every map already mapped with `type: OBJECT`, so such indices are
   reindexed on the next bootstrap. Flattened maps, and all other mappings, keep their hash.
-- Map keys can no longer contain dots when the map is typed, since the engines expand dotted keys
+- Keys of typed maps can no longer be blank or contain dots, since the engines expand dotted keys
   into sub-objects.
