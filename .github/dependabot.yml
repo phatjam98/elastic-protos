@@ -20,6 +20,12 @@ updates:
         update-types: ['version-update:semver-major']
       - dependency-name: 'com.google.protobuf:protoc'
         update-types: ['version-update:semver-major']
+      # Spock 2.4-groovy-4.0 runs on Groovy 4 and JUnit Platform 1.x (JUnit 5); Groovy 6 and JUnit 6 break
+      # the test build until a Spock release supports them.
+      - dependency-name: 'org.apache.groovy*'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'org.junit*'
+        update-types: ['version-update:semver-major']
     groups:
       gradle-plugins:
         patterns:
