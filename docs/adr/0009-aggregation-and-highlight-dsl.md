@@ -33,7 +33,21 @@ aggregations are left out of v1.
   are reserved, so the sub-results of a bucket are the bucket minus those keys.
 - **`RangeBucket`, not `RangeValue`.** Engine range buckets are always `[from, to)`; `RangeValue`
   carries per-bound inclusivity that the engines could not honour. `RangeBucket` has an optional key
-  and optional `from`/`to`, and dates are epoch milliseconds, as in `NUM_RANGE`.
+  and two optional bounds, each a `oneof` of a `double` (`from`/`to`) and a
+  `google.protobuf.Timestamp` (`from_time`/`to_time`, date fields only). A `double` is exact on
+  long fields only up to 2^53; that limit is documented rather than worked around, since such
+  values are rare in range buckets and `NUM_RANGE` has the same one. Dates accept a `Timestamp`
+  because it is the type the documents carry and avoids unit mistakes; doubles of epoch
+  milliseconds stay accepted, as in `NUM_RANGE`. The compiler sends epoch milliseconds either way,
+  with `format: epoch_millis`: an unambiguous, time-zone-free number both engines parse identically,
+  whereas a formatted date string would depend on the field's `format`.
+- **Room to grow.** Metrics are a `MetricAggregation { type }` message, not a bare enum, so options
+  such as `missing`, `precision_threshold` or `format` can be added without a wire break;
+  `TermsAggregation.order` is repeated (compound orders) and `Highlight.pre_tags`/`post_tags` are
+  repeated, matching the engines' arrays. `min_doc_count` fields are `int32`, as in the engines.
+- **Name rules.** Besides `__` and the bucket keys, names may not contain `[`, `]` or `>` (the
+  engines reject them) or `.` (it would break `BY_METRIC` order paths), nor end with `_`, so that
+  `AggregationResults` can strip a wrapper suffix (`__nested\d*` or `__reverse`) unambiguously.
 - **Aggregations only via a negative page size.** `Pagination.size < 0` already compiled to
   `size: 0`; `Criteria.aggregationsOnly()` and `ElasticProtosService.aggregate` use it rather than a
   new field.
@@ -54,4 +68,7 @@ aggregations are left out of v1.
   `nested` aggregations, and such paths exist only once a key is used.
 - The wire format grows by two fields; criteria without them compile exactly as before.
 - `SearchPage` gains an `aggregations` component; the previous six-component constructor stays and
-  supplies empty results.
+  supplies empty results. `ElasticProtosService.aggregate` returns an `AggregationPage` (results,
+  total, warnings), so the hit count and compiler warnings are not lost.
+- Buckets in a nested context count nested objects; counting documents takes a `reverse_nested`
+  metric. Nested terms can exceed the engines' `search.max_buckets` even within `maxTermsSize`.

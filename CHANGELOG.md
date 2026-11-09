@@ -47,7 +47,8 @@ The query DSL gains aggregations and highlighting ([ADR 0009](docs/adr/0009-aggr
 value count and cardinality metrics, one sub-aggregation level, nested fields wrapped in
 `<name>__nested` / `<name>__reverse`) and `SearchCriteria.highlight`, built with `Aggs` and
 `Criteria.aggregate`, `aggregationsOnly` and `highlight`, and read with `AggregationResults`.
-Aggregation names must not contain `__` or equal a bucket key. New
+Aggregation names must not contain `__`, `[`, `]`, `>` or `.`, end with `_` or equal a bucket key. New
 `QueryCompilerConfig.maxTermsSize` (Micronaut `elastic-protos.query.max-terms-size`, default 1000).
 The Micronaut `SearchPage` record gains a seventh component, `aggregations` (the six-argument
-constructor remains), and `ElasticProtosService` gains `aggregate(criteria, type)`.
+constructor remains), and `ElasticProtosService` gains `aggregate(criteria, type)`, which returns an
+`AggregationPage` (results, total, warnings); both log compiler warnings at WARN.

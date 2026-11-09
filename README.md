@@ -883,20 +883,27 @@ SearchCriteria criteria = Criteria.where("type").equalTo("FILING").end()
 | `terms` | `terms(name, field)` | keyword, numeric, date, boolean, ip, text with `.keyword`, keys of flattened fields | `terms` on the exact-match path; `size` (at most `maxTermsSize`, default 1000), `min_doc_count`, `missing` (typed for the field), `order` |
 | `date_histogram` | `dateHistogram(name, field, CalendarInterval)` or `(name, field, "90m")` | date | `calendar_interval` (`1m` `1h` `1d` `1w` `1M` `1q` `1y`) or `fixed_interval` (a whole number and `ms`, `s`, `m`, `h` or `d`); `time_zone` (checked with `ZoneId`), `format`, `min_doc_count`, `extended_bounds` (epoch millis) |
 | `histogram` | `histogram(name, field, interval)` | numeric | `interval` (positive), `offset`, `min_doc_count` |
-| `range` | `range(name, field, bucket(key, from, to)...)` | numeric, date | `range`; on dates `date_range` with `format: epoch_millis` (bounds in epoch millis). Buckets are `[from, to)`; a null bound is open |
+| `range` | `range(name, field, bucket(key, from, to)...)` | numeric, date | `range`; on dates `date_range` with `format: epoch_millis`. Buckets are `[from, to)`; a null bound is open. Bounds are `double`s (exact on long fields only up to 2^53) or, on date fields, `Instant`s (`from_time`/`to_time`); date bounds are sent as epoch millis |
 | `metric` | `min`, `max` | numeric, date | `min` / `max` |
 | | `avg`, `sum` | numeric | `avg` / `sum` |
 | | `count`, `cardinality` | any exact-match field, including keys of flattened fields | `value_count` / `cardinality` on the exact-match path |
 
-Terms buckets are ordered by document count, descending, by default. `TermsOrder` orders `BY_COUNT`
-(`_count`), `BY_KEY` (`_key`) or `BY_METRIC`, naming a metric sub-aggregation of the same terms
-aggregation; the direction defaults to descending for counts and metrics and ascending for keys.
+Metrics are `MetricAggregation { type }` messages (`Aggs.min(...)` and the like build them).
+`cardinality` is approximate: the engines count with HyperLogLog++, exactly only below the precision
+threshold (3000 distinct values by default); the in-memory test engine counts exactly.
+
+Terms buckets are ordered by document count, descending, by default. Each `TermsOrder` orders
+`BY_COUNT` (`_count`), `BY_KEY` (`_key`) or `BY_METRIC`, naming a metric sub-aggregation of the
+same terms aggregation; the direction defaults to descending for counts and metrics and ascending
+for keys. Several orders compile to a compound order: the first decides, the next break ties.
 
 These rules are checked with a `QueryCompileException` (unknown fields are skipped with a warning
 when lenient):
 
-- **Names** are required, unique among siblings, must not contain `__` and must not be a key of the
-  engines' bucket objects (`key`, `key_as_string`, `doc_count`, `buckets`, `value`,
+- **Names** are required and unique among siblings. They must not contain `__` (reserved for the
+  wrappers), `[`, `]` or `>` (the engines reject them) or `.` (it breaks the `BY_METRIC` order
+  path), must not end with `_` (so the wrapper suffix can be stripped unambiguously), and must not
+  be a key of the engines' bucket objects (`key`, `key_as_string`, `doc_count`, `buckets`, `value`,
   `value_as_string`, `from`, `to`, `from_as_string`, `to_as_string`, `sum_other_doc_count`,
   `doc_count_error_upper_bound`, `meta`).
 - **One level of sub-aggregations**: bucket aggregations take sub-aggregations, which take none of
@@ -945,6 +952,14 @@ compiles to
 }
 ```
 
+Buckets in a nested context count nested objects, not documents: on the testkit sample, the
+`DEFENDANT` bucket of `roles` has a `doc_count` of 4 parties. To count the documents those objects
+belong to, add a metric that steps out with `reverse_nested`, for example `Aggs.count("docs", "id")`
+or a `cardinality` of a top-level field as above. Nested terms multiply buckets: with a parent of
+`size` n, each of up to n buckets can hold its own sub-buckets, and the engines fail a search whose
+response would exceed `search.max_buckets` (65,536 by default) even when every `size` is within
+`maxTermsSize`.
+
 Nested paths inside the values of a typed map are refused: the engines have no `ignore_unmapped`
 for `nested` aggregations, and such paths are mapped only once a key is used.
 
@@ -969,8 +984,9 @@ long firms = aggs.metric("firms").asLong();
 ```
 
 `Bucket` carries `key` (a `String` for keyword terms and range buckets, a `Long` for integer and
-date terms and for date histograms (epoch millis), a `Double` for histograms and floating-point
-terms), `keyAsString`, `docCount`, `from`/`to` and their `*AsString` forms for range buckets, and
+date terms and for date histograms (epoch millis), a `Long` `1` or `0` for boolean terms (with
+`keyAsString` `"true"` / `"false"`), a `Double` for histograms and floating-point terms),
+`keyAsString` (dates in the form `2024-06-30T08:00:00.000Z`), `docCount`, `from`/`to` and their `*AsString` forms for range buckets, and
 `sub`, the results inside the bucket. `MetricValue` has `value()` (null when no document had the
 field), `valueAsString()`, `isPresent()` and `asLong()`. Keyed (object-shaped) buckets are read too.
 An unknown name throws `NoSuchElementException` listing the names present; `buckets` on a metric or
@@ -995,7 +1011,7 @@ SearchCriteria criteria = Criteria.builder()
 SearchCriteria custom = Criteria.builder()
     .fullText("merger")
     .highlight(h -> h.addFields(HighlightField.newBuilder().setField("title").setNumberOfFragments(0))
-        .setPreTag("<mark>").setPostTag("</mark>").setFragmentSize(150).setHtmlEncode(true))
+        .addPreTags("<mark>").addPostTags("</mark>").setFragmentSize(150).setHtmlEncode(true))
     .build();
 
 CompiledSearch compiled = QueryCompiler.withDefaults().compile(criteria, documents);
@@ -1009,7 +1025,7 @@ for (Hit hit : engine.search(List.of(documents.alias()), compiled.body()).hits()
 | `fields` | `fields`; empty means the index's full-text fields that are text and outside nested objects. Explicit fields must be `TEXT` or `SEARCH_AS_YOU_TYPE` (typed map keys and patterns such as `notes.*` included) and outside nested objects; others fail, or are skipped with a warning when lenient |
 | `HighlightField.fragment_size`, `number_of_fragments` | per-field settings |
 | `fragment_size`, `number_of_fragments` | the same for every field; `number_of_fragments: 0` returns the whole value |
-| `pre_tag`, `post_tag` | `pre_tags` / `post_tags`; default `<em>` / `</em>` |
+| `pre_tags`, `post_tags` | `pre_tags` / `post_tags`; empty means `["<em>"]` / `["</em>"]` |
 | `require_field_match` | `require_field_match`, when set |
 | `html_encode` | `encoder: html`: the field text is escaped (`&` becomes `&amp;`) before the tags are inserted |
 
@@ -1109,8 +1125,8 @@ then thrown from `close()` as an `EngineException`.
 Handled in core, so mappings, hashes and tests are identical on both engines:
 
 - `flattened` is sent to OpenSearch as `flat_object` (OpenSearch 2.7+) and read back as `flattened`.
-  A terms aggregation on a key of such a field returns the same buckets as on Elasticsearch on
-  OpenSearch 3.9; the integration suite accepts a bad request from older OpenSearch versions.
+  Terms and `cardinality` aggregations on a key of such a field return the same results as on
+  Elasticsearch: verified on OpenSearch 2.19.7 and 3.9.0 and Elasticsearch 8.19.23 and 9.5.5.
 - The `_shard_doc` point-in-time tiebreaker exists only on OpenSearch 3.3+ (absent in 2.19 and 3.2);
   `SearchPager` skips it there.
 - Opening and closing a point in time use each engine's own API.
@@ -1264,11 +1280,14 @@ It also offers `bulkIndex`, `definition`, `pager` (a `SearchPager`), `plan`, `bo
 `codec()` and `engine()`. `SearchPage` carries the messages, the raw hits (with their highlights),
 the total, the `next` pagination, the compiler warnings and the `aggregations` of the criteria
 (`AggregationResults`, empty when there are none). `aggregate(criteria, type)` runs only the
-aggregations, with no hits or highlights:
+aggregations, with no hits or highlights, and returns an `AggregationPage` with the `results`, the
+`total` of matching documents (`-1` when totals are not tracked) and the compiler `warnings`. Both
+methods log compiler warnings at `WARN`.
 
 ```java
-AggregationResults perType = elastic.aggregate(
+AggregationPage perType = elastic.aggregate(
     Criteria.builder().aggregate(Aggs.terms("by_type", "type")).build(), Document.class);
+long filings = perType.results().buckets("by_type").get(0).docCount();
 ```
 
 ### Properties
