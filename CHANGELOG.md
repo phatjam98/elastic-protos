@@ -28,3 +28,11 @@ the wire and the default `JsonFormat` printer omits it, so criteria built with r
 arrive with that `min` or `max` unset and therefore open. Rebuild producers against rc.3 or
 persist criteria with `includingDefaultValueFields`. A range with no bound, a NaN bound or an empty
 range is rejected with `QueryCompileException`.
+
+Engine SPI additions before 1.0.0 (conditional writes, `updateByQuery`, `putSettings`, hit
+metadata):
+
+- Hits read by id (`SearchEngine.get`) now carry `version`, `seqNo` and `primaryTerm`, so they no
+  longer equal a `Hit` built with the five-argument constructor.
+- The in-memory test engine copies a reindex from a snapshot of the source taken when the call
+  starts, and a delete consumes a sequence number and leaves a version tombstone.
