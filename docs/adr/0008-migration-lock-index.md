@@ -50,4 +50,12 @@ can be resumed by any process that plans again.
 - An instance can wait up to `lockWait` at startup; probe budgets must allow for it, or the
   migration runs from a dedicated job.
 - A user alias named like the lock index collides with it.
+- The guard is check-then-act without fencing tokens: a lease can be lost between a check and the
+  engine call after it (request latency plus up to a third of the TTL of staleness, since a lease
+  counts as lost locally two thirds of the TTL after its last successful write, and a lock is
+  taken over a third of the TTL after it expires).
+- The lock does not protect against application writers, external tools, or migrators with
+  `lock(false)`.
+- The lock index takes its replicas from the replica policy, possibly 0; a red lock index fails
+  every item.
 - Every changing item costs a few extra requests (create, renewals, delete, and a re-plan).
