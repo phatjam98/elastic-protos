@@ -78,9 +78,9 @@ and creates no tag or release. Pass the version you intend to release:
 ```
 
 `stageAll` deletes `build/staging-deploy` before publishing into it, so JReleaser, which deploys
-everything it finds there, never picks up artifacts staged for an earlier version. `build` (through
-`check`) also stages and runs `verifyPublishedMetadata`, which fails when a staged `.module` exports
-a platform or a POM imports a foreign BOM. `jreleaserFullRelease` depends on `stageAll`, so the
+everything it finds there, never picks up artifacts staged for an earlier version. `./gradlew stageAll verifyPublishedMetadata`
+(a separate command that CI's stage job runs; `build` does not stage) fails when a staged `.module`
+exports a platform or a POM imports a foreign BOM. `jreleaserFullRelease` depends on `stageAll`, so the
 separate `stageAll` step is only there to inspect the output first:
 
 ```bash

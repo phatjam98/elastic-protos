@@ -41,7 +41,8 @@ programmatic overrides second; do not add field-name heuristics.
 ./gradlew :elastic-protos-core:test :elastic-protos-elasticsearch:test :elastic-protos-opensearch:test \
   :elastic-protos-testkit:test -PprotobufRuntimeVersion=4.36.2
 
-# Stage the publications and check that no .module or POM exports a platform/BOM (part of `check`)
+# Stage the publications and check that no .module or POM exports a platform/BOM (not part of
+# `build`; CI's stage job runs it)
 ./gradlew stageAll verifyPublishedMetadata
 
 # Docker-backed integration tests, per adapter; without -PengineImage the newest verified image is used
@@ -64,7 +65,7 @@ behaviour should pass locally on at least one image of each engine.
   major versions only.
 - Published modules must not export a platform: declare published dependencies with explicit
   catalog versions and keep BOMs on `compileOnly`, `annotationProcessor` or test configurations.
-  `verifyPublishedMetadata` enforces this.
+  `./gradlew stageAll verifyPublishedMetadata` enforces this (CI runs it on every PR).
 
 ## Quality gates
 

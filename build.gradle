@@ -37,7 +37,9 @@ def stageAll = tasks.register('stageAll') {
 
 // Consumers must not inherit a platform (BOM) from us: a platform dependency in apiElements or
 // runtimeElements of the Gradle module metadata, or an import-scoped BOM in a POM, forces its
-// versions onto every consumer's classpath. Only our own BOM may be imported.
+// versions onto every consumer's classpath. Only our own BOM may be imported. Deliberately not
+// part of `check`, so `build` has no staging side effects; CI's stage job runs
+// `stageAll verifyPublishedMetadata` on every PR.
 def verifyPublishedMetadata = tasks.register('verifyPublishedMetadata') {
     group = 'verification'
     description = 'Fails when a staged .module exports a platform or a staged POM imports a foreign BOM.'
@@ -85,10 +87,6 @@ def verifyPublishedMetadata = tasks.register('verifyPublishedMetadata') {
         }
         logger.lifecycle("verifyPublishedMetadata: ${modules} .module and ${poms} .pom files export no platform or foreign BOM")
     }
-}
-
-tasks.named('check') {
-    dependsOn verifyPublishedMetadata
 }
 
 tasks.named('jreleaserFullRelease') {
