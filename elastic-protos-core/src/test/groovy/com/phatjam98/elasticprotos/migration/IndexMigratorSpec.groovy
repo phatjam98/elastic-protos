@@ -879,6 +879,84 @@ class IndexMigratorSpec extends Specification {
     leftover << [false, true]
   }
 
+  def "a write-blocked index retained by an earlier reindex is never reused or deleted"() {
+    given: 'v1 -> v2 by reindex: v1 is retained, write-blocked, with its documents'
+    migrator().bootstrap(Document)
+    seedDocuments()
+    assert migrator(TITLE_KEYWORD).bootstrap(Document).ok()
+    assert engine.isWriteBlocked(DOC_V1)
+    engine.clearLog()
+
+    when: 'v1 is deployed again'
+    def back = migrator().plan(Document).items()[0]
+
+    then: 'its plain name is the retained copy, so the new index is its second generation'
+    back.action() == Action.REINDEX
+    back.currentIndex() == DOC_V2
+    back.target().name() == "${DOC_V1}-g2".toString()
+    back.reason() == "breaking change: title type keyword -> text; ${DOC_V1} exists and is write-blocked (retained from an earlier reindex), so the new index is ${DOC_V1}-g2".toString()
+
+    when:
+    def result = migrator().apply(new MigrationPlan([back]))
+
+    then: 'v1 is untouched'
+    result.ok()
+    engine.indices() == [(DOC_V1): [] as Set, (DOC_V2): [] as Set, ("${DOC_V1}-g2".toString()): ['documents'] as Set]
+    engine.isWriteBlocked(DOC_V1)
+    engine.isWriteBlocked(DOC_V2)
+    engine.documents(DOC_V1).keySet() == ['d0', 'd1', 'd2'] as Set
+    engine.documents("${DOC_V1}-g2".toString()).keySet() == ['d0', 'd1', 'd2'] as Set
+    !engine.log().any { it == "deleteIndex ${DOC_V1}".toString() || it == "createIndex ${DOC_V1}".toString() }
+    engine.log().contains("createIndex ${DOC_V1}-g2".toString())
+    migrator().plan(Document).items()[0].action() == Action.NO_OP
+
+    when: 'and v2 again: its plain name is retained and blocked too'
+    def again = migrator(TITLE_KEYWORD).plan(Document).items()[0]
+    def second = migrator(TITLE_KEYWORD).apply(new MigrationPlan([again]))
+
+    then:
+    again.action() == Action.REINDEX
+    again.target().name() == "${DOC_V2}-g2".toString()
+    again.reason().endsWith("${DOC_V2} exists and is write-blocked (retained from an earlier reindex), so the new index is ${DOC_V2}-g2")
+    second.ok()
+    engine.indices()["${DOC_V2}-g2".toString()] == ['documents'] as Set
+    engine.documents(DOC_V2).keySet() == ['d0', 'd1', 'd2'] as Set
+    engine.isWriteBlocked(DOC_V2)
+    !engine.log().any { it == "deleteIndex ${DOC_V2}".toString() }
+  }
+
+  def "an unblocked leftover with the plain name keeps the reuse and recreate rules"() {
+    given:
+    migrator().bootstrap(Document)
+    engine.createIndex(DOC_V2, [:], [:], [] as Set)
+
+    when:
+    def item = migrator(TITLE_KEYWORD).plan(Document).items()[0]
+
+    then:
+    item.target().name() == DOC_V2
+    item.reason() == 'breaking change: title type text -> keyword'
+  }
+
+  def "a write-blocked target found at apply time fails the item without touching it"() {
+    given: 'a plan made before another run left the target name retained and blocked'
+    migrator().bootstrap(Document)
+    def plan = migrator(TITLE_KEYWORD).plan(Document)
+    engine.createIndex(DOC_V2, [:], TITLE_KEYWORD.map(Document).mappings(), [] as Set)
+    engine.setWriteBlock(DOC_V2, true)
+
+    when:
+    def result = migrator(TITLE_KEYWORD).apply(plan)
+
+    then:
+    result.outcomes()[0].status() == MigrationResult.Status.FAILED
+    result.outcomes()[0].error().message.contains("${DOC_V2} exists and is write-blocked")
+    engine.indexExists(DOC_V2)
+    engine.isWriteBlocked(DOC_V2)
+    engine.indices()[DOC_V1] == ['documents'] as Set
+    !engine.isWriteBlocked(DOC_V1)
+  }
+
   def "a custom naming strategy decides generation names"() {
     given: 'a strategy whose generations all collide is blocked rather than looping'
     def naming = new IndexNamingStrategy() {

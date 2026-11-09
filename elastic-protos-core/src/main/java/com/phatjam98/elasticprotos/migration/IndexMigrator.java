@@ -45,7 +45,9 @@ import org.slf4j.LoggerFactory;
  * <p>A {@code PUT_MAPPING} keeps the index name while the recorded hash moves on, so a later
  * reindex can find that the alias already points at an index with the target name. The new index
  * then gets the lowest free generation of that name, {@code <name>-g2}, {@code <name>-g3} and so
- * on (see {@link IndexNamingStrategy#generationName}).
+ * on (see {@link IndexNamingStrategy#generationName}). The same happens when an index with the
+ * target name exists and is write-blocked: it is an old index retained by an earlier reindex,
+ * kept for rollback, and is never reused or deleted.
  *
  * <p>Running the migrator for the same aliases from several processes at once is unsupported and
  * can be destructive: one process can clear the write block or delete the index another is
@@ -218,38 +220,54 @@ public final class IndexMigrator {
               "breaking change needs a reindex but allowReindex is false: " + breaking,
               warnings);
         }
-        if (current.equals(target.name())) {
-          String next = nextGeneration(target, current);
-          if (next == null) {
-            return new IndexPlan(target, Action.BLOCKED, current, currentHash, diff,
-                "index " + current + " already has the target name but different mappings,"
-                    + " and no free generation of it was found: " + breaking, warnings);
-          }
-          return new IndexPlan(renamed(target, next), Action.REINDEX, current, currentHash,
-              diff, "breaking change: " + breaking + "; " + current
-                  + " already has the target name, so the new index is " + next, warnings);
+        List<String> skipped = new ArrayList<>();
+        String next = reindexTarget(target, current, skipped);
+        if (next == null) {
+          return new IndexPlan(target, Action.BLOCKED, current, currentHash, diff,
+              String.join("; ", skipped) + ", and no free generation of " + target.name()
+                  + " was found: " + breaking, warnings);
         }
-        return new IndexPlan(target, Action.REINDEX, current, currentHash, diff,
-            "breaking change: " + breaking, warnings);
+        String reason = "breaking change: " + breaking;
+        if (!skipped.isEmpty()) {
+          reason += "; " + String.join("; ", skipped) + ", so the new index is " + next;
+        }
+        return new IndexPlan(next.equals(target.name()) ? target : renamed(target, next),
+            Action.REINDEX, current, currentHash, diff, reason, warnings);
     }
   }
 
   /**
-   * Picks the index to reindex into when the alias already points at an index with the target
-   * name, as happens after a {@code PUT_MAPPING} moved that index's hash on and the proto went
-   * back: the lowest generation ({@link IndexNamingStrategy#generationName}, from 2) that does
-   * not exist, or that is a leftover of an interrupted run recording the target hash.
+   * Picks the index to reindex into: the target name itself (generation 1) or the lowest later
+   * generation ({@link IndexNamingStrategy#generationName}) that fits. A candidate is skipped when
+   * it is the index the alias points at (a {@code PUT_MAPPING} keeps the old name while the hash
+   * moves on, so reverting names it again) or when it exists and is write-blocked, since that is
+   * an old index retained after an earlier reindex: a rollback copy that is never reused or
+   * deleted. Otherwise generation 1 is taken whether or not it exists ({@link #prepareTarget}
+   * reuses or recreates a leftover), and a later generation is taken when it does not exist or
+   * is a leftover recording the target hash.
    *
+   * @param skipped receives one note per skipped candidate, for the plan reason
    * @return the name, or null when none of the first {@value #MAX_GENERATION} generations fits
    */
-  private String nextGeneration(IndexDefinition target, String current) {
+  private String reindexTarget(IndexDefinition target, String current, List<String> skipped) {
     IndexNamingStrategy naming = mapper.naming();
-    for (int generation = 2; generation <= MAX_GENERATION; generation++) {
-      String name = naming.generationName(target.name(), generation);
+    for (int generation = 1; generation <= MAX_GENERATION; generation++) {
+      String name = generation == 1
+          ? target.name() : naming.generationName(target.name(), generation);
       if (name.equals(current)) {
+        if (generation == 1) {
+          skipped.add(current + " already has the target name");
+        }
         continue;
       }
-      if (!engine.indexExists(name)
+      if (!engine.indexExists(name)) {
+        return name;
+      }
+      if (isWriteBlocked(engine.getSettings(name))) {
+        skipped.add(name + " exists and is write-blocked (retained from an earlier reindex)");
+        continue;
+      }
+      if (generation == 1
           || recordedHash(engine.getMappings(name)).equals(target.contentHash())) {
         return name;
       }
@@ -513,7 +531,8 @@ public final class IndexMigrator {
    * Makes sure the reindex target exists with the target mappings. An index that already has the
    * target name is a leftover from an earlier run that did not finish: it is reused when it records
    * the target hash, and deleted and recreated otherwise, since its mappings are unknown. The index
-   * the alias points at is never touched.
+   * the alias points at, and a write-blocked index (an old index retained after an earlier
+   * reindex, which planning skips), are never touched: the item fails instead.
    *
    * @return whether this run created the index, and so may delete it if the migration fails
    */
@@ -527,6 +546,11 @@ public final class IndexMigrator {
             + (holders == null ? "could not be read" : "already points at " + next)
             + " while migrating from " + current + "; another migration may be running."
             + " Plan again once it has finished");
+      }
+      if (isWriteBlocked(engine.getSettings(next))) {
+        throw new MigrationException(next + " exists and is write-blocked (retained from an"
+            + " earlier reindex) while migrating from " + current + "; it is neither reused nor"
+            + " deleted. Plan again to pick the next generation");
       }
       String hash = recordedHash(engine.getMappings(next));
       if (hash.equals(target.contentHash())) {

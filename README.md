@@ -514,9 +514,11 @@ MigrationResult wouldDo = dryRun.bootstrap(Document.class);   // every outcome i
 
 A `REINDEX`:
 
-1. creates the new index without the alias (named with a generation suffix when the alias already
-   points at an index with the target name; see [Index naming](#index-naming-and-metadata)). If an
-   index with the target name already exists it is
+1. creates the new index without the alias. It gets a generation suffix (see
+   [Index naming](#index-naming-and-metadata)) when the alias already points at an index with the
+   target name, or when an index with that name exists and is write-blocked: that is an old index
+   retained by an earlier reindex, kept for rollback, and it is never reused or deleted. If an
+   unblocked index with the target name already exists it is
    a leftover from an earlier run that did not finish: it is reused when its `_meta` records the
    target hash and the alias does not point at it, and otherwise deleted and recreated (logged as a
    warning), because its mappings are unknown. If the alias already points at it, the item fails
