@@ -512,9 +512,10 @@ public class InMemorySearchEngine implements SearchEngine {
     int size = intValue(body.get("size"), 10);
     List<Hit> page = matches.subList(Math.min(from, matches.size()),
         Math.min(from + size, matches.size()));
-    boolean exact = !Boolean.FALSE.equals(body.get("track_total_hits"));
-    return new SearchResult(exact ? matches.size() : page.size(), exact, new ArrayList<>(page),
-        pitId, Map.of(), 0);
+    // like the real engines, track_total_hits: false leaves the total out
+    boolean counted = !Boolean.FALSE.equals(body.get("track_total_hits"));
+    return new SearchResult(counted ? matches.size() : SearchResult.NO_TOTAL, counted,
+        new ArrayList<>(page), pitId, Map.of(), 0);
   }
 
   @Override

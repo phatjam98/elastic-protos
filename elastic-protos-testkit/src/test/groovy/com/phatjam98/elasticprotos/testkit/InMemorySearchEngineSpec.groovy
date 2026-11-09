@@ -7,6 +7,7 @@ import com.phatjam98.elasticprotos.engine.EngineInfo
 import com.phatjam98.elasticprotos.engine.EngineProduct
 import com.phatjam98.elasticprotos.engine.IndexOptions
 import com.phatjam98.elasticprotos.engine.ReindexRequest
+import com.phatjam98.elasticprotos.engine.SearchResult
 import java.time.Duration
 import spock.lang.Specification
 
@@ -359,6 +360,8 @@ class InMemorySearchEngineSpec extends Specification {
     engine.search(['a'], [query: [term: [tags: 'y']]]).hits()*.id() == ['1']
     engine.search(['a'], [from: 1, size: 1]).hits()*.id() == ['2']
     !engine.search(['a'], [track_total_hits: false]).totalExact()
+    engine.search(['a'], [track_total_hits: false]).total() == SearchResult.NO_TOTAL
+    !engine.search(['a'], [track_total_hits: false]).hasTotal()
 
     when:
     engine.search(['a'], [query: [range: [n: [gte: 1]]]])
