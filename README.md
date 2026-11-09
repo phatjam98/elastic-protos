@@ -748,7 +748,10 @@ QueryCompiler compiler = QueryCompiler.of(QueryCompilerConfig.standard()
 ```
 
 `compiled.body()` is a plain `Map`: copy it to add anything the DSL does not cover, such as `aggs`;
-raw aggregation results come back in `SearchResult.aggregations()`.
+raw aggregation results come back in `SearchResult.aggregations()`. `SearchResult.total()` is exact
+when `totalExact()` is true and a lower bound otherwise. With `track_total_hits: false`
+(`withTrackTotalHits(false)`) the engine counts nothing: `total()` is then
+`SearchResult.NO_TOTAL` (`-1`), `totalExact()` is false and `hasTotal()` is false.
 
 ## Engines
 
@@ -795,6 +798,10 @@ SearchEngine engine = ElasticsearchEngine.of(client);   // closing the engine cl
 writes, realtime `get` by id, `bulk`, `search`, `count`, point in time, `refresh` and `health`, all
 as JSON-shaped maps. Transport failures are `EngineException`s of kind `IO` that name the request
 and the hosts, for example `GET /documents/_alias on http://localhost:9200 failed: No route to host`.
+Engine errors are classified by `EngineException.getKind()`: `cluster_block_exception` (an
+`index.blocks.write` or read-only block, or the flood-stage disk watermark, answered with 403 or 429)
+and `index_closed_exception` are `BLOCKED`, not `UNAUTHORIZED` or `TRANSIENT`, since retrying does
+not help until the block is lifted.
 `BulkBuffer` batches writes by count, size and interval:
 
 ```java

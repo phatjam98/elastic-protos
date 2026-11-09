@@ -7,6 +7,7 @@ import com.phatjam98.elasticprotos.engine.EngineProduct
 import com.phatjam98.elasticprotos.engine.IndexOptions
 import com.phatjam98.elasticprotos.engine.Pit
 import com.phatjam98.elasticprotos.engine.ReindexRequest
+import com.phatjam98.elasticprotos.engine.SearchResult
 import spock.lang.Specification
 import spock.lang.Unroll
 
@@ -593,6 +594,34 @@ class JsonRestEngineSpec extends Specification {
     result.hits().isEmpty()
   }
 
+  def "a search without hits.total has no total"() {
+    given: 'the response to track_total_hits: false'
+    http.enqueue(200, [took: 1, hits: [max_score: null, hits: [[_index: 'i', _id: '1', _source: [a: 1]]]]])
+
+    when:
+    def result = engine.search(['a'], [track_total_hits: false])
+
+    then:
+    result.total() == SearchResult.NO_TOTAL
+    result.total() == -1
+    !result.totalExact()
+    !result.hasTotal()
+    result.hits()*.id() == ['1']
+  }
+
+  def "a numeric hits.total is exact"() {
+    given: 'the response shape of rest_total_hits_as_int=true'
+    http.enqueue(200, [hits: [total: 7, hits: []]])
+
+    when:
+    def result = engine.search(['a'], [:])
+
+    then:
+    result.total() == 7
+    result.totalExact()
+    result.hasTotal()
+  }
+
   def "count searches with size 0 and exact totals"() {
     given:
     http.enqueue(200, [hits: [total: [value: 42, relation: 'eq'], hits: []]])
@@ -657,6 +686,7 @@ class JsonRestEngineSpec extends Specification {
     e.kind == kind
     e.status == status
     e.message == (type == null ? 'plain text failure' : "${type}: r")
+    kind != EngineException.Kind.BLOCKED
 
     where:
     status | type                                | kind
@@ -671,6 +701,44 @@ class JsonRestEngineSpec extends Specification {
     429    | 'es_rejected_execution_exception'   | EngineException.Kind.TRANSIENT
     503    | null                                | EngineException.Kind.TRANSIENT
     500    | 'null_pointer_exception'            | EngineException.Kind.OTHER
+  }
+
+  @Unroll
+  def "#status #type is BLOCKED, not an authorization failure"() {
+    given:
+    http.enqueue(status, [error: [type: type, reason: 'index [x] blocked by: [FORBIDDEN/8/index write (api)];']])
+
+    when:
+    engine.index('x', '1', [a: 1], IndexOptions.defaults())
+
+    then:
+    def e = thrown(EngineException)
+    e.kind == EngineException.Kind.BLOCKED
+    e.status == status
+    e.message.startsWith("${type}: index [x] blocked by")
+    e.message.endsWith(suffix)
+
+    where:
+    status | type                      | suffix
+    403    | 'cluster_block_exception' | '(the index or cluster is write-blocked)'
+    429    | 'cluster_block_exception' | '(the index or cluster is write-blocked)'
+    400    | 'index_closed_exception'  | '(the index is closed)'
+  }
+
+  def "a BLOCKED reindex poll is not retried"() {
+    given:
+    http.enqueue(200, [task: 'n:1'])
+        .enqueue(403, [error: [type: 'cluster_block_exception', reason: 'blocked']])
+        .enqueue(404, [error: [type: 'resource_not_found_exception', reason: 'gone']])
+        .enqueue(404, [error: [type: 'resource_not_found_exception', reason: 'gone']])
+
+    when:
+    engine.reindex(ReindexRequest.of('a', 'b'))
+
+    then:
+    def e = thrown(EngineException)
+    e.kind == EngineException.Kind.BLOCKED
+    http.requests.size() == 4
   }
 
   def "transport failures become IO errors and close is forwarded"() {

@@ -12,6 +12,13 @@ public class EngineException extends RuntimeException {
     CONFLICT,
     BAD_REQUEST,
     UNAUTHORIZED,
+    /**
+     * The index or cluster is write-blocked ({@code cluster_block_exception}, for example a
+     * {@code index.blocks.write} or the flood-stage disk watermark's read-only block) or the index
+     * is closed ({@code index_closed_exception}). Retrying does not help until the block is
+     * lifted.
+     */
+    BLOCKED,
     TRANSIENT,
     TIMEOUT,
     IO,

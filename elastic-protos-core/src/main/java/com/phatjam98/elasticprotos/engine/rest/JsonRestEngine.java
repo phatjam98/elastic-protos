@@ -43,6 +43,9 @@ import org.slf4j.LoggerFactory;
  */
 public final class JsonRestEngine implements SearchEngine {
 
+  private static final String CLUSTER_BLOCK = "cluster_block_exception";
+  private static final String INDEX_CLOSED = "index_closed_exception";
+
   private static final Logger LOG = LoggerFactory.getLogger(JsonRestEngine.class);
   private static final Duration DEFAULT_POLL = Duration.ofMillis(500);
   /** Transient failures tolerated in a row while polling a reindex task. */
@@ -423,7 +426,22 @@ public final class JsonRestEngine implements SearchEngine {
     Map<String, Object> response =
         object(require(perform("POST", path, Map.of(), Json.canonical(body), RawHttp.JSON)));
     Map<String, Object> hits = map(response.get("hits"));
-    Map<String, Object> total = map(hits.get("total"));
+    Object rawTotal = hits.get("total");
+    long total;
+    boolean totalExact;
+    if (rawTotal instanceof Map) {
+      Map<String, Object> totalObject = map(rawTotal);
+      total = number(totalObject.get("value"));
+      totalExact = !"gte".equals(totalObject.get("relation"));
+    } else if (rawTotal instanceof Number) {
+      // rest_total_hits_as_int=true
+      total = ((Number) rawTotal).longValue();
+      totalExact = true;
+    } else {
+      // track_total_hits: false leaves hits.total out
+      total = SearchResult.NO_TOTAL;
+      totalExact = false;
+    }
     List<Hit> parsed = new ArrayList<>();
     for (Map<String, Object> hit : list(hits.get("hits"))) {
       Object score = hit.get("_score");
@@ -435,8 +453,8 @@ public final class JsonRestEngine implements SearchEngine {
           hit.get("sort") instanceof List ? List.copyOf((List<?>) hit.get("sort")) : List.of()));
     }
     return new SearchResult(
-        number(total.get("value")),
-        !"gte".equals(total.get("relation")),
+        total,
+        totalExact,
         parsed,
         string(response.get("pit_id")),
         map(response.get("aggregations")),
@@ -614,11 +632,24 @@ public final class JsonRestEngine implements SearchEngine {
     } catch (IllegalArgumentException ignored) {
       // not a JSON error body; keep the raw text
     }
-    throw new EngineException(classify(response.status(), type), response.status(),
-        type.isEmpty() ? reason : type + ": " + reason);
+    Kind kind = classify(response.status(), type);
+    String message = type.isEmpty() ? reason : type + ": " + reason;
+    if (kind == Kind.BLOCKED) {
+      message += INDEX_CLOSED.equals(type)
+          ? " (the index is closed)"
+          : " (the index or cluster is write-blocked)";
+    }
+    throw new EngineException(kind, response.status(), message);
   }
 
   private static Kind classify(int status, String type) {
+    // A block answers 403 (index.blocks.write, read_only) or 429 (the read_only_allow_delete
+    // block of the flood-stage disk watermark) with cluster_block_exception; a closed index
+    // answers 400 with index_closed_exception. None of them is an authorization failure or goes
+    // away by retrying.
+    if (CLUSTER_BLOCK.equals(type) || INDEX_CLOSED.equals(type)) {
+      return Kind.BLOCKED;
+    }
     if (type.contains("already_exists")) {
       return Kind.ALREADY_EXISTS;
     }
