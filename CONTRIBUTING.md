@@ -37,7 +37,8 @@ programmatic overrides second; do not add field-name heuristics.
 ./gradlew test -PtestJavaVersion=21  # run the tests on JDK 21
 ./gradlew :elastic-protos-core:test --tests '*QueryCompilerSpec'
 
-# Unit tests on the protobuf-java 4.x runtime (core, adapters, testkit; compilation stays on 3.25)
+# Unit tests on the protobuf-java 4.x runtime (core, adapters, testkit; compilation stays on 3.25;
+# Micronaut is excluded to stay on the Micronaut-managed protobuf line)
 ./gradlew :elastic-protos-core:test :elastic-protos-elasticsearch:test :elastic-protos-opensearch:test \
   :elastic-protos-testkit:test -PprotobufRuntimeVersion=4.36.2
 
@@ -65,7 +66,8 @@ behaviour should pass locally on at least one image of each engine.
   major versions only.
 - Published modules must not export a platform: declare published dependencies with explicit
   catalog versions and keep BOMs on `compileOnly`, `annotationProcessor` or test configurations.
-  `./gradlew stageAll verifyPublishedMetadata` enforces this (CI runs it on every PR).
+  `./gradlew stageAll verifyPublishedMetadata` enforces this (CI runs it on every PR). The
+  Micronaut runtime is `compileOnly` in the Micronaut module; applications provide it.
 
 ## Quality gates
 

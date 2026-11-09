@@ -75,15 +75,20 @@ Checkstyle, JaCoCo and Javadoc.
 - `ci.yml` (push/PR to main, reusable via `workflow_call`): `static` (checkstyle main/test/integrationTest +
   javadoc), `unit` (`build` on JDK 17 and with `-PtestJavaVersion=21`), `unit-protobuf4` (unit tests of core,
   both adapters and testkit with `-PprotobufRuntimeVersion=<4.x>`, which forces protobuf-java/-util to that
-  version on their `testRuntimeClasspath` only; compilation stays on 3.25, Micronaut is excluded), `integration`
+  version on their `testRuntimeClasspath` only; compilation stays on 3.25; Micronaut is excluded to stay on the
+  Micronaut-managed protobuf line), `integration`
   (ES 8.19.23, ES 9.5.5, OpenSearch 2.19.7, OpenSearch 3.9.0, with `-PrequireDocker=true` so a missing Docker
   fails instead of skipping), `coverage` (jacoco report + gates), `stage` (`stageAll verifyPublishedMetadata`,
   uploads the staged repo). Keep the integration matrix in step with the verified tags in the adapter build files.
-- `stageAll` deletes `build/staging-deploy` first. `./gradlew stageAll verifyPublishedMetadata` (a separate
-  command, not part of `check`/`build`; CI's `stage` job runs it on every PR) fails when a staged `.module` has a `platform` dependency in `apiElements`/`runtimeElements`, a POM
-  imports a BOM other than our own, or a POM dependency has no version. Published modules therefore never use
-  `implementation`/`api platform(...)`: give exported dependencies explicit catalog versions (`jackson`,
-  `micronaut-core`, which must equal the micronaut-core version that `micronaut-platform` manages).
+- `stageAll` deletes `build/staging-deploy` first. `./gradlew stageAll verifyPublishedMetadata` is a separate
+  command, not part of `check`/`build`; the CI `stage` job, `snapshot.yml` and `release.yml` run it. It fails
+  when a staged `.module` has a `platform`/`enforced-platform` dependency in `apiElements`/`runtimeElements`, a
+  POM imports a BOM other than our own, a POM dependency has no version, or the number of `.module`/`.pom` files
+  differs from the published module count. Published modules never use `implementation`/`api platform(...)`:
+  exported dependencies get explicit catalog versions (`jackson`), and the Micronaut runtime is `compileOnly`
+  (the application provides it), so the Micronaut module exports only slf4j and elastic-protos-core.
+- `-PprotobufRuntimeVersion` also passes `elasticprotos.protobufRuntime` to `test`; core's `ProtobufRuntimeSpec`
+  then asserts the loaded `com.google.protobuf.RuntimeVersion` has that major version (skipped otherwise).
 - Every published jar carries `Automatic-Module-Name: com.phatjam98.elasticprotos.<module>` (library-conventions).
   `util`, `engine.rest` and `query.NestedPathResolver` are internal (not public API, may change in minors).
 - `snapshot.yml` (push to main): reuses ci.yml, then `stageAll` + `jreleaserDeploy` when the version is a SNAPSHOT.

@@ -83,9 +83,10 @@ unchanged and be compiled on the server against the index definition.
 - Minimum runtime: Java 17 and protobuf-java 3.25; the protobuf-java 4.x runtime is verified in CI.
 - Each published jar declares an `Automatic-Module-Name` (`com.phatjam98.elasticprotos.core`,
   `.elasticsearch`, `.opensearch`, `.micronaut`) for the module path.
-- The modules declare no platform dependency of their own: they depend on explicit versions of
-  Jackson and Micronaut and do not export the Jackson BOM or the Micronaut platform, so your build
-  keeps control of those versions.
+- The modules declare no platform dependency of their own. The core declares `jackson-databind`
+  with an explicit version; Jackson's own metadata then aligns the Jackson modules on your
+  classpath to at least that version. The Micronaut module publishes no Micronaut dependency
+  (see [Micronaut](#micronaut)).
 
 ## Installation
 
@@ -857,9 +858,10 @@ A default in a `${VAR:default}` placeholder that contains a colon, such as a URL
 in backticks, because Micronaut splits the placeholder at colons:
 ``hosts: ${ELASTIC_PROTOS_HOSTS:`http://localhost:9200`}``.
 
-The module depends on `micronaut-inject` and `micronaut-context` but does not export the
-Micronaut platform BOM, so the application manages the Micronaut version (the Micronaut Gradle
-plugin, or `platform('io.micronaut.platform:micronaut-platform:4.x')`, does this).
+The module requires a Micronaut 4 application, which supplies the Micronaut runtime and its
+versions (through the Micronaut Gradle plugin or
+`platform('io.micronaut.platform:micronaut-platform:4.x')`); the module itself publishes no
+Micronaut dependency. It is tested against Micronaut platform 4.10.x.
 
 A complete, runnable application with REST endpoints is in
 [`examples/micronaut-sample`](examples/micronaut-sample).
@@ -909,7 +911,11 @@ class MyEngineFactory {
 
 `ElasticProtosBootstrap` loads the classes in `elastic-protos.bootstrap.classes`, logs the plan
 report at INFO and applies it. With `fail-on-error` (default) a failed or blocked index throws
-`ElasticProtosBootstrap.BootstrapException` and aborts startup. An empty class list skips the
+`ElasticProtosBootstrap.BootstrapException` and aborts startup, and so does an exception from
+planning or applying (for example an unreachable cluster or rejected credentials). With
+`fail-on-error: false` every such error is logged at WARN and skipped, including deterministic ones
+such as a `MappingException` from invalid proto options: the application starts without the index
+and writes to it fail later. Keep the default `true` in deployments. An empty class list skips the
 bootstrap; `enabled: false` removes the listener.
 
 The bootstrap is enabled by default and runs in every instance that starts. **Concurrent bootstrap
