@@ -1,6 +1,7 @@
 package com.phatjam98.elasticprotos.migration;
 
 import com.phatjam98.elasticprotos.migration.MappingDiff.Change;
+import com.phatjam98.elasticprotos.util.Json;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -73,12 +74,13 @@ public final class DiffClassifier {
       "routing.allocation.enable", "routing.rebalance.enable",
       "routing.allocation.total_shards_per_node", "mapping.total_fields.limit",
       "mapping.depth.limit", "mapping.nested_fields.limit", "mapping.nested_objects.limit",
-      "mapping.field_name_length.limit", "translog.durability", "translog.flush_threshold_size");
+      "mapping.field_name_length.limit", "translog.durability", "translog.flush_threshold_size",
+      "soft_deletes.retention_lease.period");
 
   /** Prefixes of dynamic index settings. */
   public static final List<String> DYNAMIC_SETTING_PREFIXES = List.of(
       "routing.allocation.include.", "routing.allocation.exclude.",
-      "routing.allocation.require.", "search.slowlog.", "indexing.slowlog.");
+      "routing.allocation.require.", "search.slowlog.", "indexing.slowlog.", "merge.");
 
   /**
    * Index settings the engine or the migrator manages, never applied from the proto; {@code
@@ -177,7 +179,22 @@ public final class DiffClassifier {
    */
   public static List<String> settingsWarnings(
       Map<String, Object> existingSettings, Map<String, Object> desiredSettings) {
-    SettingsDiff diff = settingsDiff(existingSettings, desiredSettings, Set.of());
+    return settingsWarnings(existingSettings, desiredSettings, Set.of());
+  }
+
+  /**
+   * Describes the settings that a migration does not apply in place, treating more keys as
+   * dynamic.
+   *
+   * @param existingSettings the index's settings as the engine returns them
+   * @param desiredSettings the settings the proto produces
+   * @param extraDynamicSettings setting keys (without {@code index.}; ending in {@code .} for a
+   *     prefix) to treat as dynamic
+   * @return one warning per kind
+   */
+  public static List<String> settingsWarnings(Map<String, Object> existingSettings,
+      Map<String, Object> desiredSettings, Set<String> extraDynamicSettings) {
+    SettingsDiff diff = settingsDiff(existingSettings, desiredSettings, extraDynamicSettings);
     List<String> warnings = new ArrayList<>(managedWarnings(diff));
     if (!diff.staticChanges().isEmpty()) {
       warnings.add(staticWarning(diff));
@@ -187,8 +204,17 @@ public final class DiffClassifier {
 
   /** Returns the warning for keys the engine or the migrator manages, or none. */
   static List<String> managedWarnings(SettingsDiff diff) {
-    return diff.ignored().isEmpty() ? List.of() : List.of("settings managed by the engine or the"
-        + " migrator are never applied: " + diff.ignored());
+    List<String> warnings = new ArrayList<>();
+    List<String> managed = new ArrayList<>(diff.ignored());
+    if (managed.remove("number_of_replicas")) {
+      warnings.add("number_of_replicas is managed by auto_expand_replicas on the index; not"
+          + " applied");
+    }
+    if (!managed.isEmpty()) {
+      warnings.add("settings managed by the engine or the migrator are never applied: "
+          + managed);
+    }
+    return warnings;
   }
 
   /** Returns the warning for static settings that differ. */
@@ -208,22 +234,23 @@ public final class DiffClassifier {
       Map<String, Object> desiredSettings, Set<String> extraDynamicSettings) {
     Map<String, Object> existing = flattenSettings(existingSettings);
     Map<String, Object> desired = flattenSettings(desiredSettings);
-    Object autoExpand = desired.get("auto_expand_replicas");
-    boolean expands = autoExpand != null && !"false".equals(String.valueOf(autoExpand));
+    boolean expands = expands(desired.get("auto_expand_replicas"));
+    boolean existingExpands = !desired.containsKey("auto_expand_replicas")
+        && expands(existing.get("auto_expand_replicas"));
     List<Change> dynamicChanges = new ArrayList<>();
     List<Change> staticChanges = new ArrayList<>();
     List<String> ignored = new ArrayList<>();
     for (Map.Entry<String, Object> entry : desired.entrySet()) {
       String key = entry.getKey();
-      if (isManagedSetting(key)) {
-        ignored.add(key);
-        continue;
-      }
       if (expands && "number_of_replicas".equals(key)) {
         continue;
       }
       Object before = existing.get(key);
       if (Objects.equals(normalizeValue(entry.getValue()), normalizeValue(before))) {
+        continue;
+      }
+      if (isManagedSetting(key) || existingExpands && "number_of_replicas".equals(key)) {
+        ignored.add(key);
         continue;
       }
       Change change = new Change(key, before, entry.getValue());
@@ -242,7 +269,14 @@ public final class DiffClassifier {
         || key.startsWith("version.");
   }
 
-  /** Returns whether a setting key (without {@code index.}) can be updated on a live index. */
+  private static boolean expands(Object autoExpand) {
+    return autoExpand != null && !"false".equals(String.valueOf(autoExpand));
+  }
+
+  /**
+   * Returns whether a setting key (without {@code index.}) can be updated on a live index. Extra
+   * keys ending in {@code .} are prefixes.
+   */
   public static boolean isDynamicSetting(String key, Set<String> extraDynamicSettings) {
     if (DYNAMIC_SETTINGS.contains(key) || extraDynamicSettings.contains(key)) {
       return true;
@@ -252,7 +286,33 @@ public final class DiffClassifier {
         return true;
       }
     }
+    for (String extra : extraDynamicSettings) {
+      if (extra.endsWith(".") && key.startsWith(extra)) {
+        return true;
+      }
+    }
     return false;
+  }
+
+  /**
+   * Returns a digest of the static settings among the declared ones: the first 8 hex digits of
+   * the SHA-256 of their canonical flattened key/value map. Recorded at creation in {@code
+   * _meta.elastic_protos.static_settings}, it lets planning tell whether the declared static
+   * settings changed without comparing them with the engine's spelling of the values.
+   *
+   * @param desiredSettings the settings the proto produces
+   * @param extraDynamicSettings setting keys to treat as dynamic
+   * @return the digest
+   */
+  public static String staticSettingsDigest(Map<String, Object> desiredSettings,
+      Set<String> extraDynamicSettings) {
+    Map<String, Object> statics = new TreeMap<>();
+    flattenSettings(desiredSettings).forEach((key, value) -> {
+      if (!isManagedSetting(key) && !isDynamicSetting(key, extraDynamicSettings)) {
+        statics.put(key, normalizeValue(value));
+      }
+    });
+    return Json.sha256Hex(statics).substring(0, 8);
   }
 
   /**

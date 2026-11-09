@@ -127,6 +127,8 @@ public final class IndexMigrator {
   static final String STAGING_SUFFIX = "-reconcile";
 
   private static final String PENDING = "pending";
+  /** The {@code _meta.elastic_protos} key of the digest of the declared static settings. */
+  static final String STATIC_DIGEST = "static_settings";
   private static final String ACTION_REINDEX = "reindex";
   private static final String ACTION_BACKFILL = "backfill";
   private static final String ACTION_ROLLBACK = "rollback";
@@ -256,8 +258,9 @@ public final class IndexMigrator {
         return blocked(target, null, null,
             "a concrete index named like the alias exists: " + alias);
       }
-      return new IndexPlan(target, Action.CREATE, null, null, MappingDiff.empty(),
-          "alias " + alias + " does not exist", List.of());
+      return new IndexPlan(withStaticDigest(target, DiffClassifier.staticSettingsDigest(
+          target.settings(), options.extraDynamicSettings())), Action.CREATE, null, null,
+          MappingDiff.empty(), "alias " + alias + " does not exist", List.of());
     }
     if (holders.size() > 1) {
       return blocked(target, null, null,
@@ -285,7 +288,8 @@ public final class IndexMigrator {
           plan.resume());
     }
     if (ACTION_BACKFILL.equals(pending.get("action")) && (plan.action() == Action.NO_OP
-        || plan.action() == Action.PUT_MAPPING || plan.action() == Action.BACKFILL)) {
+        || plan.action() == Action.UPDATE_SETTINGS || plan.action() == Action.PUT_MAPPING
+        || plan.action() == Action.BACKFILL)) {
       plan = new IndexPlan(plan.target(), Action.BACKFILL, current, plan.currentHash(),
           plan.diff(), "resuming the interrupted backfill of " + current, plan.warnings());
     }
@@ -315,18 +319,65 @@ public final class IndexMigrator {
             + " (phase " + resume.phase() + ")", warnings, false, resume);
   }
 
+  /**
+   * Plans an item whose alias points at {@code current}, then adds the static-settings warning
+   * unless the item reindexes (which creates the new index with every setting), and records in the
+   * target's {@code _meta} the static settings digest the index will carry: the current index's
+   * for in-place actions, the declared one for a reindex.
+   */
   private IndexPlan planExisting(IndexDefinition target, String current,
+      Map<String, Object> mappings, Map<String, Object> settings) {
+    IndexPlan plan = planExistingRaw(target, current, mappings, settings);
+    SettingsDiff settingsDiff = plan.diff().settings();
+    List<String> warnings = new ArrayList<>(plan.warnings());
+    if (!settingsDiff.staticChanges().isEmpty() && plan.action() != Action.REINDEX) {
+      warnings.add(DiffClassifier.staticWarning(settingsDiff));
+    }
+    String digest = plan.action() == Action.REINDEX
+        ? DiffClassifier.staticSettingsDigest(target.settings(), options.extraDynamicSettings())
+        : string(map(map(mappings.get("_meta")).get(ProtoMapper.META_KEY)).get(STATIC_DIGEST));
+    return new IndexPlan(withStaticDigest(plan.target(), digest), plan.action(),
+        plan.currentIndex(), plan.currentHash(), plan.diff(), plan.reason(), warnings,
+        plan.writeBlocked(), plan.resume());
+  }
+
+  /** Returns the target with {@code _meta.elastic_protos.static_settings}, or as it is. */
+  private static IndexDefinition withStaticDigest(IndexDefinition target, String digest) {
+    if (digest == null) {
+      return target;
+    }
+    Map<String, Object> meta = new TreeMap<>(map(target.mappings().get("_meta")));
+    Map<String, Object> ours = new TreeMap<>(map(meta.get(ProtoMapper.META_KEY)));
+    ours.put(STATIC_DIGEST, digest);
+    meta.put(ProtoMapper.META_KEY, ours);
+    Map<String, Object> mappings = new TreeMap<>(target.mappings());
+    mappings.put("_meta", meta);
+    return new IndexDefinition(target.descriptor(), target.alias(), target.name(),
+        target.contentHash(), target.settings(), mappings, target.fields(), target.nestedPaths(),
+        target.fullTextFields(), target.ignoredPaths(), target.idField(), target.warnings());
+  }
+
+  private IndexPlan planExistingRaw(IndexDefinition target, String current,
       Map<String, Object> mappings, Map<String, Object> settings) {
     final String currentHash = recordedHash(mappings);
     MappingDiff diff = DiffClassifier.diff(mappings, target.mappings(), settings,
         target.settings(), options.extraDynamicSettings());
+    Object recorded = map(map(mappings.get("_meta")).get(ProtoMapper.META_KEY))
+        .get(STATIC_DIGEST);
+    if (recorded != null && recorded.toString().equals(DiffClassifier.staticSettingsDigest(
+        target.settings(), options.extraDynamicSettings()))) {
+      // the declared static settings are those the index was created with, however the engine
+      // spells them back
+      SettingsDiff withoutStatic = new SettingsDiff(diff.settings().dynamicChanges(), List.of(),
+          diff.settings().ignored());
+      diff = new MappingDiff(diff.added(), diff.removed(), diff.typeChanged(),
+          diff.paramChanged(), !withoutStatic.isEmpty(), diff.unindexedAdditions(),
+          withoutStatic);
+    }
     SettingsDiff settingsDiff = diff.settings();
     List<String> warnings = new ArrayList<>(DiffClassifier.managedWarnings(settingsDiff));
     boolean staticReindex = !settingsDiff.staticChanges().isEmpty()
         && options.staticSettings() == StaticSettingsPolicy.REINDEX;
-    if (!settingsDiff.staticChanges().isEmpty() && !staticReindex) {
-      warnings.add(DiffClassifier.staticWarning(settingsDiff));
-    }
     final String staticReason = "static settings changed: "
         + SettingsDiff.describe(settingsDiff.staticChanges());
     String dynamicReason = SettingsDiff.describe(settingsDiff.dynamicChanges());
@@ -391,7 +442,9 @@ public final class IndexMigrator {
         }
         if (!options.allowReindex()) {
           return new IndexPlan(target, Action.BLOCKED, current, currentHash, diff,
-              "breaking change needs a reindex but allowReindex is false: " + breaking,
+              "breaking change needs a reindex but allowReindex is false: " + breaking
+                  + (dynamicReason.isEmpty() ? ""
+                      : "; dynamic settings not applied either: " + dynamicReason),
               warnings);
         }
         List<String> skipped = new ArrayList<>();
@@ -947,8 +1000,11 @@ public final class IndexMigrator {
 
   private Map<String, Object> creationSettings(IndexDefinition target) {
     Map<String, Object> settings = new TreeMap<>(target.settings());
-    settings.putIfAbsent("number_of_shards", options.defaultShards());
-    if (!settings.containsKey("number_of_replicas")) {
+    Map<String, Object> declared = DiffClassifier.flattenSettings(target.settings());
+    if (!declared.containsKey("number_of_shards")) {
+      settings.put("number_of_shards", options.defaultShards());
+    }
+    if (!declared.containsKey("number_of_replicas")) {
       settings.put("number_of_replicas", replicasFor(options.replicas()));
     }
     return settings;
@@ -1556,6 +1612,17 @@ public final class IndexMigrator {
     }
     LOG.info("{}: creating {} for the reindex from {}", alias, next, current);
     engine.createIndex(next, creationSettings(target), target.mappings(), Set.of());
+    if (options.staticSettings() == StaticSettingsPolicy.REINDEX) {
+      List<Change> spelled = DiffClassifier.settingsDiff(engine.getSettings(next),
+          target.settings(), options.extraDynamicSettings()).staticChanges();
+      if (!spelled.isEmpty()) {
+        Change first = spelled.get(0);
+        engine.deleteIndex(next);
+        throw new MigrationException("engine reports " + first.before() + " for "
+            + first.path() + "; declare it that way (declared: " + first.after() + "), or the"
+            + " static settings would differ again on the next plan");
+      }
+    }
     return true;
   }
 

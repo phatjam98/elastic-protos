@@ -67,8 +67,9 @@ import java.util.TreeSet;
  *   <li>{@code staticSettings}: what to do when static index settings the proto declares differ
  *       ({@code number_of_shards}, {@code analysis.*}, ...); default {@link
  *       StaticSettingsPolicy#WARN}. Dynamic settings are always applied in place
- *   <li>{@code extraDynamicSettings}: setting keys (without {@code index.}) to treat as dynamic in
- *       addition to {@link DiffClassifier#DYNAMIC_SETTINGS}; default none
+ *   <li>{@code extraDynamicSettings}: setting keys to treat as dynamic in addition to {@link
+ *       DiffClassifier#DYNAMIC_SETTINGS}; a leading {@code index.} is stripped and an entry ending
+ *       in {@code .} is a prefix; default none
  * </ul>
  *
  * <p>Null settings throw {@link NullPointerException}; a shard count below 1 or a timeout that is
@@ -146,7 +147,11 @@ public final class MigrationOptions {
     this.lockWait = builder.lockWait;
     this.lockTtl = builder.lockTtl;
     this.staticSettings = builder.staticSettings;
-    this.extraDynamicSettings = Set.copyOf(new TreeSet<>(builder.extraDynamicSettings));
+    Set<String> extra = new TreeSet<>();
+    for (String key : builder.extraDynamicSettings) {
+      extra.add(key.startsWith("index.") ? key.substring("index.".length()) : key);
+    }
+    this.extraDynamicSettings = Set.copyOf(extra);
   }
 
   /**
