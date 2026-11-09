@@ -79,9 +79,11 @@ Checkstyle, JaCoCo and Javadoc.
 - `snapshot.yml` (push to main): reuses ci.yml, then `stageAll` + `jreleaserDeploy` when the version is a SNAPSHOT.
 - `release.yml` (tag `v*`, or manual dispatch with `version` and `dryrun`, default dry run): tag must match
   `vX.Y.Z` or `vX.Y.Z-rc.N` and be on `origin/main`; runs `build` and `jreleaserFullRelease` with `-Pversion`.
+  Dispatch also takes `release_only`: recovery when Central succeeded but the GitHub release failed; it checks
+  out the tagged commit and runs `jreleaserRelease` (never redeploys; needs the existing tag, not with dryrun).
 - `codeql.yml` (Java, manual build) and `dependabot.yml` (`build(deps)` / `ci(deps)` prefixes, which the
   changelog excludes along with `chore`, `docs`, `test` and merge commits).
-- Required secrets: `JRELEASER_GITHUB_TOKEN`, `JRELEASER_MAVENCENTRAL_USERNAME`, `JRELEASER_MAVENCENTRAL_PASSWORD`,
+- The GitHub release uses the automatic `GITHUB_TOKEN` (no PAT secret). Required secrets: `JRELEASER_MAVENCENTRAL_USERNAME`, `JRELEASER_MAVENCENTRAL_PASSWORD`,
   `JRELEASER_NEXUS2_USERNAME`, `JRELEASER_NEXUS2_PASSWORD` (Central Portal token for both), `JRELEASER_GPG_PUBLIC_KEY`,
   `JRELEASER_GPG_SECRET_KEY`, `JRELEASER_GPG_PASSPHRASE`.
 
