@@ -4,6 +4,8 @@ import com.phatjam98.elasticprotos.engine.EngineException
 import com.phatjam98.elasticprotos.engine.rest.JsonRestEngine
 import org.elasticsearch.client.RestClient
 import org.apache.http.HttpHost
+import com.sun.net.httpserver.HttpServer
+import java.nio.charset.StandardCharsets
 import spock.lang.Specification
 
 class ElasticsearchEngineSpec extends Specification {
@@ -22,6 +24,56 @@ class ElasticsearchEngineSpec extends Specification {
 
     cleanup:
     engine?.close()
+  }
+
+  def "a custom SSL context and trust-all certificates are mutually exclusive"() {
+    when:
+    ElasticsearchEngine.builder().hosts('https://localhost:19200')
+        .sslContext(javax.net.ssl.SSLContext.getDefault())
+        .insecureTrustAllCertificates(true)
+        .build()
+
+    then:
+    def e = thrown(IllegalStateException)
+    e.message.contains('mutually exclusive')
+  }
+
+  def "a custom SSL context with trust-all switched off is accepted"() {
+    when:
+    def engine = ElasticsearchEngine.builder().hosts('https://localhost:19200')
+        .sslContext(javax.net.ssl.SSLContext.getDefault())
+        .insecureTrustAllCertificates(false)
+        .build()
+
+    then:
+    engine != null
+
+    cleanup:
+    engine?.close()
+  }
+
+  def "response bodies without a declared charset are read as UTF-8"() {
+    given:
+    def server = HttpServer.create(new InetSocketAddress('localhost', 0), 0)
+    server.createContext('/') { exchange ->
+      byte[] bytes = 'caf\u00e9 \u2713'.getBytes(StandardCharsets.UTF_8)
+      exchange.responseHeaders.add('Content-Type', 'text/plain')
+      exchange.sendResponseHeaders(200, bytes.length)
+      exchange.responseBody.withCloseable { it.write(bytes) }
+    }
+    server.start()
+    def http = new RestClientHttp(RestClient.builder(new HttpHost('localhost', server.address.port)).build())
+
+    when:
+    def response = http.perform('GET', '/', [:], null, null)
+
+    then:
+    response.status() == 200
+    response.body() == 'caf\u00e9 \u2713'
+
+    cleanup:
+    http?.close()
+    server?.stop(0)
   }
 
   def "a custom SSL context is accepted"() {
