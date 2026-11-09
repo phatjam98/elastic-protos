@@ -99,7 +99,7 @@ jobs:
   # The README promises that the 3.25 generated code loads on the protobuf-java 4.x runtime. This
   # runs the Docker-free unit tests of core, both adapters and the testkit with protobuf-java and
   # protobuf-java-util forced to 4.x on their test runtime classpath (compilation stays on 3.25).
-  # The Micronaut module is left out: the Micronaut 4 platform pins it to 3.25.
+  # The Micronaut module is excluded to stay on the Micronaut-managed protobuf line.
   unit-protobuf4:
     name: unit tests (protobuf-java ${{ matrix.protobuf }})
     needs: static

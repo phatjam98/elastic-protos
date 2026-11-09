@@ -88,11 +88,15 @@ testing {
 
 // -PprotobufRuntimeVersion=4.x.y runs the unit tests against another protobuf-java runtime while
 // compiling against (and generating code with) the catalog's 3.25 line, to prove that 3.25 gencode
-// loads on 4.x. Only the test runtime classpath changes. The Micronaut module is left alone: the
-// Micronaut 4 platform pins its consumers to protobuf 3.25.
+// loads on 4.x. Only the test runtime classpath changes. The Micronaut module is excluded to stay
+// on the Micronaut-managed protobuf line. The `test` task gets the version as the system property
+// elasticprotos.protobufRuntime, which ProtobufRuntimeSpec (core) checks against the loaded runtime.
 def protobufRuntimeVersion = providers.gradleProperty('protobufRuntimeVersion')
 if (protobufRuntimeVersion.isPresent() && project.name != 'elastic-protos-micronaut') {
     def runtimeVersion = protobufRuntimeVersion.get()
+    tasks.named('test', Test) {
+        systemProperty 'elasticprotos.protobufRuntime', runtimeVersion
+    }
     configurations.named('testRuntimeClasspath') {
         resolutionStrategy.eachDependency { details ->
             if (details.requested.group == 'com.google.protobuf'
