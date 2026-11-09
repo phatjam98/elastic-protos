@@ -96,6 +96,53 @@ jobs:
           path: '**/build/reports/jacoco/**'
           if-no-files-found: ignore
 
+  # The README promises that the 3.25 generated code loads on the protobuf-java 4.x runtime. This
+  # runs the Docker-free unit tests of core, both adapters and the testkit with protobuf-java and
+  # protobuf-java-util forced to 4.x on their test runtime classpath (compilation stays on 3.25).
+  # The Micronaut module is excluded to stay on the Micronaut-managed protobuf line.
+  unit-protobuf4:
+    name: unit tests (protobuf-java ${{ matrix.protobuf }})
+    needs: static
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Newest 4.x protobuf-java release on Maven Central when this job was added.
+        protobuf: [ '4.36.2' ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: Unit tests on the protobuf 4.x runtime
+        run: >-
+          ./gradlew
+          :elastic-protos-core:test
+          :elastic-protos-elasticsearch:test
+          :elastic-protos-opensearch:test
+          :elastic-protos-testkit:test
+          -PprotobufRuntimeVersion=${{ matrix.protobuf }}
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-test-results-protobuf-${{ matrix.protobuf }}
+          path: |
+            **/build/test-results/test/
+            **/build/reports/tests/test/
+          if-no-files-found: ignore
+
   integration:
     name: integration (${{ matrix.engine }} ${{ matrix.image }})
     needs: static
@@ -134,8 +181,12 @@ jobs:
       - name: Raise vm.max_map_count for the search engine container
         run: sudo sysctl -w vm.max_map_count=262144
 
+      # -PrequireDocker=true: fail instead of skipping when Docker is missing, so the job never passes vacuously.
       - name: Integration tests
-        run: ./gradlew :elastic-protos-${{ matrix.engine }}:integrationTest -PengineImage=${{ matrix.image }}
+        run: >-
+          ./gradlew :elastic-protos-${{ matrix.engine }}:integrationTest
+          -PengineImage=${{ matrix.image }}
+          -PrequireDocker=true
 
       - name: Upload test results
         if: failure()
@@ -196,9 +247,10 @@ jobs:
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      # Proves every published module stages (jar, sources, javadoc, pom, module) without secrets.
+      # Proves every published module stages (jar, sources, javadoc, pom, module) without secrets, and
+      # that no staged .module or POM exports a platform/BOM to consumers.
       - name: Stage all modules
-        run: ./gradlew stageAll
+        run: ./gradlew stageAll verifyPublishedMetadata
 
       - name: List staged files
         run: find build/staging-deploy -type f | sort

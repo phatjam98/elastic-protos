@@ -18,10 +18,77 @@ def publishedModules = [
         'elastic-protos-bom',
 ]
 
-tasks.register('stageAll') {
+def stagingDir = layout.buildDirectory.dir('staging-deploy')
+
+// stageAll starts from an empty directory so artifacts staged for an earlier version never ride
+// along into a release. The publish convention orders every staging publish after this task.
+def cleanStagingDeploy = tasks.register('cleanStagingDeploy', Delete) {
     group = 'publishing'
-    description = 'Publishes every module to the shared build/staging-deploy directory for JReleaser.'
+    description = 'Deletes build/staging-deploy.'
+    delete stagingDir
+}
+
+def stageAll = tasks.register('stageAll') {
+    group = 'publishing'
+    description = 'Cleans build/staging-deploy, then publishes every module into it for JReleaser.'
+    dependsOn cleanStagingDeploy
     dependsOn publishedModules.collect { ":${it}:publishAllPublicationsToStagingRepository" }
+}
+
+// Consumers must not inherit a platform (BOM) from us: a platform dependency in apiElements or
+// runtimeElements of the Gradle module metadata, or an import-scoped BOM in a POM, forces its
+// versions onto every consumer's classpath. Only our own BOM may be imported. Deliberately not
+// part of `check`, so `build` has no staging side effects; CI's stage job runs
+// `stageAll verifyPublishedMetadata` on every PR.
+def verifyPublishedMetadata = tasks.register('verifyPublishedMetadata') {
+    group = 'verification'
+    description = 'Fails when a staged .module exports a platform or a staged POM imports a foreign BOM.'
+    dependsOn stageAll
+    def dir = stagingDir
+    def expected = publishedModules.size()
+    doLast {
+        def root = dir.get().asFile
+        def problems = []
+        def modules = 0
+        def poms = 0
+        root.eachFileRecurse(groovy.io.FileType.FILES) { file ->
+            def rel = root.toPath().relativize(file.toPath()).toString()
+            if (file.name.endsWith('.module')) {
+                modules++
+                def json = new groovy.json.JsonSlurper().parse(file)
+                json.variants.findAll { it.name in ['apiElements', 'runtimeElements'] }.each { variant ->
+                    variant.dependencies?.each { dep ->
+                        if (dep.attributes?.get('org.gradle.category') in ['platform', 'enforced-platform']) {
+                            problems << "${rel}: ${variant.name} exports platform ${dep.group}:${dep.module}"
+                        }
+                    }
+                }
+            } else if (file.name.endsWith('.pom')) {
+                poms++
+                def pom = new groovy.xml.XmlSlurper().parse(file)
+                pom.dependencyManagement.dependencies.dependency.each { dep ->
+                    if (dep.scope.text() == 'import'
+                            && !(dep.groupId.text() == 'com.phatjam98' && dep.artifactId.text() == 'elastic-protos-bom')) {
+                        problems << "${rel}: imports BOM ${dep.groupId.text()}:${dep.artifactId.text()}"
+                    }
+                }
+                pom.dependencies.dependency.each { dep ->
+                    if (dep.version.text().trim().isEmpty()) {
+                        problems << "${rel}: dependency ${dep.groupId.text()}:${dep.artifactId.text()} has no version"
+                    }
+                }
+            }
+        }
+        if (modules != expected || poms != expected) {
+            throw new GradleException("verifyPublishedMetadata: expected ${expected} .module and .pom files "
+                    + "(one per published module) in ${root}, found ${modules} and ${poms}")
+        }
+        if (!problems.isEmpty()) {
+            throw new GradleException('Published metadata exports dependency management to consumers:\n  '
+                    + problems.join('\n  '))
+        }
+        logger.lifecycle("verifyPublishedMetadata: ${modules} .module and ${poms} .pom files export no platform or foreign BOM")
+    }
 }
 
 tasks.named('jreleaserFullRelease') {

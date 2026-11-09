@@ -77,7 +77,7 @@ jobs:
           passphrase: ${{ secrets.JRELEASER_GPG_PASSPHRASE }}
 
       - name: Stage all modules
-        run: ./gradlew stageAll
+        run: ./gradlew stageAll verifyPublishedMetadata
 
       # Deploy only: snapshots go to the Central snapshots repository and never create a GitHub release.
       - name: Deploy snapshot with JReleaser

@@ -16,6 +16,7 @@ talk to each engine through its official low-level REST client.
 - [Why](#why)
 - [Features](#features)
 - [Requirements](#requirements)
+- [Versioning and compatibility](#versioning-and-compatibility)
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Mapping](#mapping)
@@ -65,10 +66,27 @@ unchanged and be compiled on the server against the index definition.
 ## Requirements
 
 - Java 17 or newer (the library is compiled for 17 and tested on 17 and 21).
-- protobuf-java 3.25 or newer at runtime (4.x works); the library's generated code is built with
-  protoc 3.25.
+- protobuf-java 3.25 or newer at runtime; the library's generated code is built with protoc 3.25,
+  and CI runs the unit tests on the protobuf-java 4.x runtime as well.
 - Elasticsearch 8.x or 9.x, or OpenSearch 2.x or 3.x (see [Engines](#engines)).
 - Micronaut 4 for the optional Micronaut module.
+
+## Versioning and compatibility
+
+- elastic-protos follows [semantic versioning](https://semver.org). All modules are released
+  together under one version (lockstep); use the BOM to keep them aligned.
+- The public API is every public type outside the packages marked internal. The internal packages,
+  `com.phatjam98.elasticprotos.util` and `com.phatjam98.elasticprotos.engine.rest`, and the class
+  `query.NestedPathResolver` may change in any minor release.
+- A change to the default mapping rules changes the content hash of the affected indices, so every
+  consumer gets a REINDEX on upgrade. Such changes are made in major versions only.
+- Minimum runtime: Java 17 and protobuf-java 3.25; the protobuf-java 4.x runtime is verified in CI.
+- Each published jar declares an `Automatic-Module-Name` (`com.phatjam98.elasticprotos.core`,
+  `.elasticsearch`, `.opensearch`, `.micronaut`) for the module path.
+- The modules declare no platform dependency of their own. The core declares `jackson-databind`
+  with an explicit version; Jackson's own metadata then aligns the Jackson modules on your
+  classpath to at least that version. The Micronaut module publishes no Micronaut dependency
+  (see [Micronaut](#micronaut)).
 
 ## Installation
 
@@ -840,6 +858,11 @@ A default in a `${VAR:default}` placeholder that contains a colon, such as a URL
 in backticks, because Micronaut splits the placeholder at colons:
 ``hosts: ${ELASTIC_PROTOS_HOSTS:`http://localhost:9200`}``.
 
+The module requires a Micronaut 4 application, which supplies the Micronaut runtime and its
+versions (through the Micronaut Gradle plugin or
+`platform('io.micronaut.platform:micronaut-platform:4.x')`); the module itself publishes no
+Micronaut dependency. It is tested against Micronaut platform 4.10.x.
+
 A complete, runnable application with REST endpoints is in
 [`examples/micronaut-sample`](examples/micronaut-sample).
 
@@ -888,7 +911,11 @@ class MyEngineFactory {
 
 `ElasticProtosBootstrap` loads the classes in `elastic-protos.bootstrap.classes`, logs the plan
 report at INFO and applies it. With `fail-on-error` (default) a failed or blocked index throws
-`ElasticProtosBootstrap.BootstrapException` and aborts startup. An empty class list skips the
+`ElasticProtosBootstrap.BootstrapException` and aborts startup, and so does an exception from
+planning or applying (for example an unreachable cluster or rejected credentials). With
+`fail-on-error: false` every such error is logged at WARN and skipped, including deterministic ones
+such as a `MappingException` from invalid proto options: the application starts without the index
+and writes to it fail later. Keep the default `true` in deployments. An empty class list skips the
 bootstrap; `enabled: false` removes the listener.
 
 The bootstrap is enabled by default and runs in every instance that starts. **Concurrent bootstrap
@@ -1016,7 +1043,8 @@ before 3.3); `pager(...)` always adapts.
 ./gradlew publishToMavenLocal
 ```
 
-JDK 17 is the toolchain (`.sdkmanrc`); integration tests need Docker. See
+JDK 17 is the toolchain (`.sdkmanrc`); integration tests need Docker and are skipped without it
+unless `-PrequireDocker=true` is passed. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow and [RELEASING.md](RELEASING.md) for
 releases.
 

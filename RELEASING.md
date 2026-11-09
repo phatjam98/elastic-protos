@@ -72,14 +72,16 @@ A dry run stages, signs and validates (including pomchecker and the key checks) 
 and creates no tag or release. Pass the version you intend to release:
 
 ```bash
-rm -rf build/staging-deploy          # JReleaser deploys everything it finds here
 ./gradlew build
 ./gradlew stageAll -Pversion=1.0.0-rc.1
 ./gradlew jreleaserFullRelease --dryrun -Pversion=1.0.0-rc.1
 ```
 
-`jreleaserFullRelease` depends on `stageAll`, so the separate `stageAll` step is only there to
-inspect the output first:
+`stageAll` deletes `build/staging-deploy` before publishing into it, so JReleaser, which deploys
+everything it finds there, never picks up artifacts staged for an earlier version. `./gradlew stageAll verifyPublishedMetadata`
+(a separate command that CI's stage job runs; `build` does not stage) fails when a staged `.module`
+exports a platform or a POM imports a foreign BOM. `jreleaserFullRelease` depends on `stageAll`, so the
+separate `stageAll` step is only there to inspect the output first:
 
 ```bash
 find build/staging-deploy -type f | sort
@@ -205,8 +207,9 @@ JReleaser polls for up to two hours (`maxRetries: 120`, `retryDelay: 60`).
 **Snapshot deploy returns 401 or 403.** Check the `JRELEASER_NEXUS2_*` token and that SNAPSHOTs are
 enabled for the namespace in the Central Portal.
 
-**Stale or unexpected files uploaded.** JReleaser deploys everything under `build/staging-deploy`;
-delete it before staging locally.
+**Stale or unexpected files uploaded.** JReleaser deploys everything under `build/staging-deploy`.
+`stageAll` empties it first; if you publish a single module into it by hand, run `stageAll` again
+before deploying.
 
 **`Auto configure detected '<branch>' as default branch`.** Harmless in local dry runs off `main`;
 real releases run on `main`.

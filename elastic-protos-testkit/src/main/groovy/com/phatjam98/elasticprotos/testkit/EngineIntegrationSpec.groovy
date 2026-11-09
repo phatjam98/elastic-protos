@@ -69,7 +69,7 @@ import spock.lang.Stepwise
  * long-lived server do not collide. The spec is skipped when Docker is unavailable.
  */
 @Stepwise
-@Requires(value = { DockerClientFactory.instance().isDockerAvailable() }, inherited = true,
+@Requires(value = { Boolean.getBoolean('elasticprotos.requireDocker') || DockerClientFactory.instance().isDockerAvailable() }, inherited = true,
     reason = 'Docker is not available')
 abstract class EngineIntegrationSpec extends Specification {
 

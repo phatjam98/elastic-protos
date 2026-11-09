@@ -8,7 +8,8 @@ pull requests are reviewed. By participating you agree to the [Code of Conduct](
 - **JDK 17.** The toolchain is pinned in [`.sdkmanrc`](.sdkmanrc) (`sdk env install` with SDKMAN!).
   Gradle's toolchain support can also provision it. Compilation always targets 17.
 - **Docker**, only for the integration tests. They use Testcontainers and are skipped (not failed)
-  when Docker is unavailable. On Linux, engines need `sudo sysctl -w vm.max_map_count=262144`.
+  when Docker is unavailable, unless `-PrequireDocker=true` is passed (CI does), which makes them
+  fail instead. On Linux, engines need `sudo sysctl -w vm.max_map_count=262144`.
 - Use the Gradle wrapper (`./gradlew`); dependency versions live in `gradle/libs.versions.toml`.
 
 ## Project layout
@@ -36,6 +37,15 @@ programmatic overrides second; do not add field-name heuristics.
 ./gradlew test -PtestJavaVersion=21  # run the tests on JDK 21
 ./gradlew :elastic-protos-core:test --tests '*QueryCompilerSpec'
 
+# Unit tests on the protobuf-java 4.x runtime (core, adapters, testkit; compilation stays on 3.25;
+# Micronaut is excluded to stay on the Micronaut-managed protobuf line)
+./gradlew :elastic-protos-core:test :elastic-protos-elasticsearch:test :elastic-protos-opensearch:test \
+  :elastic-protos-testkit:test -PprotobufRuntimeVersion=4.36.2
+
+# Stage the publications and check that no .module or POM exports a platform/BOM (not part of
+# `build`; CI's stage job runs it)
+./gradlew stageAll verifyPublishedMetadata
+
 # Docker-backed integration tests, per adapter; without -PengineImage the newest verified image is used
 ./gradlew :elastic-protos-elasticsearch:integrationTest -PengineImage=docker.elastic.co/elasticsearch/elasticsearch:8.19.23
 ./gradlew :elastic-protos-opensearch:integrationTest -PengineImage=opensearchproject/opensearch:2.19.7
@@ -44,8 +54,20 @@ programmatic overrides second; do not add field-name heuristics.
 ./gradlew :elastic-protos-testkit:demo --args="elasticsearch http://localhost:9200"
 ```
 
-CI runs the integration suites on Elasticsearch 8.19.23 and 9.5.5 and OpenSearch 2.19.7 and 3.9.0.
-A change to engine behaviour should pass locally on at least one image of each engine.
+CI runs the integration suites on Elasticsearch 8.19.23 and 9.5.5 and OpenSearch 2.19.7 and 3.9.0
+with `-PrequireDocker=true`, and the unit tests on the protobuf-java 4.x runtime. A change to engine
+behaviour should pass locally on at least one image of each engine.
+
+## Compatibility
+
+- Semantic versioning, lockstep module versions. The public API is every public type outside the
+  internal packages (`util`, `engine.rest`) and `query.NestedPathResolver`.
+- Changing a default mapping rule changes content hashes and forces a REINDEX on every consumer:
+  major versions only.
+- Published modules must not export a platform: declare published dependencies with explicit
+  catalog versions and keep BOMs on `compileOnly`, `annotationProcessor` or test configurations.
+  `./gradlew stageAll verifyPublishedMetadata` enforces this (CI runs it on every PR). The
+  Micronaut runtime is `compileOnly` in the Micronaut module; applications provide it.
 
 ## Quality gates
 

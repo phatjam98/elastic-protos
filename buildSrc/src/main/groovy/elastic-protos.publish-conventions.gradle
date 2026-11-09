@@ -40,3 +40,8 @@ publishing {
         }
     }
 }
+
+// The root stageAll task empties build/staging-deploy first; never publish into it before that.
+tasks.withType(PublishToMavenRepository).matching { it.name.endsWith('ToStagingRepository') }.configureEach {
+    mustRunAfter ':cleanStagingDeploy'
+}

@@ -25,8 +25,7 @@ protobuf-java-util = { module = "com.google.protobuf:protobuf-java-util", versio
 protobuf-gradle-plugin = { module = "com.google.protobuf:protobuf-gradle-plugin", version.ref = "protobuf-plugin" }
 es-rest-client = { module = "org.elasticsearch.client:elasticsearch-rest-client", version.ref = "es-rest-client" }
 os-rest-client = { module = "org.opensearch.client:opensearch-rest-client", version.ref = "os-rest-client" }
-jackson-bom = { module = "com.fasterxml.jackson:jackson-bom", version.ref = "jackson" }
-jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind" }
+jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
 slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
 logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
 groovy = { module = "org.apache.groovy:groovy", version.ref = "groovy" }

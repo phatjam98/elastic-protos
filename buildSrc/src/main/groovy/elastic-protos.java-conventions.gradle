@@ -77,7 +77,32 @@ testing {
                 testTask.configure {
                     shouldRunAfter(tasks.named('test'))
                     systemProperty 'elasticprotos.engineImage', providers.gradleProperty('engineImage').getOrElse('')
+                    // EngineIntegrationSpec is skipped without Docker; -PrequireDocker=true (CI) makes it
+                    // run regardless, so a missing Docker fails the suite instead of passing it vacuously.
+                    systemProperty 'elasticprotos.requireDocker', providers.gradleProperty('requireDocker').getOrElse('false')
                 }
+            }
+        }
+    }
+}
+
+// -PprotobufRuntimeVersion=4.x.y runs the unit tests against another protobuf-java runtime while
+// compiling against (and generating code with) the catalog's 3.25 line, to prove that 3.25 gencode
+// loads on 4.x. Only the test runtime classpath changes. The Micronaut module is excluded to stay
+// on the Micronaut-managed protobuf line. The `test` task gets the version as the system property
+// elasticprotos.protobufRuntime, which ProtobufRuntimeSpec (core) checks against the loaded runtime.
+def protobufRuntimeVersion = providers.gradleProperty('protobufRuntimeVersion')
+if (protobufRuntimeVersion.isPresent() && project.name != 'elastic-protos-micronaut') {
+    def runtimeVersion = protobufRuntimeVersion.get()
+    tasks.named('test', Test) {
+        systemProperty 'elasticprotos.protobufRuntime', runtimeVersion
+    }
+    configurations.named('testRuntimeClasspath') {
+        resolutionStrategy.eachDependency { details ->
+            if (details.requested.group == 'com.google.protobuf'
+                    && details.requested.name in ['protobuf-java', 'protobuf-java-util']) {
+                details.useVersion(runtimeVersion)
+                details.because('-PprotobufRuntimeVersion: test generated 3.25 code on another runtime')
             }
         }
     }

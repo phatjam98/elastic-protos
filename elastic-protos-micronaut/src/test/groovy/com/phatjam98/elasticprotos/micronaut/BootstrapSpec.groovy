@@ -1,11 +1,15 @@
 package com.phatjam98.elasticprotos.micronaut
 
+import com.phatjam98.elasticprotos.engine.EngineException
+import com.phatjam98.elasticprotos.engine.SearchEngine
 import com.phatjam98.elasticprotos.migration.Action
+import com.phatjam98.elasticprotos.migration.IndexMigrator
 import com.phatjam98.elasticprotos.migration.MigrationResult
 import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
 import com.phatjam98.elasticprotos.testkit.InMemorySearchEngine
 import io.micronaut.context.ApplicationContext
+import io.micronaut.context.BeanContext
 import spock.lang.Specification
 
 class BootstrapSpec extends Specification {
@@ -103,6 +107,43 @@ class BootstrapSpec extends Specification {
 
     cleanup:
     ctx?.close()
+  }
+
+  /**
+   * A bootstrap whose planning throws, as it does when the cluster is unreachable. IndexMigrator is
+   * final, so the migrator is real and the engine underneath it fails every call.
+   */
+  ElasticProtosBootstrap unreachableBootstrap(boolean failOnError) {
+    SearchEngine engine = Stub(SearchEngine) {
+      _ >> { throw new EngineException(EngineException.Kind.IO, 0, 'connection refused') }
+    }
+    def migrator = IndexMigrator.builder().engine(engine).build()
+    def config = new ElasticProtosConfiguration()
+    config.bootstrap.classes = [Firm.name]
+    config.bootstrap.failOnError = failOnError
+    BeanContext beanContext = Stub(BeanContext) {
+      getClassLoader() >> BootstrapSpec.classLoader
+    }
+    new ElasticProtosBootstrap(migrator, config, beanContext)
+  }
+
+  def "a planning failure aborts startup by default"() {
+    when:
+    unreachableBootstrap(true).run()
+
+    then:
+    def e = thrown(ElasticProtosBootstrap.BootstrapException)
+    e.message == 'elastic-protos bootstrap failed: connection refused'
+    e.cause instanceof EngineException
+  }
+
+  def "a planning failure lets startup continue when fail-on-error is false"() {
+    when:
+    def result = unreachableBootstrap(false).run()
+
+    then:
+    noExceptionThrown()
+    result == null
   }
 
   def "a dry run creates nothing"() {

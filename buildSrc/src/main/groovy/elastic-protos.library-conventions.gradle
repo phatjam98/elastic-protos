@@ -3,3 +3,12 @@ plugins {
     id 'elastic-protos.java-conventions'
     id 'elastic-protos.publish-conventions'
 }
+
+// A stable JPMS name for module-path consumers, derived from the module name:
+// elastic-protos-core -> com.phatjam98.elasticprotos.core.
+def automaticModuleName = 'com.phatjam98.elasticprotos.' + project.name.replaceFirst(/^elastic-protos-/, '')
+tasks.named('jar', Jar) {
+    manifest {
+        attributes('Automatic-Module-Name': automaticModuleName)
+    }
+}

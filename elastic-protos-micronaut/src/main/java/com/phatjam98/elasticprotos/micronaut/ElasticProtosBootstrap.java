@@ -23,8 +23,14 @@ import org.slf4j.LoggerFactory;
  * elastic-protos.bootstrap.classes} when the application starts.
  *
  * <p>The plan report is logged at INFO. When {@code elastic-protos.bootstrap.fail-on-error} is
- * true (the default) and an index failed or was blocked, a {@link BootstrapException} is thrown
- * from the startup event, which aborts {@code ApplicationContext.start()}. Disable the bootstrap
+ * true (the default) and an index failed or was blocked, or planning or applying threw (for
+ * example because the cluster is unreachable or rejects the credentials), a {@link
+ * BootstrapException} is thrown from the startup event, which aborts {@code
+ * ApplicationContext.start()}. With {@code fail-on-error: false} those problems are logged at WARN
+ * and startup continues. That includes every planning error, also deterministic ones such as a
+ * {@code MappingException} from invalid proto options: the application then starts without the
+ * index and writes to it fail later. Keep the default {@code true} in deployments. A class that
+ * cannot be loaded always aborts startup. Disable the bootstrap
  * with {@code elastic-protos.bootstrap.enabled: false}, for example on all but one instance.
  */
 @Singleton
@@ -63,9 +69,10 @@ public class ElasticProtosBootstrap implements ApplicationEventListener<StartupE
   /**
    * Runs the bootstrap now.
    *
-   * @return the result, or null when no classes are configured
-   * @throws BootstrapException when a class cannot be loaded, or when the result is not ok and
-   *     {@code fail-on-error} is set
+   * @return the result, or null when no classes are configured or when planning or applying threw
+   *     and {@code fail-on-error} is false
+   * @throws BootstrapException when a class cannot be loaded, or when the result is not ok or
+   *     planning or applying threw and {@code fail-on-error} is set
    */
   public MigrationResult run() {
     ElasticProtosConfiguration.Bootstrap bootstrap = config.getBootstrap();
@@ -74,10 +81,21 @@ public class ElasticProtosBootstrap implements ApplicationEventListener<StartupE
       LOG.info("elastic-protos bootstrap skipped: elastic-protos.bootstrap.classes is empty");
       return null;
     }
-    MigrationPlan plan = migrator.plan(load(names));
-    LOG.info("elastic-protos bootstrap plan{}:\n{}",
-        bootstrap.isDryRun() ? " (dry run)" : "", plan.toReport());
-    MigrationResult result = migrator.apply(plan);
+    List<Descriptor> types = load(names);
+    MigrationResult result;
+    try {
+      MigrationPlan plan = migrator.plan(types);
+      LOG.info("elastic-protos bootstrap plan{}:\n{}",
+          bootstrap.isDryRun() ? " (dry run)" : "", plan.toReport());
+      result = migrator.apply(plan);
+    } catch (RuntimeException e) {
+      if (bootstrap.isFailOnError()) {
+        String reason = e.getMessage() != null ? e.getMessage() : e.toString();
+        throw new BootstrapException("elastic-protos bootstrap failed: " + reason, e);
+      }
+      LOG.warn("elastic-protos bootstrap failed (fail-on-error is false), startup continues", e);
+      return null;
+    }
     if (result.ok()) {
       LOG.info("elastic-protos bootstrap finished: {} index(es) ok", result.outcomes().size());
       return result;

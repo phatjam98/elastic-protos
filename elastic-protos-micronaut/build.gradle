@@ -7,9 +7,13 @@ description = 'Micronaut integration for elastic-protos: configuration, bean fac
 dependencies {
     api project(':elastic-protos-core')
 
-    implementation platform(libs.micronaut.platform)
-    implementation libs.micronaut.inject
-    implementation libs.micronaut.context
+    // compileOnly: every Micronaut 4 application already provides the Micronaut runtime, at the
+    // versions of its own platform. Publishing micronaut-inject/-context (or the platform) would
+    // either force our platform onto the app or lift only these two modules and skew micronaut-core.
+    // So the published POM/module carry no Micronaut dependency at all.
+    compileOnly platform(libs.micronaut.platform)
+    compileOnly libs.micronaut.inject
+    compileOnly libs.micronaut.context
     annotationProcessor platform(libs.micronaut.platform)
     annotationProcessor libs.micronaut.annotation.processor
 
@@ -24,6 +28,8 @@ dependencies {
 testing.suites.test {
     dependencies {
         implementation platform(libs.micronaut.platform)
+        implementation libs.micronaut.inject
+        implementation libs.micronaut.context
         implementation libs.micronaut.test.spock
         // Compiles the Groovy test beans (@Factory, @Replaces, listeners).
         implementation libs.micronaut.inject.groovy

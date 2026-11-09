@@ -6,7 +6,8 @@ plugins {
 description = 'Engine-agnostic core of elastic-protos: protobuf-driven index mappings, document codec, migrations and query compilation'
 
 dependencies {
-    implementation platform(libs.jackson.bom)
+    // An explicit version, not the Jackson BOM: a platform dependency would be published in the
+    // Gradle module metadata and forced onto every consumer's runtime classpath.
     implementation libs.jackson.databind
 }
 
