@@ -38,6 +38,12 @@ import com.phatjam98.elasticprotos.migration.MigrationResult
 import com.phatjam98.elasticprotos.migration.MigrationScriptProvider
 import com.phatjam98.elasticprotos.migration.RemovedFieldPolicy
 import com.phatjam98.elasticprotos.proto.Bool3
+import com.phatjam98.elasticprotos.proto.CalendarInterval
+import com.phatjam98.elasticprotos.proto.DateBounds
+import com.phatjam98.elasticprotos.proto.HistogramAggregation
+import com.phatjam98.elasticprotos.proto.TermsAggregation
+import com.phatjam98.elasticprotos.proto.TermsOrder
+import com.phatjam98.elasticprotos.proto.TermsOrderBy
 import com.phatjam98.elasticprotos.proto.DistanceUnit
 import com.phatjam98.elasticprotos.proto.EsType
 import com.phatjam98.elasticprotos.proto.FieldCondition
@@ -63,6 +69,8 @@ import com.phatjam98.elasticprotos.proto.example.TypedChild
 import com.phatjam98.elasticprotos.proto.example.TypedItem
 import com.phatjam98.elasticprotos.proto.example.TypedMapLevel
 import com.phatjam98.elasticprotos.proto.example.TypedMaps
+import com.phatjam98.elasticprotos.query.AggregationResults
+import com.phatjam98.elasticprotos.query.Aggs
 import com.phatjam98.elasticprotos.query.Criteria
 import com.phatjam98.elasticprotos.query.QueryCompiler
 import com.phatjam98.elasticprotos.query.QueryCompilerConfig
@@ -434,6 +442,165 @@ abstract class EngineIntegrationSpec extends Specification {
 
     expect:
     orderedIds(firms, criteria) == ['firm-1', 'firm-3', 'firm-2']
+  }
+
+  // ------------------------------------------------------------------ aggregations
+
+  def "terms aggregations bucket keyword and text fields, with metric sub-aggregations"() {
+    when:
+    def aggs = aggregate(documents, Criteria.builder().aggregate(
+        Aggs.sub(Aggs.terms('by_type', 'type'), Aggs.sum('total', 'size_bytes'))))
+
+    then: 'by count, ties by key'
+    aggs.buckets('by_type')*.key() == ['FILING', 'MOTION', 'NOTICE', 'ORDER']
+    aggs.buckets('by_type')*.docCount() == [3L, 1L, 1L, 1L]
+    aggs.buckets('by_type')*.sub()*.metric('total')*.asLong() == [2_870_000L, 45_000L, 8_000L, 30_000L]
+    aggs.sumOtherDocCount('by_type') == 0
+
+    when: 'firms by status, and by name through its keyword sub-field'
+    def firmAggs = aggregate(firms, Criteria.builder().aggregate(
+        Aggs.terms('status', 'status'), Aggs.terms('names', 'name')))
+
+    then:
+    firmAggs.buckets('status').collectEntries { [(it.key()): it.docCount()] } == [ACTIVE: 2L, SUSPENDED: 1L]
+    firmAggs.buckets('names')*.key() ==
+        ['Dewey Cheatem & Howe LLP', 'Hamlin Hamlin & McGill', 'Pearson Specter Litt']
+  }
+
+  def "metric aggregations over a long, a keyword and a date field"() {
+    when:
+    def aggs = aggregate(documents, Criteria.builder().aggregate(
+        Aggs.min('smallest', 'size_bytes'), Aggs.max('largest', 'size_bytes'),
+        Aggs.avg('average', 'size_bytes'), Aggs.sum('total', 'size_bytes'),
+        Aggs.count('counted', 'size_bytes'), Aggs.cardinality('firms', 'firm_id'),
+        Aggs.max('latest', 'filed_at'), Aggs.min('lowest_relevance', 'relevance')))
+
+    then:
+    aggs.metric('smallest').asLong() == 8_000L
+    aggs.metric('largest').asLong() == 2_500_000L
+    aggs.metric('total').asLong() == 2_953_000L
+    Math.abs(aggs.metric('average').value() - 2_953_000d / 6) < 0.01
+    aggs.metric('counted').asLong() == 6L
+    aggs.metric('firms').asLong() == 3L
+    aggs.metric('latest').valueAsString().startsWith('2024-06-30')
+    aggs.metric('latest').asLong() == SampleData.ts('2024-06-30T08:00:00Z').seconds * 1000
+    aggs.metric('lowest_relevance').value() == 0.75d
+  }
+
+  def "date histograms bucket by calendar month, with empty edge months when bounds are forced"() {
+    when:
+    def aggs = aggregate(documents, Criteria.builder().aggregate(
+        Aggs.dateHistogram('per_month', 'filed_at', CalendarInterval.MONTH)
+            .tap { dateHistogramBuilder.setFormat('yyyy-MM') },
+        Aggs.dateHistogram('padded', 'filed_at', CalendarInterval.MONTH).tap {
+          dateHistogramBuilder.setFormat('yyyy-MM').setMinDocCount(0).setExtendedBounds(DateBounds.newBuilder()
+              .setMin(SampleData.ts('2023-12-01T00:00:00Z')).setMax(SampleData.ts('2024-07-31T00:00:00Z')))
+        }))
+
+    then:
+    aggs.buckets('per_month')*.keyAsString() == ['2024-01', '2024-02', '2024-03', '2024-04', '2024-05', '2024-06']
+    aggs.buckets('per_month')*.docCount() == [1L] * 6
+    aggs.buckets('per_month')[0].key() == SampleData.ts('2024-01-01T00:00:00Z').seconds * 1000
+
+    and:
+    aggs.buckets('padded')*.keyAsString() ==
+        ['2023-12', '2024-01', '2024-02', '2024-03', '2024-04', '2024-05', '2024-06', '2024-07']
+    aggs.buckets('padded')*.docCount() == [0L, 1L, 1L, 1L, 1L, 1L, 1L, 0L]
+  }
+
+  def "histogram, range and date range aggregations"() {
+    when:
+    def aggs = aggregate(documents, Criteria.builder().aggregate(
+        Aggs.histogram('sizes', 'size_bytes', 100_000).setHistogram(
+            HistogramAggregation.newBuilder().setInterval(100_000).setMinDocCount(1)),
+        Aggs.range('bands', 'size_bytes', Aggs.bucket('small', null, 50_000d),
+            Aggs.bucket('medium', 50_000d, 500_000d), Aggs.bucket('large', 500_000d, null)),
+        Aggs.range('quarters', 'filed_at', Aggs.bucket('q1_2024',
+            SampleData.ts('2024-01-01T00:00:00Z').seconds * 1000d,
+            SampleData.ts('2024-04-01T00:00:00Z').seconds * 1000d))))
+
+    then:
+    aggs.buckets('sizes')*.key() == [0d, 100_000d, 200_000d, 2_500_000d]
+    aggs.buckets('sizes')*.docCount() == [3L, 1L, 1L, 1L]
+
+    and: 'range buckets are [from, to)'
+    aggs.buckets('bands')*.key() == ['small', 'medium', 'large']
+    aggs.buckets('bands')*.docCount() == [3L, 2L, 1L]
+    aggs.buckets('bands')[1].from() == 50_000d
+    aggs.buckets('bands')[1].to() == 500_000d
+    aggs.buckets('bands')[0].from() == null
+
+    and:
+    aggs.buckets('quarters')*.key() == ['q1_2024']
+    aggs.buckets('quarters')[0].docCount() == 3L
+    aggs.buckets('quarters')[0].from() == SampleData.ts('2024-01-01T00:00:00Z').seconds * 1000d
+  }
+
+  def "nested terms with a reverse-nested metric, ordered by that metric, and aggregations only"() {
+    when:
+    def compiled = compiler.compile(Criteria.builder().aggregate(Aggs.sub(
+        Aggs.terms('roles', 'parties.role').setTerms(TermsAggregation.newBuilder()
+            .setOrder(TermsOrder.newBuilder().setBy(TermsOrderBy.BY_METRIC).setMetric('firms'))),
+        Aggs.cardinality('firms', 'firm_id'))).aggregationsOnly().build(), documents)
+    def result = engine.search([documents.alias()], compiled.body())
+    def aggs = AggregationResults.of(result)
+
+    then: 'no hits, but the total'
+    result.hits().isEmpty()
+    result.total() == 6
+
+    and: 'parties per role, ordered by the number of distinct firms of their documents'
+    aggs.names() == ['roles'] as Set
+    aggs.buckets('roles')*.key() == ['DEFENDANT', 'PLAINTIFF', 'COUNSEL']
+    aggs.buckets('roles')*.docCount() == [4L, 3L, 1L]
+    aggs.buckets('roles')*.sub()*.metric('firms')*.asLong() == [3L, 2L, 1L]
+  }
+
+  def "aggregations cover only the documents the query matches"() {
+    when:
+    def aggs = aggregate(documents, Criteria.where('type').equalTo('FILING').end()
+        .aggregate(Aggs.terms('tags', 'tags'), Aggs.count('docs', 'size_bytes')))
+
+    then:
+    aggs.buckets('tags').collectEntries { [(it.key()): it.docCount()] } ==
+        [corporate: 2L, discovery: 1L, 'm-and-a': 1L]
+    aggs.metric('docs').asLong() == 3L
+  }
+
+  def "terms on a key of a flattened field: buckets on Elasticsearch, buckets or a bad request on OpenSearch"() {
+    when:
+    def outcome = outcome { aggregate(firms, Criteria.builder().aggregate(Aggs.terms('tiers', 'labels.tier'))) }
+
+    then:
+    if (outcome instanceof AggregationResults) {
+      assert outcome.buckets('tiers').collectEntries { [(it.key()): it.docCount()] } == [gold: 1L]
+    } else {
+      assert engine.info().product() == EngineProduct.OPENSEARCH
+      assert outcome == EngineException.Kind.BAD_REQUEST
+    }
+  }
+
+  def "highlighting marks the matched terms of text fields"() {
+    when:
+    def compiled = compiler.compile(Criteria.builder().fullText('merger agreement').highlight().build(), documents)
+    def hits = engine.search([documents.alias()], compiled.body()).hits()
+
+    then:
+    compiled.warnings().isEmpty()
+    hits[0].id() == 'doc-1'
+    hits[0].highlight()['title'].any { it.contains('<em>Merger</em>') }
+    hits[0].highlight()['body'].any { it.contains('<em>merger</em>') }
+
+    when: 'custom tags and HTML encoding'
+    def custom = compiler.compile(Criteria.where('name').matches('Dewey').end().highlight {
+      it.addFields(com.phatjam98.elasticprotos.proto.HighlightField.newBuilder().setField('name'))
+          .setPreTag('[').setPostTag(']').setHtmlEncode(true)
+    }.build(), firms)
+    def firmHits = engine.search([firms.alias()], custom.body()).hits()
+
+    then:
+    firmHits*.id() == ['firm-1']
+    firmHits[0].highlight()['name'] == ['[Dewey] Cheatem &amp; Howe LLP']
   }
 
   // ------------------------------------------------------------------ typed maps
@@ -1037,6 +1204,12 @@ abstract class EngineIntegrationSpec extends Specification {
 
   Set<String> firmIds(SearchCriteria criteria) {
     docIds(criteria, firms)
+  }
+
+  AggregationResults aggregate(IndexDefinition index, Criteria criteria) {
+    def compiled = compiler.compile(criteria.build(), index)
+    assert compiled.warnings().isEmpty()
+    AggregationResults.of(engine.search([index.alias()], compiled.body()))
   }
 
   List<String> orderedIds(IndexDefinition index, SearchCriteria criteria) {
