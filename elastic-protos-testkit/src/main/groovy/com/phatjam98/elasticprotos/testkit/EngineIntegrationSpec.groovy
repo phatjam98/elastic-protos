@@ -28,10 +28,14 @@ import com.phatjam98.elasticprotos.migration.Action
 import com.phatjam98.elasticprotos.migration.DiffClassifier
 import com.phatjam98.elasticprotos.migration.IndexMigrator
 import com.phatjam98.elasticprotos.migration.IndexPlan
+import com.phatjam98.elasticprotos.migration.MigrationListener
+import com.phatjam98.elasticprotos.migration.MigrationListener.Phase
 import com.phatjam98.elasticprotos.migration.MigrationOptions
 import com.phatjam98.elasticprotos.migration.MigrationPlan
 import com.phatjam98.elasticprotos.migration.MigrationResult
 import com.phatjam98.elasticprotos.migration.MigrationScriptProvider
+import com.phatjam98.elasticprotos.migration.ReconcileStats
+import com.phatjam98.elasticprotos.migration.RollbackMode
 import com.phatjam98.elasticprotos.migration.RemovedFieldPolicy
 import com.phatjam98.elasticprotos.proto.Bool3
 import com.phatjam98.elasticprotos.proto.DistanceUnit
@@ -56,6 +60,7 @@ import com.phatjam98.elasticprotos.query.Criteria
 import com.phatjam98.elasticprotos.query.QueryCompiler
 import com.phatjam98.elasticprotos.query.QueryCompilerConfig
 import com.phatjam98.elasticprotos.query.SearchPager
+import java.time.Duration
 import java.time.Instant
 import org.testcontainers.DockerClientFactory
 import spock.lang.Requires
@@ -83,6 +88,9 @@ abstract class EngineIntegrationSpec extends Specification {
       "if (ctx._source.tags == null) { ctx._source.tags = []; } ctx._source.tags.add('migrated')"
 
   static final int PAGING_DOCS = 2500
+
+  /** Migration options for the reindexing features: a short swap grace keeps them fast. */
+  static final MigrationOptions FAST = MigrationOptions.standard().withSwapGrace(Duration.ofMillis(200))
 
   @Shared SearchEngine engine
   @Shared String prefix = 'it-' + UUID.randomUUID().toString().substring(0, 8)
@@ -594,7 +602,7 @@ abstract class EngineIntegrationSpec extends Specification {
 
     when: 'the proto goes back to v1, with removed fields reindexed'
     def revert = IndexMigrator.builder().engine(engine).mapper(without)
-        .options(MigrationOptions.standard().withRemovedFields(RemovedFieldPolicy.REINDEX)).build()
+        .options(FAST.withRemovedFields(RemovedFieldPolicy.REINDEX)).build()
     MigrationPlan back = revert.plan(Document)
     def reverted = revert.apply(back)
 
@@ -609,38 +617,35 @@ abstract class EngineIntegrationSpec extends Specification {
     revert.plan(Document).items()*.action() == [Action.NO_OP]
   }
 
-  def "an added keyword multi-field is applied by reindexing, so old documents are found through it"() {
+  def "an added keyword multi-field is backfilled in place, so old documents are found through it"() {
     given:
     def overrides = MappingOverrides.builder()
         .forField(Document.descriptor, 'body') { it.setKeywordSubfield(Bool3.TRUE) }
         .build()
     def multiFieldMapper = ProtoMapper.builder().naming(naming).overrides(overrides).build()
-    def multiField = IndexMigrator.builder().engine(engine).mapper(multiFieldMapper).build()
+    def multiField = IndexMigrator.builder().engine(engine).mapper(multiFieldMapper).options(FAST).build()
     keywordDocuments = multiFieldMapper.map(Document)
 
     when:
     MigrationPlan plan = multiField.plan(Document)
 
     then:
-    plan.items()*.action() == [Action.REINDEX]
+    plan.items()*.action() == [Action.BACKFILL]
     plan.items()[0].diff().added()*.path() == ['body.keyword']
     plan.items()[0].diff().unindexedAdditions()*.path() == ['body.keyword']
     plan.items()[0].currentIndex() == originalDocumentIndex
-    plan.items()[0].target().name() == keywordDocuments.name()
-    keywordDocuments.name() != originalDocumentIndex
 
     when:
     def result = multiField.apply(plan)
     def live = engine.getMappings(documents.alias())
 
-    then:
+    then: 'the index keeps its name; the marker the backfill put into _meta is gone again'
     result.ok()
-    result.outcomes()[0].index() == keywordDocuments.name()
-    result.outcomes()[0].retainedIndices() == [originalDocumentIndex]
-    result.outcomes()[0].sourceCount() == 6L
-    result.outcomes()[0].destCount() == 6L
-    engine.getAliases(documents.alias()).keySet() == [keywordDocuments.name()] as Set
+    result.outcomes()[0].index() == originalDocumentIndex
+    result.outcomes()[0].retainedIndices().isEmpty()
+    engine.getAliases(documents.alias()).keySet() == [originalDocumentIndex] as Set
     live._meta.elastic_protos.hash == keywordDocuments.contentHash()
+    live._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version'] as Set
     live.properties.body.fields.keyword.type == 'keyword'
     multiField.plan(Document).items()*.action() == [Action.NO_OP]
 
@@ -657,7 +662,39 @@ abstract class EngineIntegrationSpec extends Specification {
         SampleData.documents().toSorted { it.body }*.id
   }
 
-  def "a changed field type is applied by reindexing behind the alias"() {
+  def "with backfill off, an added keyword multi-field is applied by a zero-downtime reindex"() {
+    given: 'a third documents alias with the sample set'
+    IndexNamingStrategy mfNaming = IndexNamingStrategy.prefixed(prefix + '-mf')
+    def plain = ProtoMapper.builder().naming(mfNaming).build()
+    def withKeyword = ProtoMapper.builder().naming(mfNaming).overrides(MappingOverrides.builder()
+        .forField(Document.descriptor, 'body') { it.setKeywordSubfield(Bool3.TRUE) }.build()).build()
+    IndexDefinition v1 = plain.map(Document)
+    IndexDefinition v2 = withKeyword.map(Document)
+    indexSampleDocuments(plain)
+    def migrator = IndexMigrator.builder().engine(engine).mapper(withKeyword)
+        .options(FAST.withBackfill(false)).build()
+
+    when:
+    MigrationPlan plan = migrator.plan(Document)
+    def result = migrator.apply(plan)
+
+    then:
+    plan.items()*.action() == [Action.REINDEX]
+    plan.items()[0].reason().endsWith('(backfill is disabled)')
+    result.ok()
+    result.outcomes()[0].index() == v2.name()
+    result.outcomes()[0].retainedIndices() == [v1.name()]
+    result.outcomes()[0].sourceCount() == 6L
+    result.outcomes()[0].destCount() == 6L
+    result.outcomes()[0].reconcile() == new ReconcileStats(0, 0, 0, 0)
+    engine.getAliases(v1.alias()).keySet() == [v2.name()] as Set
+    engine.getMappings(v2.name())._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version'] as Set
+    ids(engine.search([v1.alias()], [query: [term: ['body.keyword':
+        'Counsel enters an appearance on behalf of the defendant.']]])) == ['doc-4'] as Set
+    migrator.plan(Document).items()*.action() == [Action.NO_OP]
+  }
+
+  def "a changed field type is applied by a zero-downtime reindex while writes go on through the alias"() {
     given:
     def overrides = MappingOverrides.builder()
         .forField(Document.descriptor, 'body') { it.setKeywordSubfield(Bool3.TRUE) }
@@ -665,64 +702,139 @@ abstract class EngineIntegrationSpec extends Specification {
         .build()
     def breakingMapper = ProtoMapper.builder().naming(naming).overrides(overrides).build()
     MigrationScriptProvider script = { alias, from, to -> Optional.of(MIGRATION_SCRIPT) } as MigrationScriptProvider
-    def breaking = IndexMigrator.builder().engine(engine).mapper(breakingMapper).scriptProvider(script).build()
+    String alias = documents.alias()
+    Map<Phase, Closure> writes = [
+        (Phase.COPIED)   : { write(alias, 'zd-1', 'copy window'); engine.delete(alias, 'zd-2'); write(alias, 'zd-5', 'copy window') },
+        (Phase.CAUGHT_UP): { write(alias, 'zd-1', 'catch-up 1'); write(alias, 'zd-1', 'catch-up 2'); engine.delete(alias, 'zd-3'); write(alias, 'zd-6', 'catch-up window') },
+        (Phase.SWAPPED)  : { write(alias, 'zd-1', 'after swap'); engine.delete(alias, 'zd-4'); write(alias, 'zd-7', 'after swap'); write(alias, 'zd-5', 'after swap') },
+    ]
+    def breaking = IndexMigrator.builder().engine(engine).mapper(breakingMapper).scriptProvider(script).options(FAST)
+        .listener({ a, phase -> writes[phase]?.call() } as MigrationListener).build()
     IndexDefinition target = breakingMapper.map(Document)
+
+    and: 'four more documents written before the migration'
+    ['zd-1', 'zd-2', 'zd-3', 'zd-4'].each { write(alias, it, 'before') }
+    engine.refresh(alias)
 
     when:
     MigrationPlan plan = breaking.plan(Document)
 
     then:
     plan.items()*.action() == [Action.REINDEX]
-    plan.items()[0].currentIndex() == keywordDocuments.name()
+    plan.items()[0].currentIndex() == originalDocumentIndex
     plan.items()[0].target().name() == target.name()
-    target.name() != keywordDocuments.name()
+    target.name() != originalDocumentIndex
 
-    when:
+    when: 'the reindex runs while the listener writes through the alias after the copy, the catch-up and the swap'
     def result = breaking.apply(plan)
     reindexPlan = plan.items()[0]
+    engine.refresh(alias)
 
-    then: 'the alias points only at the new index and nothing was lost'
+    then: 'no write failed and the alias points only at the new index'
     result.ok()
     result.outcomes()[0].index() == target.name()
-    result.outcomes()[0].retainedIndices() == [keywordDocuments.name()]
-    result.outcomes()[0].sourceCount() == 6L
-    result.outcomes()[0].destCount() == 6L
-    result.outcomes()[0].warnings().isEmpty()
-    engine.getAliases(documents.alias()).keySet() == [target.name()] as Set
-    count(documents.alias()) == 6
-    count(keywordDocuments.name()) == 6
-    engine.getMappings(documents.alias()).properties.title.type == 'keyword'
+    result.outcomes()[0].retainedIndices() == [originalDocumentIndex]
+    engine.getAliases(alias).keySet() == [target.name()] as Set
+    engine.getMappings(alias).properties.title.type == 'keyword'
+    engine.getMappings(target.name())._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version'] as Set
 
-    and: 'the migration script ran on every document'
-    docIds(where(fc('tags', EQUALS, str('migrated'))), target) == SampleData.documents()*.id as Set
+    and: 'the last write wins per document and nothing deleted comes back'
+    titles(target.name()) == SampleData.documents().collectEntries { [(it.id): it.title] } + [
+        'zd-1': 'after swap', 'zd-5': 'after swap', 'zd-6': 'catch-up window', 'zd-7': 'after swap']
+    result.outcomes()[0].reconcile() == new ReconcileStats(1, 1, 2, 0)
+    result.outcomes()[0].sourceCount() == 10L
+    result.outcomes()[0].destCount() == 10L
+
+    and: 'the migration script ran on every copied document, including the one reconciled through the staging index'
+    docIds(where(fc('tags', EQUALS, str('migrated'))), target) == (SampleData.documents()*.id + ['zd-6']) as Set
+    !engine.indexExists(target.name() + '-reconcile')
 
     and: 'title is now a keyword'
     docIds(where(fc('title', EQUALS, str('Motion to dismiss'))), target) == ['doc-2'] as Set
     docIds(where(fc('title', TEXT_PREFIX, str('Order '))), target) == ['doc-3'] as Set
 
     when: 'writing to the retained old index'
-    engine.index(keywordDocuments.name(), 'doc-x', codec.toDocument(SampleData.documents()[0]), IndexOptions.defaults())
+    engine.index(originalDocumentIndex, 'doc-x', codec.toDocument(SampleData.documents()[0]), IndexOptions.defaults())
 
     then: 'it is write-blocked'
     thrown(EngineException)
-    engine.indexExists(keywordDocuments.name())
+    engine.indexExists(originalDocumentIndex)
   }
 
-  def "rollback points the alias back at the old index and unblocks it"() {
-    when:
-    IndexMigrator.builder().engine(engine).mapper(mapper).build().rollback(reindexPlan)
+  def "a zero-downtime reindex that dies after the swap is resumed by the next run"() {
+    given: 'a fourth documents alias with the sample set'
+    IndexNamingStrategy crashNaming = IndexNamingStrategy.prefixed(prefix + '-crash')
+    def plain = ProtoMapper.builder().naming(crashNaming).build()
+    def titleKeyword = ProtoMapper.builder().naming(crashNaming).overrides(MappingOverrides.builder()
+        .forField(Document.descriptor, 'title') { it.setType(EsType.KEYWORD) }.build()).build()
+    IndexDefinition v1 = plain.map(Document)
+    IndexDefinition v2 = titleKeyword.map(Document)
+    String alias = v1.alias()
+    indexSampleDocuments(plain)
+    Map<Phase, Closure> on = [
+        (Phase.CAUGHT_UP): { write(alias, 'crash-0', 'after the catch-up') },
+        (Phase.FROZEN)   : { throw new IllegalStateException('killed') },
+    ]
+    def crashing = IndexMigrator.builder().engine(engine).mapper(titleKeyword).options(FAST)
+        .listener({ a, phase -> on[phase]?.call() } as MigrationListener).build()
+
+    when: 'the run dies once the old index is frozen'
+    def crashed = crashing.bootstrap(Document)
+
+    then: 'the alias already points at the new index, which records the phase'
+    crashed.outcomes()[0].status() == MigrationResult.Status.FAILED
+    engine.getAliases(alias).keySet() == [v2.name()] as Set
+    engine.getMappings(v2.name())._meta.elastic_protos.pending.phase == 'reconciling'
+    engine.getMappings(v2.name())._meta.elastic_protos.pending.from == v1.name()
+
+    when: 'writes go on, and a new process plans and applies'
+    write(alias, 'crash-1', 'after the crash')
+    def resumer = IndexMigrator.builder().engine(engine).mapper(titleKeyword).options(FAST).build()
+    MigrationPlan plan = resumer.plan(Document)
+    def result = resumer.apply(plan)
+    engine.refresh(alias)
 
     then:
-    engine.getAliases(documents.alias()).keySet() == [keywordDocuments.name()] as Set
-    count(documents.alias()) == 6
+    plan.items()*.action() == [Action.REINDEX]
+    plan.items()[0].resume().swapped()
+    result.ok()
+    result.outcomes()[0].reconcile().copied() == 1L
+    titles(v2.name()) == SampleData.documents().collectEntries { [(it.id): it.title] } + [
+        'crash-0': 'after the catch-up', 'crash-1': 'after the crash']
+    engine.getMappings(v2.name())._meta.elastic_protos.pending == null
+    resumer.plan(Document).items()*.action() == [Action.NO_OP]
+    outcome { engine.index(v1.name(), 'x', [id: 'x'], IndexOptions.defaults()) } == EngineException.Kind.BLOCKED
+  }
+
+  def "a reverse-delta rollback restores the old index with the writes made after the reindex"() {
+    given:
+    String alias = documents.alias()
+    String next = reindexPlan.target().name()
+    write(alias, 'zd-8', 'after the reindex')
 
     when:
-    def written = engine.index(keywordDocuments.name(), 'doc-x',
+    def rolledBack = IndexMigrator.builder().engine(engine).mapper(mapper).options(FAST).build().rollback(reindexPlan)
+    engine.refresh(alias)
+
+    then:
+    rolledBack.ok()
+    rolledBack.index() == originalDocumentIndex
+    rolledBack.retainedIndices() == [next]
+    engine.getAliases(alias).keySet() == [originalDocumentIndex] as Set
+    titles(originalDocumentIndex) == titles(next)
+    titles(originalDocumentIndex)['zd-8'] == 'after the reindex'
+    titles(originalDocumentIndex)['zd-1'] == 'after swap'
+    count(alias) == 11
+    engine.getMappings(originalDocumentIndex)._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version'] as Set
+    outcome { engine.index(next, 'x', [id: 'x'], IndexOptions.defaults()) } == EngineException.Kind.BLOCKED
+
+    when: 'the restored index takes writes'
+    def written = engine.index(originalDocumentIndex, 'doc-x',
         codec.toDocument(SampleData.documents()[0].toBuilder().setId('doc-x').build()), IndexOptions.refreshed())
 
     then:
     written != null
-    count(documents.alias()) == 7
+    count(alias) == 12
   }
 
   // ------------------------------------------------------------------ errors
@@ -893,6 +1005,29 @@ abstract class EngineIntegrationSpec extends Specification {
 
   long count(String index) {
     engine.count(index)
+  }
+
+  /** Writes a document with an id and a title through an alias or index. */
+  void write(String target, String id, String title) {
+    engine.index(target, id, codec.toDocument(SampleData.documents()[0].toBuilder().setId(id).setTitle(title).build()),
+        IndexOptions.defaults())
+  }
+
+  /** Returns the title of every document of an index, by id. */
+  Map<String, String> titles(String index) {
+    engine.refresh(index)
+    engine.search([index], [query: [match_all: [:]], size: 100]).hits().collectEntries { [(it.id()): it.source().title] }
+  }
+
+  /** Bootstraps Document with a mapper and bulk indexes the sample set through its alias. */
+  void indexSampleDocuments(ProtoMapper with) {
+    assert IndexMigrator.builder().engine(engine).mapper(with).build().bootstrap(Document).ok()
+    def withCodec = ProtoDocumentCodec.of(with)
+    def bulk = engine.bulk(SampleData.documents().collect {
+      BulkOp.index(with.map(Document).alias(), withCodec.idOf(it).get(), withCodec.toDocument(it))
+    })
+    assert !bulk.errors()
+    engine.refresh(with.map(Document).alias())
   }
 
   Set<String> docIds(SearchCriteria criteria, IndexDefinition index = documents) {
