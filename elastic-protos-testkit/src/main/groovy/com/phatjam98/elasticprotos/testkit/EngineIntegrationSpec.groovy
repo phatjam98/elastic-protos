@@ -897,6 +897,80 @@ abstract class EngineIntegrationSpec extends Specification {
     count(alias) == 12
   }
 
+  // ------------------------------------------------------------------ concurrent bootstrap
+
+  def "two processes bootstrapping a new alias at once: one creates it, the other finds it done"() {
+    given:
+    def lkMapper = ProtoMapper.builder().naming(IndexNamingStrategy.prefixed(prefix + '-lk')).build()
+    String locks = lkMapper.naming().lockIndex()
+    def start = new java.util.concurrent.CountDownLatch(1)
+    def results = Collections.synchronizedList([])
+    def threads = (1..2).collect {
+      Thread.start {
+        def migrator = IndexMigrator.builder().engine(engine).mapper(lkMapper).build()
+        start.await()
+        results << migrator.bootstrap(Document)
+      }
+    }
+
+    when:
+    start.countDown()
+    threads*.join(120_000)
+    engine.refresh(locks)
+
+    then:
+    results.size() == 2
+    results.every { it.ok() }
+    results.collect { it.outcomes()[0].plan().action() }.sort() == [Action.CREATE, Action.NO_OP]
+    results.collect { it.outcomes()[0].status() }.sort() == [MigrationResult.Status.APPLIED, MigrationResult.Status.SKIPPED]
+    engine.getAliases(lkMapper.map(Document).alias()).keySet() == [lkMapper.map(Document).name()] as Set
+    count(locks) == 0
+    engine.getMappings(locks).dynamic == 'strict'
+  }
+
+  def "an expired lock left by a dead process is taken over"() {
+    given:
+    def lkMapper = ProtoMapper.builder().naming(IndexNamingStrategy.prefixed(prefix + '-lk')).build()
+    String locks = lkMapper.naming().lockIndex()
+    String alias = lkMapper.map(Firm).alias()
+    engine.index(locks, alias, [alias: alias, holder: 'dead-host/1/deadbeef', action: 'CREATE', hash: 'x',
+                                acquired_at: '2026-01-01T00:00:00Z', expires_at: Instant.now().minusSeconds(60).toString()],
+        IndexOptions.refreshed())
+
+    when:
+    def result = IndexMigrator.builder().engine(engine).mapper(lkMapper)
+        .options(MigrationOptions.standard().withLockWait(Duration.ZERO)).build().bootstrap(Firm)
+    engine.refresh(locks)
+
+    then:
+    result.ok()
+    result.outcomes()[0].plan().action() == Action.CREATE
+    !engine.get(locks, alias).isPresent()
+  }
+
+  def "a lock another process holds makes the item LOCKED once lockWait has passed"() {
+    given:
+    def lkMapper = ProtoMapper.builder().naming(IndexNamingStrategy.prefixed(prefix + '-lk')).build()
+    String locks = lkMapper.naming().lockIndex()
+    String alias = lkMapper.map(InboxItem).alias()
+    engine.index(locks, alias, [alias: alias, holder: 'busy-host/2/cafebabe', action: 'REINDEX', hash: 'x',
+                                acquired_at: Instant.now().toString(), expires_at: Instant.now().plusSeconds(600).toString()],
+        IndexOptions.refreshed())
+
+    when:
+    def result = IndexMigrator.builder().engine(engine).mapper(lkMapper)
+        .options(MigrationOptions.standard().withLockWait(Duration.ZERO)).build().bootstrap(InboxItem)
+
+    then:
+    !result.ok()
+    result.outcomes()[0].status() == MigrationResult.Status.LOCKED
+    result.outcomes()[0].error().message.contains('busy-host/2/cafebabe')
+    !engine.indexExists(alias)
+
+    cleanup:
+    engine.delete(locks, alias, IndexOptions.refreshed())
+  }
+
   // ------------------------------------------------------------------ errors
 
   def "engine errors are classified"() {
