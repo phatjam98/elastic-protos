@@ -111,12 +111,12 @@ public record MigrationResult(List<Outcome> outcomes) {
     }
   }
 
-  /** Returns whether no item failed and none was blocked. */
+  /** Returns whether no item failed, was blocked, is incomplete or found its lock held. */
   public boolean ok() {
     return outcomes.stream().allMatch(Outcome::ok);
   }
 
-  /** Returns the items that failed or were blocked. */
+  /** Returns the items that are not {@link Outcome#ok()}. */
   public List<Outcome> problems() {
     List<Outcome> problems = new ArrayList<>();
     for (Outcome outcome : outcomes) {
