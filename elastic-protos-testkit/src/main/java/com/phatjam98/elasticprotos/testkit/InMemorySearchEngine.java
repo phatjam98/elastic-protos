@@ -100,13 +100,19 @@ import java.util.regex.Pattern;
  *
  * <p>Aggregations ({@code aggs} or {@code aggregations}) run over every match, not just the page:
  * {@code terms} ({@code field}, {@code size}, {@code min_doc_count}, {@code missing} and {@code
- * order} by {@code _count}, {@code _key} or a metric sub-aggregation path), the metrics {@code
- * min}, {@code max}, {@code avg}, {@code sum}, {@code value_count} and {@code cardinality} (exact,
- * over numbers or RFC 3339 dates), {@code nested} (one element per nested object) and {@code
- * reverse_nested} (each enclosing object or root document counted once), with any number of
- * sub-aggregation levels. {@code date_histogram}, {@code histogram}, {@code range}, {@code
- * date_range} and any other aggregation fail with {@code BAD_REQUEST}. Terms buckets tie on
- * their count by key, ascending, like the engines.
+ * order} by {@code _count}, {@code _key} or a metric sub-aggregation path, alone or compound), the
+ * metrics {@code min}, {@code max}, {@code avg}, {@code sum}, {@code value_count} and {@code
+ * cardinality} (exact, unlike the engines' approximate count, over numbers or RFC 3339 dates),
+ * {@code nested} (one element per nested object) and {@code reverse_nested} (each enclosing object
+ * or root document counted once), with sub-aggregations as the query compiler emits them: one level
+ * of user aggregations plus the nested wrappers. Keys and formatted values follow the engines,
+ * using the index mappings: terms on {@code boolean} fields have keys {@code 1}/{@code 0} with
+ * {@code key_as_string} {@code true}/{@code false}; terms on {@code date} fields have epoch
+ * millisecond keys with {@code key_as_string} such as {@code 2024-06-30T08:00:00.000Z}, the form
+ * {@code value_as_string} of date metrics takes too; a {@code .keyword} sub-field of a text field
+ * reads the text value. {@code date_histogram}, {@code histogram}, {@code range}, {@code
+ * date_range} and any other aggregation fail with {@code BAD_REQUEST}. Terms buckets tie on their
+ * count by key, ascending, like the engines.
  *
  * <p>Every call is recorded in {@link #log()} as the operation name and its target, for example
  * {@code setWriteBlock documents-v1=true}, so specs can assert sequences.
@@ -726,7 +732,14 @@ public class InMemorySearchEngine implements SearchEngine {
       for (Hit hit : matches) {
         roots.add(new InMemoryAggregations.Scope(hit.source(), "", null));
       }
-      aggregations = InMemoryAggregations.run(aggs, roots);
+      Map<String, String> types = new TreeMap<>();
+      for (String name : names) {
+        IndexState state = indices.get(name);
+        if (state != null) {
+          types.putAll(InMemoryAggregations.fieldTypes(state.mappings));
+        }
+      }
+      aggregations = new InMemoryAggregations(types).run(aggs, roots);
     }
     // like the real engines, track_total_hits: false leaves the total out
     boolean counted = !Boolean.FALSE.equals(body.get("track_total_hits"));

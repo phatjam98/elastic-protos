@@ -981,15 +981,15 @@ class InMemorySearchEngineSpec extends Specification {
     def criteria = Criteria.builder().aggregate(
         Aggs.sub(Aggs.terms('by_type', 'type'), Aggs.sum('total', 'size_bytes')),
         Aggs.sub(Aggs.terms('roles', 'parties.role').setTerms(TermsAggregation.newBuilder()
-            .setOrder(TermsOrder.newBuilder().setBy(TermsOrderBy.BY_METRIC).setMetric('firms'))),
+            .addOrder(TermsOrder.newBuilder().setBy(TermsOrderBy.BY_METRIC).setMetric('firms'))),
             Aggs.cardinality('firms', 'firm_id'), Aggs.max('latest', 'filed_at')),
         Aggs.min('smallest', 'size_bytes'), Aggs.max('largest', 'size_bytes'), Aggs.avg('average', 'size_bytes'),
         Aggs.count('counted', 'size_bytes'), Aggs.max('latest', 'filed_at'), Aggs.min('lowest_relevance', 'relevance'),
         Aggs.terms('top_tag', 'tags').setTerms(TermsAggregation.newBuilder().setSize(1)),
         Aggs.terms('by_key', 'type').setTerms(TermsAggregation.newBuilder()
-            .setOrder(TermsOrder.newBuilder().setBy(TermsOrderBy.BY_KEY).setDirection(SortingOrder.DESC))),
+            .addOrder(TermsOrder.newBuilder().setBy(TermsOrderBy.BY_KEY).setDirection(SortingOrder.DESC))),
         Aggs.terms('few', 'firm_id').setTerms(TermsAggregation.newBuilder().setMinDocCount(2)
-            .setOrder(TermsOrder.newBuilder().setBy(TermsOrderBy.BY_COUNT).setDirection(SortingOrder.ASC))),
+            .addOrder(TermsOrder.newBuilder().setBy(TermsOrderBy.BY_COUNT).setDirection(SortingOrder.ASC))),
         Aggs.terms('rel', 'relevance').setTerms(TermsAggregation.newBuilder().setMissing(
             com.phatjam98.elasticprotos.proto.PrimitiveValue.newBuilder().setNumberValue(0)))
     ).aggregationsOnly().build()
@@ -1005,7 +1005,7 @@ class InMemorySearchEngineSpec extends Specification {
     aggs.buckets('roles')*.key() == ['DEFENDANT', 'PLAINTIFF', 'COUNSEL']
     aggs.buckets('roles')*.docCount() == [4L, 3L, 1L]
     aggs.buckets('roles')*.sub()*.metric('firms')*.asLong() == [3L, 2L, 1L]
-    aggs.buckets('roles')[0].sub().metric('latest').valueAsString() == '2024-06-30T08:00:00Z'
+    aggs.buckets('roles')[0].sub().metric('latest').valueAsString() == '2024-06-30T08:00:00.000Z'
     aggs.metric('smallest').asLong() == 8_000L
     aggs.metric('largest').asLong() == 2_500_000L
     Math.abs(aggs.metric('average').value() - 2_953_000d / 6) < 0.01
@@ -1017,6 +1017,46 @@ class InMemorySearchEngineSpec extends Specification {
     aggs.buckets('by_key')*.key() == ['ORDER', 'NOTICE', 'MOTION', 'FILING']
     aggs.buckets('few')*.key() == ['firm-1', 'firm-2', 'firm-3']
     aggs.buckets('rel').collectEntries { [(it.key()): it.docCount()] } == [0L: 5L, 0.75d: 1L]
+  }
+
+  def "terms keys follow the engines: booleans 1/0, dates epoch millis, .keyword reads the text"() {
+    given:
+    engine.createIndex('t-v1', [:], [properties: [
+        flag : [type: 'boolean'],
+        at   : [type: 'date'],
+        title: [type: 'text', fields: [keyword: [type: 'keyword']]],
+        owner: [type: 'object', properties: [name: [type: 'keyword']]]]], ['t'] as Set)
+    engine.index('t', '1', [flag: true, at: '2024-06-30T08:00:00Z', title: 'Alpha', owner: [name: 'x']], IndexOptions.defaults())
+    engine.index('t', '2', [flag: false, at: '2024-01-15T10:30:00.250Z', title: 'Beta', owner: [name: 'x']], IndexOptions.defaults())
+    engine.index('t', '3', [flag: true, at: 1704067200000L, title: 'Alpha', owner: [name: 'y']], IndexOptions.defaults())
+
+    when:
+    def aggs = AggregationResults.of(engine.search(['t'], [size: 0, aggs: [
+        flags : [terms: [field: 'flag']],
+        days  : [terms: [field: 'at', order: [_key: 'asc']]],
+        titles: [terms: [field: 'title.keyword']],
+        owners: [terms: [field: 'owner.name', order: [[_count: 'asc'], [_key: 'desc']]]],
+        latest: [max: [field: 'at']]]]))
+
+    then:
+    aggs.buckets('flags')*.key() == [1L, 0L]
+    aggs.buckets('flags')*.keyAsString() == ['true', 'false']
+    aggs.buckets('flags')*.docCount() == [2L, 1L]
+    aggs.buckets('days')*.key() == [1704067200000L, 1705314600250L, 1719734400000L]
+    aggs.buckets('days')*.keyAsString() == ['2024-01-01T00:00:00.000Z', '2024-01-15T10:30:00.250Z', '2024-06-30T08:00:00.000Z']
+    aggs.buckets('titles')*.key() == ['Alpha', 'Beta']
+    aggs.buckets('titles')*.keyAsString() == [null, null]
+    aggs.buckets('owners')*.key() == ['y', 'x']
+    aggs.metric('latest').valueAsString() == '2024-06-30T08:00:00.000Z'
+
+    when:
+    engine.search(['t'], [aggs: [x: [terms: [field: 'at']]]])
+    engine.index('t', '4', [at: 'not a date'], IndexOptions.defaults())
+    engine.search(['t'], [aggs: [x: [terms: [field: 'at']]]])
+
+    then:
+    def e = thrown(EngineException)
+    e.message.contains('failed to parse date field')
   }
 
   def "a metric of nothing is null, and unsupported aggregations fail with BAD_REQUEST"() {
@@ -1046,7 +1086,7 @@ class InMemorySearchEngineSpec extends Specification {
     [meta: [a: 1]]                                                    || 'has no type'
     [max: [field: 'title']]                                           || 'is not supported for aggregation [max]'
     [max: [field: 'status'], aggs: [y: [min: [field: 'status']]]]    || 'cannot have sub-aggregations'
-    [terms: [field: 'status', order: [_key: 'asc', _count: 'desc']]] || 'one terms order'
+    [terms: [field: 'status', order: [_key: 'asc', _count: 'desc']]] || 'exactly one key'
     [reverse_nested: [path: 'owner']]                                 || 'does not enclose'
     [nested: [path: 'owner'], aggs: [y: [terms: [field: 'status']]]] || 'is not inside nested path [owner]'
   }
