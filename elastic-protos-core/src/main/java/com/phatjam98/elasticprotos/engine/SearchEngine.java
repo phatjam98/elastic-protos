@@ -84,8 +84,28 @@ public interface SearchEngine extends AutoCloseable {
    */
   void putSettings(String index, Map<String, Object> settings);
 
-  /** Blocks or unblocks writes to an index. */
+  /**
+   * Blocks or unblocks writes to an index. Blocking waits for writes already in flight on the
+   * index to finish ({@code PUT /<index>/_block/write} on the engines); both directions show in
+   * {@link #getSettings} as {@code index.blocks.write}.
+   */
   void setWriteBlock(String index, boolean blocked);
+
+  /**
+   * Returns a sequence number at or below which every document of an index was last written before
+   * this call: the minimum over its shards of {@code seq_no.max_seq_no} from the index stats. A
+   * document whose {@code _seq_no} is above it may have been written since; sequence numbers are
+   * per shard, so documents of other shards may be above it too without having changed.
+   *
+   * <p>The default returns {@code -1}, which makes callers treat every document as possibly
+   * changed.
+   *
+   * @param index a concrete index
+   * @return the checkpoint, or -1 when unknown
+   */
+  default long seqNoCheckpoint(String index) {
+    return -1;
+  }
 
   /**
    * Writes one document.

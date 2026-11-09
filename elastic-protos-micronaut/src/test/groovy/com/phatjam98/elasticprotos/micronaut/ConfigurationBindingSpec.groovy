@@ -7,6 +7,7 @@ import com.phatjam98.elasticprotos.mapping.ProtoMapper
 import com.phatjam98.elasticprotos.migration.FailurePolicy
 import com.phatjam98.elasticprotos.migration.IndexMigrator
 import com.phatjam98.elasticprotos.migration.MigrationOptions
+import com.phatjam98.elasticprotos.migration.ReindexMode
 import com.phatjam98.elasticprotos.migration.RemovedFieldPolicy
 import com.phatjam98.elasticprotos.migration.ReplicaPolicy
 import com.phatjam98.elasticprotos.proto.example.Firm
@@ -37,6 +38,9 @@ import spock.lang.Specification
 @Property(name = 'elastic-protos.bootstrap.clear-stale-write-block', value = 'false')
 @Property(name = 'elastic-protos.bootstrap.fail-on-error', value = 'false')
 @Property(name = 'elastic-protos.bootstrap.reindex-timeout', value = '90s')
+@Property(name = 'elastic-protos.bootstrap.reindex-mode', value = 'blocking')
+@Property(name = 'elastic-protos.bootstrap.swap-grace', value = '250ms')
+@Property(name = 'elastic-protos.bootstrap.backfill', value = 'false')
 @Property(name = 'elastic-protos.defaults.shards', value = '3')
 @Property(name = 'elastic-protos.defaults.replicas', value = '2')
 @Property(name = 'elastic-protos.naming.prefix', value = 'dev')
@@ -108,6 +112,9 @@ class ConfigurationBindingSpec extends Specification {
       !clearStaleWriteBlock
       !failOnError
       reindexTimeout == Duration.ofSeconds(90)
+      reindexMode == ReindexMode.BLOCKING
+      swapGrace == Duration.ofMillis(250)
+      !backfill
     }
   }
 
@@ -162,7 +169,8 @@ class ConfigurationBindingSpec extends Specification {
     migrationOptions == MigrationOptions.builder().failure(FailurePolicy.CONTINUE).allowReindex(false)
         .deleteOldAfter(true).removedFields(RemovedFieldPolicy.REINDEX).defaultShards(3)
         .replicas(ReplicaPolicy.fixed(2)).reindexTimeout(Duration.ofSeconds(90)).dryRun(true)
-        .clearStaleWriteBlock(false).build()
+        .clearStaleWriteBlock(false).reindexMode(ReindexMode.BLOCKING).swapGrace(Duration.ofMillis(250))
+        .backfill(false).build()
     migrator.options() == migrationOptions
   }
 }

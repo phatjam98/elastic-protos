@@ -30,6 +30,7 @@ import java.util.TreeSet;
  * nested field whose current mapping is dynamic ({@code dynamic: true}, or no properties at all
  * while dynamic mapping is enabled, inherited from its parents). Brand-new top-level fields and
  * properties added under an object that already has typed properties are plain additions.
+ * Unindexed additions are {@link Action#BACKFILL backfilled} in place.
  *
  * <p>Settings are compared only for keys the desired settings declare, by string value, against
  * the engine's {@code settings.index} object. Shard and replica counts cannot be migrated, so
@@ -92,19 +93,21 @@ public final class DiffClassifier {
   /**
    * Classifies a diff.
    *
-   * <p>Type changes, changes to any parameter not in {@link #UPDATABLE_PARAMS} (except root {@code
-   * dynamic_templates} changes described at {@code templateChange}), and {@link
-   * MappingDiff#unindexedAdditions() additions old documents were never indexed into} need a
-   * reindex; removed fields need one only under {@link RemovedFieldPolicy#REINDEX}; other added
-   * fields and {@code dynamic} changes are applied in place; anything else is a no-op. Settings
-   * differences alone are a no-op.
+   * <p>Type changes and changes to any parameter not in {@link #UPDATABLE_PARAMS} (except root
+   * {@code dynamic_templates} changes described at {@code templateChange}) need a reindex; removed
+   * fields need one only under {@link RemovedFieldPolicy#REINDEX}. Otherwise, {@link
+   * MappingDiff#unindexedAdditions() additions old documents were never indexed into} are
+   * backfilled: the mapping is extended in place and the documents are re-indexed with an update
+   * by query. Other added fields and {@code dynamic} changes are applied in place; anything else is
+   * a no-op. Settings differences alone are a no-op.
    *
    * @param diff the differences
    * @param removedFields how removed fields are treated
-   * @return {@link Action#NO_OP}, {@link Action#PUT_MAPPING} or {@link Action#REINDEX}
+   * @return {@link Action#NO_OP}, {@link Action#PUT_MAPPING}, {@link Action#BACKFILL} or {@link
+   *     Action#REINDEX}
    */
   public static Action classify(MappingDiff diff, RemovedFieldPolicy removedFields) {
-    if (!diff.typeChanged().isEmpty() || !diff.unindexedAdditions().isEmpty()) {
+    if (!diff.typeChanged().isEmpty()) {
       return Action.REINDEX;
     }
     boolean putParams = false;
@@ -121,6 +124,9 @@ public final class DiffClassifier {
     }
     if (!diff.removed().isEmpty() && removedFields == RemovedFieldPolicy.REINDEX) {
       return Action.REINDEX;
+    }
+    if (!diff.unindexedAdditions().isEmpty()) {
+      return Action.BACKFILL;
     }
     if (!diff.added().isEmpty() || putParams) {
       return Action.PUT_MAPPING;

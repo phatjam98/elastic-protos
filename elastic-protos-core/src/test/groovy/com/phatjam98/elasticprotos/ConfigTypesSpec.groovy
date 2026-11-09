@@ -9,7 +9,9 @@ import com.phatjam98.elasticprotos.engine.UpdateByQueryRequest
 import com.phatjam98.elasticprotos.mapping.FieldKind
 import com.phatjam98.elasticprotos.mapping.MappingDefaults
 import com.phatjam98.elasticprotos.migration.FailurePolicy
+import com.phatjam98.elasticprotos.migration.DegradedReconcile
 import com.phatjam98.elasticprotos.migration.MigrationOptions
+import com.phatjam98.elasticprotos.migration.ReindexMode
 import com.phatjam98.elasticprotos.migration.RemovedFieldPolicy
 import com.phatjam98.elasticprotos.migration.ReplicaPolicy
 import com.phatjam98.elasticprotos.proto.DynamicMode
@@ -334,12 +336,16 @@ class ConfigTypesSpec extends Specification {
     def built = MigrationOptions.builder()
         .failure(FailurePolicy.CONTINUE).allowReindex(false).deleteOldAfter(true)
         .removedFields(RemovedFieldPolicy.REINDEX).defaultShards(3).replicas(ReplicaPolicy.fixed(2))
-        .reindexTimeout(Duration.ofSeconds(90)).dryRun(true).clearStaleWriteBlock(false).build()
+        .reindexTimeout(Duration.ofSeconds(90)).dryRun(true).clearStaleWriteBlock(false)
+        .reindexMode(ReindexMode.BLOCKING).swapGrace(Duration.ZERO).backfill(false)
+        .degradedReconcile(DegradedReconcile.CREATE_MISSING).build()
     def copied = MigrationOptions.standard()
         .withFailure(FailurePolicy.CONTINUE).withAllowReindex(false).withDeleteOldAfter(true)
         .withRemovedFields(RemovedFieldPolicy.REINDEX).withDefaultShards(3)
         .withReplicas(ReplicaPolicy.fixed(2)).withReindexTimeout(Duration.ofSeconds(90))
         .withDryRun(true).withClearStaleWriteBlock(false)
+        .withReindexMode(ReindexMode.BLOCKING).withSwapGrace(Duration.ZERO).withBackfill(false)
+        .withDegradedReconcile(DegradedReconcile.CREATE_MISSING)
 
     expect:
     MigrationOptions.builder().build() == MigrationOptions.standard()
@@ -350,7 +356,12 @@ class ConfigTypesSpec extends Specification {
     built.toBuilder().build() == built
     built.toString() == 'MigrationOptions[failure=CONTINUE, allowReindex=false, deleteOldAfter=true,' +
         ' removedFields=REINDEX, defaultShards=3, replicas=ReplicaPolicy[mode=FIXED, count=2],' +
-        ' reindexTimeout=PT1M30S, dryRun=true, clearStaleWriteBlock=false]'
+        ' reindexTimeout=PT1M30S, dryRun=true, clearStaleWriteBlock=false, reindexMode=BLOCKING,' +
+        ' swapGrace=PT0S, backfill=false, degradedReconcile=CREATE_MISSING]'
+    MigrationOptions.standard().degradedReconcile() == DegradedReconcile.REPORT
+    MigrationOptions.standard().reindexMode() == ReindexMode.ZERO_DOWNTIME
+    MigrationOptions.standard().swapGrace() == Duration.ofSeconds(5)
+    MigrationOptions.standard().backfill()
     !built.equals('x')
   }
 
@@ -370,6 +381,10 @@ class ConfigTypesSpec extends Specification {
     'reindexTimeout'       | { it.withReindexTimeout(Duration.ofSeconds(1)) }
     'dryRun'               | { it.withDryRun(true) }
     'clearStaleWriteBlock' | { it.withClearStaleWriteBlock(false) }
+    'reindexMode'          | { it.withReindexMode(ReindexMode.BLOCKING) }
+    'swapGrace'            | { it.withSwapGrace(Duration.ofSeconds(1)) }
+    'backfill'             | { it.withBackfill(false) }
+    'degradedReconcile'    | { it.withDegradedReconcile(DegradedReconcile.CREATE_MISSING) }
   }
 
   @Unroll
@@ -390,6 +405,10 @@ class ConfigTypesSpec extends Specification {
     'no removed'     | { it.removedFields(null) }                   || NullPointerException     | 'removedFields'
     'no replicas'    | { it.replicas(null) }                        || NullPointerException     | 'replicas'
     'no timeout'     | { it.reindexTimeout(null) }                  || NullPointerException     | 'reindexTimeout'
+    'neg. grace'     | { it.swapGrace(Duration.ofMillis(-1)) }      || IllegalArgumentException | 'swapGrace must not be negative: PT-0.001S'
+    'no grace'       | { it.swapGrace(null) }                       || NullPointerException     | 'swapGrace'
+    'no mode'        | { it.reindexMode(null) }                     || NullPointerException     | 'reindexMode'
+    'no degraded'    | { it.degradedReconcile(null) }               || NullPointerException     | 'degradedReconcile'
   }
 
   // ---- ReplicaPolicy -----------------------------------------------------------------------

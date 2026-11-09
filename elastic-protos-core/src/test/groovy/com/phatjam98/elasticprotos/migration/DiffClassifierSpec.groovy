@@ -37,7 +37,7 @@ class DiffClassifierSpec extends Specification {
     'single copy_to equals a list'              | root([a: [type: 'keyword', copy_to: 'all']])                 | root([a: [type: 'keyword', copy_to: ['all']]])                          | []               | []      | []          | []                   | Action.NO_OP
     'new field'                                 | root([a: KEYWORD])                                           | root([a: KEYWORD, b: KEYWORD])                                          | ['b']            | []      | []          | []                   | Action.PUT_MAPPING
     'new sub-property'                          | root([o: [properties: [a: KEYWORD]]])                        | root([o: [type: 'object', properties: [a: KEYWORD, b: KEYWORD]]])       | ['o.b']          | []      | []          | []                   | Action.PUT_MAPPING
-    'new multi-field'                           | root([t: TEXT])                                              | root([t: TEXT + [fields: [keyword: KEYWORD]]])                          | ['t.keyword']    | []      | []          | []                   | Action.REINDEX
+    'new multi-field'                           | root([t: TEXT])                                              | root([t: TEXT + [fields: [keyword: KEYWORD]]])                          | ['t.keyword']    | []      | []          | []                   | Action.BACKFILL
     'dynamic change'                            | root([a: KEYWORD])                                           | root([a: KEYWORD], [dynamic: 'false'])                                  | []               | []      | []          | ['<root>:dynamic']   | Action.PUT_MAPPING
     'type change'                               | root([t: TEXT])                                              | root([t: KEYWORD])                                                      | []               | []      | ['t']       | []                   | Action.REINDEX
     'object to nested'                          | root([o: [properties: [a: KEYWORD]]])                        | root([o: [type: 'nested', properties: [a: KEYWORD]]])                   | []               | []      | ['o']       | []                   | Action.REINDEX
@@ -123,19 +123,19 @@ class DiffClassifierSpec extends Specification {
 
     where:
     description                                     | existing                                                    | desired                                                                                | added             | unindexed         | paramChanged  | action
-    'multi-field under an existing field'           | root([t: TEXT])                                             | root([t: TEXT + [fields: [keyword: KEYWORD]]])                                         | ['t.keyword']     | ['t.keyword']     | []            | Action.REINDEX
-    'second multi-field next to an existing one'    | root([t: TEXT + [fields: [keyword: KEYWORD]]])              | root([t: TEXT + [fields: [keyword: KEYWORD, raw: KEYWORD]]])                           | ['t.raw']         | ['t.raw']         | []            | Action.REINDEX
-    'multi-field under a nested property'           | root([n: [type: 'nested', properties: [t: TEXT]]])          | root([n: [type: 'nested', properties: [t: TEXT + [fields: [keyword: KEYWORD]]]]])      | ['n.t.keyword']   | ['n.t.keyword']   | []            | Action.REINDEX
+    'multi-field under an existing field'           | root([t: TEXT])                                             | root([t: TEXT + [fields: [keyword: KEYWORD]]])                                         | ['t.keyword']     | ['t.keyword']     | []            | Action.BACKFILL
+    'second multi-field next to an existing one'    | root([t: TEXT + [fields: [keyword: KEYWORD]]])              | root([t: TEXT + [fields: [keyword: KEYWORD, raw: KEYWORD]]])                           | ['t.raw']         | ['t.raw']         | []            | Action.BACKFILL
+    'multi-field under a nested property'           | root([n: [type: 'nested', properties: [t: TEXT]]])          | root([n: [type: 'nested', properties: [t: TEXT + [fields: [keyword: KEYWORD]]]]])      | ['n.t.keyword']   | ['n.t.keyword']   | []            | Action.BACKFILL
     'new field that carries multi-fields'           | root([a: KEYWORD])                                          | root([a: KEYWORD, t: TEXT + [fields: [keyword: KEYWORD]]])                             | ['t']             | []                | []            | Action.PUT_MAPPING
     'new top-level field under a dynamic root'      | root([a: KEYWORD], [dynamic: 'true'])                       | root([a: KEYWORD, b: KEYWORD], [dynamic: 'true'])                                      | ['b']             | []                | []            | Action.PUT_MAPPING
     'property under typed properties'               | root([o: [properties: [a: KEYWORD]]], [dynamic: 'true'])    | root([o: [properties: [a: KEYWORD, b: KEYWORD]]], [dynamic: 'true'])                   | ['o.b']           | []                | []            | Action.PUT_MAPPING
-    'typed property over dynamic: true'             | root([m: DYN])                                              | root([m: [type: 'object', dynamic: 'strict', properties: [a: KEYWORD]]])               | ['m.a']           | ['m.a']           | ['m:dynamic'] | Action.REINDEX
-    'typed property over dynamic: true, keys kept'  | root([m: DYN + [properties: [tier: KEYWORD]]])              | root([m: [type: 'object', dynamic: 'strict', properties: [tier: KEYWORD, a: KEYWORD]]]) | ['m.a']          | ['m.a']           | ['m:dynamic'] | Action.REINDEX
+    'typed property over dynamic: true'             | root([m: DYN])                                              | root([m: [type: 'object', dynamic: 'strict', properties: [a: KEYWORD]]])               | ['m.a']           | ['m.a']           | ['m:dynamic'] | Action.BACKFILL
+    'typed property over dynamic: true, keys kept'  | root([m: DYN + [properties: [tier: KEYWORD]]])              | root([m: [type: 'object', dynamic: 'strict', properties: [tier: KEYWORD, a: KEYWORD]]]) | ['m.a']          | ['m.a']           | ['m:dynamic'] | Action.BACKFILL
     'typed over dynamic: true, only picked-up keys' | root([m: DYN + [properties: [tier: KEYWORD]]])              | root([m: [type: 'object', dynamic: 'strict', properties: [tier: KEYWORD]]])            | []                | []                | ['m:dynamic'] | Action.PUT_MAPPING
-    'typed property over a dynamic nested field'    | root([n: NESTED_DYN])                                       | root([n: [type: 'nested', properties: [a: KEYWORD]]])                                  | ['n.a']           | ['n.a']           | ['n:dynamic'] | Action.REINDEX
-    'empty object under a dynamic root'             | root([o: [type: 'object']], [dynamic: 'true'])              | root([o: [type: 'object', properties: [a: KEYWORD]]], [dynamic: 'true'])               | ['o.a']           | ['o.a']           | []            | Action.REINDEX
-    'empty object, root without dynamic'            | [properties: [o: [type: 'object']]]                         | [properties: [o: [properties: [a: KEYWORD]]]]                                          | ['o.a']           | ['o.a']           | []            | Action.REINDEX
-    'empty object inheriting dynamic from a parent' | root([p: [properties: [o: [type: 'object']]]], [dynamic: true]) | root([p: [properties: [o: [properties: [a: KEYWORD]]]]], [dynamic: true])          | ['p.o.a']         | ['p.o.a']         | []            | Action.REINDEX
+    'typed property over a dynamic nested field'    | root([n: NESTED_DYN])                                       | root([n: [type: 'nested', properties: [a: KEYWORD]]])                                  | ['n.a']           | ['n.a']           | ['n:dynamic'] | Action.BACKFILL
+    'empty object under a dynamic root'             | root([o: [type: 'object']], [dynamic: 'true'])              | root([o: [type: 'object', properties: [a: KEYWORD]]], [dynamic: 'true'])               | ['o.a']           | ['o.a']           | []            | Action.BACKFILL
+    'empty object, root without dynamic'            | [properties: [o: [type: 'object']]]                         | [properties: [o: [properties: [a: KEYWORD]]]]                                          | ['o.a']           | ['o.a']           | []            | Action.BACKFILL
+    'empty object inheriting dynamic from a parent' | root([p: [properties: [o: [type: 'object']]]], [dynamic: true]) | root([p: [properties: [o: [properties: [a: KEYWORD]]]]], [dynamic: true])          | ['p.o.a']         | ['p.o.a']         | []            | Action.BACKFILL
     'empty object under a strict root'              | root([o: [type: 'object']])                                 | root([o: [type: 'object', properties: [a: KEYWORD]]])                                  | ['o.a']           | []                | []            | Action.PUT_MAPPING
     'empty object that turns dynamic off'           | root([o: [type: 'object', dynamic: 'false']], [dynamic: 'true']) | root([o: [type: 'object', dynamic: false, properties: [a: KEYWORD]]], [dynamic: 'true']) | ['o.a']     | []                | []            | Action.PUT_MAPPING
     'empty object under a parent that is strict'    | root([p: [dynamic: 'strict', properties: [o: [type: 'object']]]], [dynamic: 'true']) | root([p: [dynamic: 'strict', properties: [o: [properties: [a: KEYWORD]]]]], [dynamic: 'true']) | ['p.o.a'] | [] | [] | Action.PUT_MAPPING
@@ -195,6 +195,24 @@ class DiffClassifierSpec extends Specification {
   }
 
   @Unroll
+  def "unindexed additions are backfilled unless something else needs a reindex: #description"() {
+    given:
+    def diff = new MappingDiff([new MappingDiff.Change('t.keyword', null, KEYWORD)], removed, typeChanged,
+        paramChanged, false, [new MappingDiff.Change('t.keyword', null, KEYWORD)])
+
+    expect:
+    DiffClassifier.classify(diff, policy) == action
+
+    where:
+    description                       | removed                                   | typeChanged                                        | paramChanged                                          | policy                    | action
+    'alone'                           | []                                        | []                                                 | []                                                    | RemovedFieldPolicy.KEEP    | Action.BACKFILL
+    'with a dynamic change'           | []                                        | []                                                 | [new MappingDiff.Change('<root>:dynamic', 'true', 'strict')] | RemovedFieldPolicy.KEEP | Action.BACKFILL
+    'with a removed field kept'       | [new MappingDiff.Change('old', KEYWORD, null)] | []                                            | []                                                    | RemovedFieldPolicy.KEEP    | Action.BACKFILL
+    'with a removed field reindexed'  | [new MappingDiff.Change('old', KEYWORD, null)] | []                                            | []                                                    | RemovedFieldPolicy.REINDEX | Action.REINDEX
+    'with a type change'              | []                                        | [new MappingDiff.Change('u', 'text', 'keyword')]   | []                                                    | RemovedFieldPolicy.KEEP    | Action.REINDEX
+    'with an analyzer change'         | []                                        | []                                                 | [new MappingDiff.Change('t:analyzer', 'english', 'standard')] | RemovedFieldPolicy.KEEP | Action.REINDEX
+  }
+
   def "settings #description"() {
     expect:
     DiffClassifier.diff([:], [:], existing, desired).settingsChanged() == changed

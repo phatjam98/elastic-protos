@@ -17,7 +17,7 @@ import java.util.Set;
 public record MigrationPlan(List<IndexPlan> items) {
 
   private static final Set<Action> CHANGES = Set.of(Action.CREATE, Action.PUT_MAPPING,
-      Action.REINDEX);
+      Action.BACKFILL, Action.REINDEX);
 
   /** Copies the items. */
   public MigrationPlan {
@@ -39,7 +39,8 @@ public record MigrationPlan(List<IndexPlan> items) {
    * and the number of changed fields, followed by warnings and, for blocked and no-op items, the
    * reason. The indices read {@code current -> target} for {@link Action#CREATE}, {@link
    * Action#REINDEX} and {@link Action#BLOCKED}, and {@code current (in place)} for {@link
-   * Action#PUT_MAPPING} and {@link Action#NO_OP}, whose live index keeps its name.
+   * Action#PUT_MAPPING}, {@link Action#BACKFILL} and {@link Action#NO_OP}, whose live index keeps
+   * its name.
    */
   public String toReport() {
     StringBuilder out = new StringBuilder();
@@ -69,7 +70,8 @@ public record MigrationPlan(List<IndexPlan> items) {
    */
   private static String indices(IndexPlan item) {
     String current = item.currentIndex() == null ? "(none)" : item.currentIndex();
-    if (item.action() == Action.PUT_MAPPING || item.action() == Action.NO_OP) {
+    if (item.action() == Action.PUT_MAPPING || item.action() == Action.BACKFILL
+        || item.action() == Action.NO_OP) {
       return current + " (in place)";
     }
     return current + " -> " + item.target().name();
@@ -88,6 +90,15 @@ public record MigrationPlan(List<IndexPlan> items) {
       entry.put("targetHash", item.target().contentHash());
       entry.put("reason", item.reason());
       entry.put("warnings", item.warnings());
+      if (item.resume() != null) {
+        Map<String, Object> resume = new LinkedHashMap<>();
+        resume.put("from", item.resume().from());
+        resume.put("pitId", item.resume().pitId());
+        resume.put("phase", item.resume().phase());
+        resume.put("swapped", item.resume().swapped());
+        resume.put("rollback", item.resume().rollback());
+        entry.put("resume", resume);
+      }
       Map<String, Object> diff = new LinkedHashMap<>();
       diff.put("added", changes(item.diff().added()));
       diff.put("removed", changes(item.diff().removed()));

@@ -17,7 +17,7 @@ import java.util.List;
  * @param unindexedAdditions the subset of {@code added} that existing documents were never indexed
  *     into: a multi-field added under an existing field, or a typed property added under an object
  *     whose current mapping is dynamic. Putting the mapping would leave them empty for every old
- *     document, so they need a reindex
+ *     document, so they are backfilled with an update by query, or reindexed
  */
 public record MappingDiff(
     List<Change> added,
@@ -81,7 +81,7 @@ public record MappingDiff(
 
   /**
    * Returns whether fields were added and nothing was removed or changed. An additive diff can
-   * still need a reindex; see {@link #unindexedAdditions()}.
+   * still need a backfill or a reindex; see {@link #unindexedAdditions()}.
    */
   public boolean additiveOnly() {
     return !added.isEmpty() && removed.isEmpty() && typeChanged.isEmpty()

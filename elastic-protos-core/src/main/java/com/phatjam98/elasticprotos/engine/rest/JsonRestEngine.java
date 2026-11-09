@@ -391,7 +391,30 @@ public final class JsonRestEngine implements SearchEngine {
 
   @Override
   public void setWriteBlock(String index, boolean blocked) {
-    putSettings(index, Map.of("index.blocks.write", blocked));
+    if (blocked) {
+      // the add-block API waits for in-flight writes, unlike the plain settings update
+      require(perform("PUT", "/" + index + "/_block/write", Map.of(), null, RawHttp.JSON));
+    } else {
+      putSettings(index, Map.of("index.blocks.write", false));
+    }
+  }
+
+  /** Reads {@code GET /<index>/_stats?level=shards} and returns the lowest shard max_seq_no. */
+  @Override
+  public long seqNoCheckpoint(String index) {
+    Map<String, Object> response = object(require(
+        getRequest("/" + index + "/_stats", Map.of("level", "shards"))));
+    Map<String, Object> shards = map(map(map(response.get("indices")).get(index)).get("shards"));
+    long checkpoint = Long.MAX_VALUE;
+    for (Object copies : shards.values()) {
+      for (Map<String, Object> copy : list(copies)) {
+        Object max = map(copy.get("seq_no")).get("max_seq_no");
+        if (max instanceof Number) {
+          checkpoint = Math.min(checkpoint, ((Number) max).longValue());
+        }
+      }
+    }
+    return checkpoint == Long.MAX_VALUE ? -1 : checkpoint;
   }
 
   @Override
