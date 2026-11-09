@@ -54,7 +54,9 @@ import java.util.regex.Pattern;
  *       when the update carries one, like both engines; with {@link #rejectTypeChanges(boolean)}
  *       (on by default) it refuses to change an existing field's type.
  *   <li>{@link #updateAliases} validates every action before applying any.
- *   <li>Writes to a write-blocked index fail with {@code BLOCKED} and status 403.
+ *   <li>Writes to a write-blocked index fail with {@code BLOCKED} and status 403. Calls are
+ *       sequential, so {@link #setWriteBlock} has no in-flight writes to wait for, unlike the
+ *       engines' {@code _block/write}.
  *   <li>Every write takes the next value of one global sequence number counter (the primary term
  *       is always 1) and increments the document's version. {@link #get} always returns version,
  *       sequence number and primary term; {@link #search} returns the version when the body asks
@@ -86,15 +88,18 @@ import java.util.regex.Pattern;
  * copies, and {@link #duringUpdateByQuery} likewise for an update by query, so a spec can write
  * concurrently; {@link #afterAliasUpdate} runs after {@link #updateAliases} applied its actions.
  *
- * <p>Limits: documents are never validated against mappings; tombstones never expire (there is no
- * {@code index.gc_deletes}); every write is immediately visible
+ * <p>Limits: documents are never validated against mappings; tombstones never expire unless
+ * {@link #gcDeletes(Duration)} sets a lifetime or {@link #expireTombstones()} drops them (the
+ * engines' {@code index.gc_deletes}, 60 s by default), after which a write of the id starts again
+ * at version 1; every write is immediately visible
  * (refresh is a no-op); writes to unknown indices fail instead of auto-creating them; {@link
  * #reindex} requires the destination to exist and supports only a tiny stand-in for Painless
  * (one statement per line, {@code ;} optional, blank and {@code //} lines ignored):
  * {@code ctx._source.<field> = params.<name>}, {@code ctx._source.remove('<field>')} and {@code
  * ctx._id = params.<name>};
  * {@link #search} supports only the queries {@code match_all}, {@code term} and {@code terms} on
- * one field (dotted paths walk into objects and arrays), {@code ids}, and {@code bool} with
+ * one field (dotted paths walk into objects and arrays), {@code ids}, a top-level {@code range}
+ * on {@code _seq_no} with {@code gt}, and {@code bool} with
  * {@code filter}, {@code must}, {@code must_not} and {@code should} (with {@code
  * minimum_should_match}, default 1 when there is no filter or must clause, else 0) over those, plus
  * {@code from}, {@code size}, {@code track_total_hits}, {@code pit} and {@code search_after}. Hits
@@ -129,6 +134,7 @@ public class InMemorySearchEngine implements SearchEngine {
   private Consumer<ReindexRequest> duringReindex = request -> {};
   private Runnable afterAliasUpdate = () -> {};
   private Consumer<UpdateByQueryRequest> duringUpdateByQuery = request -> {};
+  private Duration gcDeletes;
 
   /** Creates an empty engine. */
   public InMemorySearchEngine() {}
@@ -177,7 +183,7 @@ public class InMemorySearchEngine implements SearchEngine {
    * none (it was never deleted, or was written again since).
    */
   public Long tombstoneVersion(String index, String id) {
-    return concrete(index).tombstones.get(id);
+    return tombstone(concrete(index), id);
   }
 
   /**
@@ -200,6 +206,35 @@ public class InMemorySearchEngine implements SearchEngine {
   /** Returns the ids of the open points in time. */
   public Set<String> openPits() {
     return new LinkedHashSet<>(pits.keySet());
+  }
+
+  /**
+   * Sets how long a delete's version tombstone lives, like {@code index.gc_deletes}; null (the
+   * default) keeps tombstones forever.
+   */
+  public InMemorySearchEngine gcDeletes(Duration lifetime) {
+    this.gcDeletes = lifetime;
+    return this;
+  }
+
+  /** Drops every version tombstone, as if {@code index.gc_deletes} had passed for all of them. */
+  public InMemorySearchEngine expireTombstones() {
+    for (IndexState state : indices.values()) {
+      state.tombstones.clear();
+      state.tombstoneTimes.clear();
+    }
+    return this;
+  }
+
+  /**
+   * Returns the global sequence number counter: every document written after this call has a
+   * higher {@code _seq_no}.
+   */
+  @Override
+  public long seqNoCheckpoint(String index) {
+    record("seqNoCheckpoint", index);
+    concrete(index);
+    return seqNo;
   }
 
   /** Returns every concrete index with its aliases, sorted by name. */
@@ -469,7 +504,7 @@ public class InMemorySearchEngine implements SearchEngine {
     List<Map<String, Object>> failures = new ArrayList<>();
     for (Snapshot doc : snapshot) {
       Long current = dest.versions.containsKey(doc.id())
-          ? dest.versions.get(doc.id()) : dest.tombstones.get(doc.id());
+          ? dest.versions.get(doc.id()) : tombstone(dest, doc.id());
       if (external && current != null && current >= doc.version()) {
         conflicts++;
         if (!request.proceedOnConflicts()) {
@@ -709,8 +744,12 @@ public class InMemorySearchEngine implements SearchEngine {
       if (state == null) {
         continue;
       }
+      Long seqNoAbove = seqNoAbove(query);
       for (Map.Entry<String, Map<String, Object>> doc : state.docs.entrySet()) {
-        if (matches(query, doc.getKey(), doc.getValue())) {
+        boolean hit = seqNoAbove == null
+            ? matches(query, doc.getKey(), doc.getValue())
+            : state.seqNos.getOrDefault(doc.getKey(), -1L) > seqNoAbove;
+        if (hit) {
           String id = doc.getKey();
           matches.add(new Hit(name, id, 1.0, Json.sortedCopy(doc.getValue()), List.of(),
               withVersion ? state.versions.get(id) : null,
@@ -776,12 +815,23 @@ public class InMemorySearchEngine implements SearchEngine {
    */
   private long stamp(IndexState state, String id, Long version) {
     Long previous = state.versions.containsKey(id)
-        ? state.versions.get(id) : state.tombstones.get(id);
+        ? state.versions.get(id) : tombstone(state, id);
     long next = version != null ? version : (previous == null ? 0L : previous) + 1;
     state.tombstones.remove(id);
+    state.tombstoneTimes.remove(id);
     state.versions.put(id, next);
     state.seqNos.put(id, ++seqNo);
     return next;
+  }
+
+  /** Returns the tombstone version of an id, dropping it once {@link #gcDeletes} has passed. */
+  private Long tombstone(IndexState state, String id) {
+    Long time = state.tombstoneTimes.get(id);
+    if (gcDeletes != null && time != null && System.nanoTime() - time >= gcDeletes.toNanos()) {
+      state.tombstones.remove(id);
+      state.tombstoneTimes.remove(id);
+    }
+    return state.tombstones.get(id);
   }
 
   /** Deletes a document, leaving its bumped version behind as a tombstone. */
@@ -789,6 +839,7 @@ public class InMemorySearchEngine implements SearchEngine {
     Long version = state.versions.remove(id);
     if (version != null) {
       state.tombstones.put(id, version + 1);
+      state.tombstoneTimes.put(id, System.nanoTime());
     }
     state.seqNos.remove(id);
     seqNo++;
@@ -1100,6 +1151,12 @@ public class InMemorySearchEngine implements SearchEngine {
     return matched >= minimum;
   }
 
+  /** Returns {@code gt} of a top-level {@code {"range": {"_seq_no": {"gt": n}}}} query, or null. */
+  private static Long seqNoAbove(Map<String, Object> query) {
+    Object gt = map(map(query.get("range")).get("_seq_no")).get("gt");
+    return gt instanceof Number ? ((Number) gt).longValue() : null;
+  }
+
   /** Collects the values at a dotted path, walking into arrays. */
   private static void collect(Object node, String[] path, int depth, List<Object> out) {
     if (node instanceof List) {
@@ -1154,6 +1211,7 @@ public class InMemorySearchEngine implements SearchEngine {
     private final Map<String, Long> versions = new TreeMap<>();
     private final Map<String, Long> seqNos = new TreeMap<>();
     private final Map<String, Long> tombstones = new TreeMap<>();
+    private final Map<String, Long> tombstoneTimes = new TreeMap<>();
     private boolean writeBlocked;
   }
 
