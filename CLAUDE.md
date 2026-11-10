@@ -169,4 +169,4 @@ Checkstyle, JaCoCo and Javadoc.
   `<name>__nested` / `<name>__reverse`. `RangeValue.min`/`max` are `optional` (open bounds).
 - `InMemorySearchEngine` (testkit) runs only terms, the six metrics, `nested` and `reverse_nested`
   aggregations, ignores `highlight`, and models seq_no, tombstones and PIT snapshots like the engines.
-  `EngineIntegrationSpec` has 57 feature methods.
+  `EngineIntegrationSpec` has 58 feature methods.
