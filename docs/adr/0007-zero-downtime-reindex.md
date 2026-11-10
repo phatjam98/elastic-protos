@@ -79,14 +79,182 @@ operator asks it to create missing documents, which would bring back deletes mad
 
 ## Consequences
 
-- Writes through the alias never fail during a reindex, except a straggler that resolved the alias
-  before the swap and arrives after the grace period: it gets a retryable `BLOCKED` error rather
-  than landing in an index nobody reads.
+- Full-document writes and deletes through the alias never fail during a reindex, except a
+  straggler that resolved the alias before the swap and arrives after the grace period: it gets a
+  retryable `BLOCKED` error rather than landing in an index nobody reads. *(Qualified in the second
+  addendum: a partial `_update` can fail with 409 at the swap.)*
 - Reads after the swap can miss writes made to the old index after the catch-up pass until the
-  reconcile reaches them; a partial `_update` in that window applies to the stale copy. Last writer
-  wins per document.
+  reconcile reaches them, and return documents deleted from the old index after the first copy
+  started until the sweep; a partial `_update` in that window applies to the stale copy. Last
+  writer wins per document.
 - A reindex costs two copy passes, a PIT and a scan of the old index; document counts of the two
   indices may legitimately differ afterwards, so a difference is a warning, not a failure.
 - `IndexPlan` gains `resume`, `MigrationResult.Outcome` gains `reconcile`, `rollback` returns an
   `Outcome`, and `IndexMigrator.Builder.listener` reports phases (an exception from the listener
   simulates a crash in tests).
+
+## Addendum (2026-11-10): reconcile by sequence number range
+
+The cold pass of step 7 and the sweep of step 8 each read every document, so the stale-read window
+after the swap grew with the index, not with the writes made during the copy. They are now skipped
+where that is provably sound (`ReconcileStrategy.SEQ_NO_RANGE`, recorded in `ReconcileStats`).
+
+- **Checkpoint.** The prepare step records the global checkpoint of the old index (the lowest
+  `seq_no.global_checkpoint` over its primaries, `SearchEngine.globalCheckpoint`) instead of the
+  lowest `max_seq_no` (still the fallback for an engine without it). Every operation at or below a
+  shard's global checkpoint has been processed by every in-sync copy, and no later operation gets a
+  sequence number at or below it, even after a primary fails over (the new primary holds every
+  operation up to the global checkpoint and continues above its own `max_seq_no`). `max_seq_no`
+  promises neither: a number can be taken before its operation is in Lucene, and above the global
+  checkpoint a failover can roll operations back and hand their numbers to new writes. The
+  checkpoint is the minimum over the shards, so for the other shards it is a lower bound and the
+  hot pass reads a superset.
+- **Skipping the cold pass.** The copy refreshes the old index after the checkpoint is read, so a
+  document at or below it is visible to the first copy and is copied with its version. When the
+  run created the new index itself (no reused leftover), no script runs, and it is not a rollback,
+  nothing else writes the new index before the snapshot, so every such document is in the snapshot
+  unchanged (premise P). The hot pass (`range` on `_seq_no` above the checkpoint) is then the whole
+  reconcile. A checkpoint of -1 (a shard without operations) would make the range the whole index
+  and is a full scan instead. OpenSearch segment replication on either index is excluded, because
+  a replica can serve a search (the copy's scroll, or the snapshot) from older segments after a
+  refresh.
+- **Skipping the sweep.** A delete leaves nothing a range query can find, so the sweep is decided
+  by counting. With S the snapshot, A the frozen old index and H its documents above the
+  checkpoint, P gives `A \ H ⊆ S`, so `|S \ A| = |S| - |A| + |H \ S|`, where `|H \ S|` falls out
+  of the hot pass. Zero ghosts skips the sweep; a positive count runs it.
+- **Checking P, not assuming it** (review). If P fails for k documents, the count reads
+  `ghosts - k`, so a violation that loses as many documents as there are real ghosts reads 0 and
+  silently skips both the sweep and the cold pass. The negative branch (cold pass and sweep, with
+  a warning) is therefore only a last-resort inconsistency detector, not a guard. P is checked
+  where it is cheap, before the swap, and the range is dropped (full scan) when any check fails:
+  - the checkpoint is not above the engine's own lowest `max_seq_no` (no valid global checkpoint
+    is);
+  - right after the refresh that precedes the first pass, the old index's documents at or below
+    the checkpoint are counted (C1); the first pass must read at least C1 documents and create
+    exactly every document it read: no failure, version conflict (on a fresh index: duplicate ids
+    under custom routing), no-op (a dropping ingest pipeline), update or delete;
+  - the catch-up deletes nothing;
+  - the snapshot holds exactly the number of documents the two passes created (nothing else
+    wrote or deleted the fresh index before the swap);
+  - at the freeze, the documents at or below the checkpoint are counted again and must not exceed
+    C1 (no later operation can add one).
+
+  The decision and C1 are written into the marker only at `phase: swapping` (`seq_no_range: true`,
+  `cold_count`), so a resume cannot turn the range on; a marker without both (1.0.0-rc.3 or
+  earlier, or a run that did not qualify) resumes with the full scan, as does
+  `MigrationOptions.fullReconcile`. What stays assumed is the engine's global checkpoint promise
+  itself (processed on every copy before it is reported; never reused after a failover), which a
+  single-node test cannot exercise.
+- **Partial answers.** The engines answer a search that some shards could not run with 200, the
+  other shards' hits and a total with `relation: eq` (verified on all four engines, plain and with
+  a point in time, by a script query that throws on one shard; `_count` behaves the same;
+  `allow_partial_search_results=false` turns it into a 400 `search_phase_execution_exception` on
+  all four). `SearchResult` now carries `shardsFailed`, and every search and count the migrator
+  relies on fails on a partial answer: on the old index the item fails and resumes; on the snapshot
+  it counts as a lost snapshot. The response check was chosen over the request parameter because
+  the SPI's `search` carries no request parameters and the check works the same everywhere;
+  ordinary searches are unchanged.
+- **Cost.** Under the same checkpoint the range path does a subset of the full scan's work, so
+  there is no size threshold; but the checkpoint is the minimum over shards whose sequence numbers
+  are not aligned in time, so on skewed shards the range can cover most of the index.
+
+Rejected:
+
+- **Per-shard sequence number accounting** (per shard, `max_seq_no - checkpoint` equal to the
+  number of live documents above the checkpoint proves that no operation in between was a delete).
+  It is sound, since every other consumer of a sequence number only makes the numbers differ, but
+  it would run the sweep far too often. Observed on ES 8.19.23 and 9.5.5 and OpenSearch 2.19.7 and
+  3.9.0: a no-op `_update`, a script `noop`, a create or `if_seq_no` conflict (409), a mapping
+  failure (alone or in a bulk), a refresh and a flush consume no sequence number; a full-document
+  write of an unchanged document, an `_update` with `detect_noop: false`, and a delete of a missing
+  id (`result: not_found`) each consume one. Any document written twice after the checkpoint, the
+  norm on a busy index, would force the sweep. It also needs per-shard counts
+  (`preference=_shards:<n>`) and per-shard checkpoints in the marker. Counting ghosts directly needs
+  neither and only fires on an actual ghost.
+- **A per-shard hot pass** (`preference=_shards:<n>`, sorted on `_seq_no`, against per-shard
+  checkpoints): exact rather than a superset on multi-shard indices, but more requests and a wider
+  SPI (search request parameters). It is the fix for skewed and empty shards, left for later.
+- **Counting deletes** with `indexing.delete_total` from `_stats`: a per-copy counter that resets
+  when a shard copy restarts or relocates, so a difference of zero proves nothing.
+
+## Addendum (2026-11-10): resuming the reconcile without replaying its creates
+
+A soak test found that a resumed reconcile brought back a document deleted through the alias (on
+1.0.0-rc.3 as well): the first run's reconcile created a document the snapshot lacked (written to
+the old index after the catch-up), the run died after the reconcile but before the marker moved
+on, the application deleted the document through the alias, and the resume replayed the whole
+reconcile, whose `create` found no document and wrote it again. "Conditional writes make it
+idempotent" holds for the conditional index and delete (409 once the document changed), not for
+`create`, which a tombstone in the new index does not stop.
+
+Decision: the reconcile records its progress in the marker (`pending.progress`) and a resume never
+repeats a recorded write.
+
+- Every pass that creates (hot, cold, a `CREATE_MISSING` degraded reconcile) reads the frozen
+  old index sorted by `_seq_no`, then by shard (`_shard_doc`, or `_id` where that is missing). The
+  frozen index takes no writes, and the order rests on sequence numbers, not on Lucene document
+  ids that a merge can change, so a new point in time sees the same order. Each pass has its own
+  cursor: the last sequence number processed and the ids at it (sequence numbers are per shard, so
+  a few documents share one; more on an index made by `_shrink`). A resumed pass queries
+  `_seq_no >= cursor` (not `>`, which would skip the rest of a group cut by a page) without those
+  ids. Per-pass cursors matter (second review): a resumed degraded pass first tries the snapshot,
+  and a single cursor slot let the hot attempt wipe the degraded cursor, so the whole degraded
+  pass was replayed.
+- The cursor is recorded once four pages that wrote went unrecorded or five seconds passed, and at
+  the end of every pass: each record is a cluster-state publication, so one per page loaded the
+  master on large reconciles (second review). The residual below grows from one page to what was
+  processed since the last record. Completed passes, including the sweep, go into
+  `done`; the count of hot documents the snapshot lacks is kept too, so the range strategy's ghost
+  count is the same after a resume.
+- Residual: the run can die after pages' writes and before their cursor record. Those pages (at
+  most four that wrote, 4,000 documents, and at most five seconds of pages) are replayed, and a
+  document they created that was deleted through the alias in between is created again. No exact discriminator exists between "never created" and "created,
+  then deleted": the delete's tombstone (and its version) lives only for `index.gc_deletes` (60 s by
+  default), a realtime GET of a deleted document returns nothing, and an external-version write
+  that a tombstone would stop would also overwrite a newer write through the alias once the
+  tombstone is gone. Writing the cursor before the page (write-ahead) would turn the residual into
+  dropping documents written to the old index, an acknowledged write lost; re-creating a document
+  is the error the design already accepts for a document created after the catch-up and deleted
+  through the alias before the reconcile reached it, so the library keeps that bias and keeps the
+  window to a few pages.
+- Conditional writes and the sweep's conditional deletes are replay-safe: a document the sweep
+  deleted and the application wrote again before the resume has another sequence number, so the
+  replayed delete gets 409 and the document stays. The sweep pages the snapshot, keeps no cursor
+  and is replayed whole after a crash during it.
+- A partial answer from the snapshot (second review) is a lost snapshot only when every failed
+  shard reports `search_context_missing_exception`. On all four engines a closed point in time is
+  a 404 `search_phase_execution_exception` whose failed shards are all
+  `search_context_missing_exception`; a script failure on one shard is a 200 with
+  `script_exception` in `_shards.failures`; on Elasticsearch a point in time over a deleted index is
+  a 200 with `no_shard_available_action_exception` (OpenSearch: 404 `index_not_found_exception`).
+  Any other shard failure (a rejected search, a relocating shard) is transient: the item fails and
+  the next run uses the same snapshot, instead of the degraded path, whose `CREATE_MISSING` would
+  bring back deletes made through the alias. `SearchResult.shardFailures` carries the reasons.
+- The post-finish document counts are informational: a failure there (the marker is already gone)
+  is a warning and `deleteOldAfter` still runs.
+- The `first.total() >= cold_count` gate can turn the range off when deletes between the count and
+  the first pass's scroll outnumber the hot documents; that only costs speed (a full scan) and is
+  kept, since dropping it would remove the only check that the scroll saw every document at or
+  below the checkpoint.
+- The same machinery serves the range and full-scan strategies, the degraded `CREATE_MISSING` path
+  and the `REVERSE_DELTA` rollback. A marker of 1.0.0-rc.3 or earlier has no progress and replays
+  the whole reconcile, as rc.3 did.
+
+The soak also found that a partial `_update` through the alias can fail with 409 at the instant of
+the swap (the engine read the document in the old index and the write resolved against the new
+one) and during a `BACKFILL` (the update by query rewrote the document between the update's read
+and its write). The write is not applied, so the guarantee is qualified to full-document writes
+and deletes. The merge carries no condition of the caller's, so applying it to the newest version
+is what was asked for, and `SearchEngine.update` now does that in two layers:
+
+- it sends `retry_on_conflict=3` (a new overload sets the count), which resolves the backfill
+  case; the backfill 409 did not recur in the next soak round;
+- it sends the request again on a 409 that survives the engine's retries, up to
+  `JsonRestEngine.UPDATE_RESENDS` = 3 times with a short jittered pause (5 to 25 ms times the
+  attempt). The engine's retries stay on the index it resolved first, so at a swap they keep
+  conflicting; a new request resolves the alias again. Measured with an alias flipped between two
+  indices as fast as possible against partial updates through it: `retry_on_conflict` 0, 3 and 20
+  all left 1.2 to 3.4% of updates failing on Elasticsearch 9.5.5 and 0.5 to 2.0% on OpenSearch
+  2.19.7 (so the count of engine-side retries does not matter); with the resends, 0 of 33,554
+  (Elasticsearch 9.5.5) and 0 of 35,389 (OpenSearch 2.19.7) updates failed in 60 s. A conflict that
+  outlasts the resends still fails; `retryOnConflict` 0 turns both layers off.

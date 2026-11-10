@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 
 /**
@@ -108,6 +109,28 @@ public interface SearchEngine extends AutoCloseable {
   }
 
   /**
+   * Returns the global checkpoint of an index: the lowest {@code seq_no.global_checkpoint} over the
+   * primaries of all its shards, from the index stats.
+   *
+   * <p>Implementations promise more than {@link #seqNoCheckpoint}: on every shard, every operation
+   * with a sequence number at or below the returned value was processed by every in-sync copy
+   * before this call returned (so, with document replication, a refresh after the call makes its
+   * effect visible to every search; segment replication gives no such guarantee for replicas),
+   * and no operation started later gets a sequence number at or below it, even after a
+   * primary fails over. The value may be -1 (a shard without operations). An implementation that
+   * cannot promise this, or that misses a shard (an unassigned primary), returns empty.
+   *
+   * <p>The zero-downtime reindex uses it to read only the documents written after the copy
+   * started instead of every document; the default returns empty, which keeps the full scan.
+   *
+   * @param index a concrete index
+   * @return the global checkpoint, or empty when unknown
+   */
+  default OptionalLong globalCheckpoint(String index) {
+    return OptionalLong.empty();
+  }
+
+  /**
    * Writes one document.
    *
    * <p>With {@link IndexOptions#ifSeqNo()} and {@link IndexOptions#ifPrimaryTerm()} the write
@@ -137,8 +160,44 @@ public interface SearchEngine extends AutoCloseable {
     }
   }
 
-  /** Merges a partial document into an existing document. */
+  /** The {@code retry_on_conflict} of {@link #update(String, String, Map)}. */
+  int DEFAULT_UPDATE_RETRIES = 3;
+
+  /**
+   * Merges a partial document into an existing document, retrying on a version conflict up to
+   * {@link #DEFAULT_UPDATE_RETRIES} times.
+   *
+   * <p>The engine reads the document and writes the merge conditionally on what it read; a write
+   * between the two (another writer, an {@code _update_by_query} of a backfill, or the alias swap
+   * of a zero-downtime reindex, after which the write resolves against the new index) fails it
+   * with 409. The merge carries no condition of the caller's, so applying it again to the newest
+   * version is what was asked for; implementations retry in the engine ({@code
+   * retry_on_conflict}) and, since the engine's retries stay on the index it resolved first, send
+   * the request again on a conflict that survives them ({@code JsonRestEngine} does so up to
+   * three times).
+   */
   IndexResult update(String index, String id, Map<String, Object> partial);
+
+  /**
+   * Merges a partial document into an existing document, retrying on a version conflict up to
+   * {@code retryOnConflict} times in the engine ({@code retry_on_conflict}) and then sending it
+   * again a few times; 0 fails at the first conflict.
+   *
+   * <p>The default ignores {@code retryOnConflict} and calls {@link #update(String, String,
+   * Map)}, so on an implementation that does not override it, {@code 0} does not make the update
+   * fail at the first conflict and the count is not validated; {@code JsonRestEngine} (both
+   * adapters) honours it and rejects a negative count.
+   *
+   * @param index the index or alias
+   * @param id the document id
+   * @param partial the fields to merge
+   * @param retryOnConflict how many times to retry after a version conflict, 0 or more
+   * @return what happened
+   */
+  default IndexResult update(String index, String id, Map<String, Object> partial,
+      int retryOnConflict) {
+    return update(index, id, partial);
+  }
 
   /**
    * Reads one document by id through the realtime document API ({@code GET /{index}/_doc/{id}}),

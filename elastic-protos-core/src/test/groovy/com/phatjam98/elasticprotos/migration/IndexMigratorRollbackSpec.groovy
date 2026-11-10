@@ -65,7 +65,8 @@ class IndexMigratorRollbackSpec extends Specification {
     outcome.status() == MigrationResult.Status.APPLIED
     outcome.index() == V1
     outcome.retainedIndices() == [V2]
-    outcome.reconcile() != null
+    outcome.reconcile().strategy() == ReconcileStrategy.FULL_SCAN
+    outcome.reconcile().swept()
     titles(V1) == [d0: 'after the reindex', d2: 'Title 2', d3: 'Title 3', n1: 'new']
     engine.indices() == [(V1): ['documents'] as Set, (V2): [] as Set]
     !engine.isWriteBlocked(V1)
@@ -204,6 +205,25 @@ class IndexMigratorRollbackSpec extends Specification {
     titles(V1).n1 == 'after the reindex'
     engine.getMappings(V1)._meta.elastic_protos.pending == null
     engine.indexExists(V2)
+  }
+
+  def "a resumed rollback does not bring back a document it created and the application then deleted"() {
+    given: 'n1 is written to the new index after its catch-up; the rollback creates it in the old one and dies'
+    migrate()
+    on[Phase.CAUGHT_UP] = { put('n1', 'late') }
+    on[Phase.RECONCILED] = { throw new MigrationListener.Abort('killed') }
+    migrator().rollback(plan, V1, RollbackMode.REVERSE_DELTA)
+    on.clear()
+    assert titles(V1).n1 == 'late'
+    engine.delete('documents', 'n1')
+
+    when:
+    def result = migrator().apply(migrator().plan(Document))
+
+    then:
+    result.ok()
+    !titles(V1).containsKey('n1')
+    engine.getMappings(V1)._meta.elastic_protos.pending == null
   }
 
   def "the old void-returning overloads delegate: rollback(plan) uses the plan's current index"() {

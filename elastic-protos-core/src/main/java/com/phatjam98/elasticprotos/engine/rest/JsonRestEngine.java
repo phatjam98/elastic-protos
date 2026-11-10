@@ -27,6 +27,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
@@ -417,6 +418,45 @@ public final class JsonRestEngine implements SearchEngine {
     return checkpoint == Long.MAX_VALUE ? -1 : checkpoint;
   }
 
+  /**
+   * Reads {@code GET /<index>/_stats?level=shards} and returns the lowest {@code
+   * seq_no.global_checkpoint} over the primaries. The primary's global checkpoint is the
+   * authoritative one (replicas learn it later). Empty when a primary is missing from the stats,
+   * compared with {@code index.number_of_shards}, or reports no checkpoint.
+   */
+  @Override
+  public OptionalLong globalCheckpoint(String index) {
+    Map<String, Object> response = object(require(
+        getRequest("/" + index + "/_stats", Map.of("level", "shards"))));
+    Map<String, Object> shards = map(map(map(response.get("indices")).get(index)).get("shards"));
+    Object declared = map(map(getSettings(index)).get("index")).get("number_of_shards");
+    long expected;
+    try {
+      expected = declared == null ? -1 : Long.parseLong(declared.toString());
+    } catch (NumberFormatException e) {
+      return OptionalLong.empty();
+    }
+    long checkpoint = Long.MAX_VALUE;
+    long primaries = 0;
+    for (Object copies : shards.values()) {
+      for (Map<String, Object> copy : list(copies)) {
+        if (!Boolean.TRUE.equals(map(copy.get("routing")).get("primary"))) {
+          continue;
+        }
+        Object global = map(copy.get("seq_no")).get("global_checkpoint");
+        if (!(global instanceof Number)) {
+          return OptionalLong.empty();
+        }
+        primaries++;
+        checkpoint = Math.min(checkpoint, ((Number) global).longValue());
+      }
+    }
+    if (primaries == 0 || primaries != expected) {
+      return OptionalLong.empty();
+    }
+    return OptionalLong.of(checkpoint);
+  }
+
   @Override
   public IndexResult index(
       String index, String id, Map<String, Object> document, IndexOptions options) {
@@ -438,10 +478,43 @@ public final class JsonRestEngine implements SearchEngine {
 
   @Override
   public IndexResult update(String index, String id, Map<String, Object> partial) {
-    String path = "/" + index + "/_update/" + pathSegment(id);
-    return indexResult(object(require(perform("POST", path, Map.of(),
-        Json.canonical(Map.of("doc", partial)), RawHttp.JSON))));
+    return update(index, id, partial, DEFAULT_UPDATE_RETRIES);
   }
+
+  @Override
+  public IndexResult update(String index, String id, Map<String, Object> partial,
+      int retryOnConflict) {
+    if (retryOnConflict < 0) {
+      throw new IllegalArgumentException(
+          "retryOnConflict must not be negative: " + retryOnConflict);
+    }
+    String path = "/" + index + "/_update/" + pathSegment(id);
+    Map<String, String> params = retryOnConflict == 0
+        ? Map.of() : Map.of("retry_on_conflict", Integer.toString(retryOnConflict));
+    String body = Json.canonical(Map.of("doc", partial));
+    // The engine's own retries stay on the index it resolved first: when an alias moves between
+    // the update's read and its write (the swap of a zero-downtime reindex), every one of them
+    // conflicts again. Sending the request again resolves the alias anew. The update carries no
+    // condition of the caller's, so a 409 here is never the caller's own concurrency check.
+    int resends = retryOnConflict == 0 ? 0 : UPDATE_RESENDS;
+    for (int attempt = 0; ; attempt++) {
+      RawHttp.Response response = perform("POST", path, params, body, RawHttp.JSON);
+      if (response.status() != 409 || attempt >= resends) {
+        return indexResult(object(require(response)));
+      }
+      LOG.debug("update of {}/{} conflicted; sending it again ({} of {})", index, id,
+          attempt + 1, resends);
+      pause(Duration.ofMillis(java.util.concurrent.ThreadLocalRandom.current()
+          .nextLong(5, 25) * (attempt + 1)));
+    }
+  }
+
+  /**
+   * How many times {@link #update(String, String, Map, int)} sends an update again after a
+   * version conflict the engine's {@code retry_on_conflict} did not resolve, unless the caller
+   * asked for no retries.
+   */
+  public static final int UPDATE_RESENDS = 3;
 
   @Override
   public Optional<Hit> get(String index, String id) {
@@ -556,7 +629,18 @@ public final class JsonRestEngine implements SearchEngine {
         parsed,
         string(response.get("pit_id")),
         map(response.get("aggregations")),
-        number(response.get("took")));
+        number(response.get("took")),
+        (int) number(map(response.get("_shards")).get("failed")),
+        shardFailureTypes(map(response.get("_shards"))));
+  }
+
+  /** Returns the {@code reason.type} of every entry of {@code _shards.failures}. */
+  private static List<String> shardFailureTypes(Map<String, Object> shards) {
+    List<String> types = new ArrayList<>();
+    for (Map<String, Object> failure : list(shards.get("failures"))) {
+      types.add(string(map(failure.get("reason")).get("type")));
+    }
+    return types;
   }
 
   @Override
@@ -820,7 +904,7 @@ public final class JsonRestEngine implements SearchEngine {
       TimeUnit.NANOSECONDS.sleep(duration.toNanos());
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      throw new EngineException(Kind.OTHER, 0, "Interrupted while waiting for reindex", e);
+      throw new EngineException(Kind.OTHER, 0, "Interrupted while waiting", e);
     }
   }
 

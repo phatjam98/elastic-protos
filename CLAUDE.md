@@ -127,6 +127,30 @@ Checkstyle, JaCoCo and Javadoc.
   `_meta.elastic_protos.pending` on the new index (backfills use it too); `plan` reads the pending
   marker into `IndexPlan.resume` and `apply` continues from there. `BLOCKING` is the old write-blocking copy. Rollback: `RollbackMode`
   (`REVERSE_DELTA` default, `REVERSE_DELTA_FORCE`, `ALIAS_ONLY`).
+- The checkpoint is `SearchEngine.globalCheckpoint` (lowest primary `global_checkpoint`), else
+  `seqNoCheckpoint`. With a global checkpoint >= 0 and <= the lowest max_seq_no, a new index this run
+  created, no script, no rollback, no segment replication on either index, and a copy that verifies
+  clean (pass 1 created exactly what it read and at least the count at or below the checkpoint, catch-up
+  deleted nothing, snapshot count == created by both passes), the swapping marker carries
+  `seq_no_range: true` + `cold_count` and the reconcile is `ReconcileStrategy.SEQ_NO_RANGE`: hot pass
+  only (after re-checking that the cold count did not grow), and the sweep only when
+  `count(snapshot) - count(old) + hot docs missing from the snapshot` is not zero (ADR 0007 addendum;
+  the negative branch is a last-resort detector, not a guard). Everything else (rc.3 markers,
+  `MigrationOptions.fullReconcile`) is `FULL_SCAN`; a lost PIT is `DEGRADED`. `ReconcileStats` records
+  `strategy` and `swept`. Migrator searches/counts go through `Reconciler.strict`/`count`, which fail on
+  `SearchResult.shardsFailed() > 0` (partial snapshot = `SnapshotLost`).
+- The creating reconcile passes (hot, cold, degraded CREATE_MISSING) read the frozen old index sorted by
+  `_seq_no` and record `pending.progress` (`done`, `cursors: {pass: {seq_no, ids}}`, `hot_missing`), one
+  cursor per pass, every 4 writing pages or 5 s (`Reconciler.SAVE_PAGES`/`SAVE_INTERVAL`; tests use
+  `Builder.reconcileProgress`) and at pass end, so a resume never replays a recorded `create` (which would
+  resurrect a document deleted through the alias); residual = the unrecorded pages. The sweep pages the
+  snapshot, has no cursor, only `done`. rc.3 markers (no progress) replay everything. A partial snapshot
+  answer is `SnapshotLost` only when every failure is `search_context_missing_exception`
+  (`SearchResult.shardFailures`); otherwise the item fails and retries. `InMemorySearchEngine.shardedSeqNos`
+  models per-shard sequence numbers (ties).
+  `SearchEngine.update` retries conflicts in the engine (`retry_on_conflict` 3; 4-arg overload) and
+  `JsonRestEngine` resends a 409 up to `UPDATE_RESENDS` (3) times, since engine retries stay on the index
+  resolved first (alias swap); `retryOnConflict` 0 disables both.
 - `apply` and `rollback` take a per-alias lock (ADR 0008, `AliasLock`) in `IndexNamingStrategy.lockIndex()`
   (`elastic-protos-locks`, prefixed by `prefixed(...)`), re-plan under it and check the lease before
   irreversible steps. `MigrationOptions.lock` / `lockWait` (10m) / `lockTtl` (2m); `Status.LOCKED`,
@@ -136,4 +160,4 @@ Checkstyle, JaCoCo and Javadoc.
   `<name>__nested` / `<name>__reverse`. `RangeValue.min`/`max` are `optional` (open bounds).
 - `InMemorySearchEngine` (testkit) runs only terms, the six metrics, `nested` and `reverse_nested`
   aggregations, ignores `highlight`, and models seq_no, tombstones and PIT snapshots like the engines.
-  `EngineIntegrationSpec` has 52 feature methods.
+  `EngineIntegrationSpec` has 57 feature methods.

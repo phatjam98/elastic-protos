@@ -28,6 +28,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
@@ -99,11 +100,13 @@ import java.util.regex.Pattern;
  * ctx._id = params.<name>};
  * {@link #search} supports only the queries {@code match_all}, {@code term} and {@code terms} on
  * one field (dotted paths walk into objects and arrays), {@code ids}, a top-level {@code range}
- * on {@code _seq_no} with {@code gt}, and {@code bool} with
- * {@code filter}, {@code must}, {@code must_not} and {@code should} (with {@code
- * minimum_should_match}, default 1 when there is no filter or must clause, else 0) over those, plus
- * {@code from}, {@code size}, {@code track_total_hits}, {@code pit} and {@code search_after}. Hits
- * always come in insertion order; when the body has a {@code sort}, whatever it says, each hit's
+ * on {@code _seq_no} with {@code gt}, {@code gte}, {@code lt} and {@code lte} (also inside
+ * {@code bool} in searches), and {@code bool} with {@code filter}, {@code must}, {@code
+ * must_not} and {@code should} (with {@code minimum_should_match}, default 1 when there is no
+ * filter or must clause, else 0) over those, plus {@code from}, {@code size}, {@code
+ * track_total_hits}, {@code pit} and {@code search_after}. Hits come in insertion order, or by
+ * sequence number when the sort starts with {@code _seq_no}; when the body has a {@code sort},
+ * whatever else it says, each hit's
  * only sort value is its position among the matches, and {@code search_after} resumes after that
  * position, which is enough for point-in-time paging. A {@code highlight} in the body is
  * accepted and ignored: hits never carry highlights. Any other query fails with {@code
@@ -132,6 +135,8 @@ public class InMemorySearchEngine implements SearchEngine {
 
   /** The engine never fails over, so every write has primary term 1. */
   private static final Long PRIMARY_TERM = 1L;
+  /** The sequence number of the document a query is matched against, for range on _seq_no. */
+  private static final ThreadLocal<Long> CURRENT_SEQ_NO = new ThreadLocal<>();
   private static final Pattern ASSIGN =
       Pattern.compile("ctx\\._source\\.([A-Za-z0-9_]+)\\s*=\\s*params\\.([A-Za-z0-9_]+)\\s*;?");
   private static final Pattern REMOVE =
@@ -147,6 +152,9 @@ public class InMemorySearchEngine implements SearchEngine {
   private boolean rejectTypeChanges = true;
   private long generatedIds;
   private long seqNo = -1;
+  private boolean globalCheckpoints = true;
+  private boolean shardedSeqNos;
+  private long globalCheckpointLag;
   private Consumer<ReindexRequest> duringReindex = request -> {};
   private Runnable afterAliasUpdate = () -> {};
   private Consumer<UpdateByQueryRequest> duringUpdateByQuery = request -> {};
@@ -249,8 +257,47 @@ public class InMemorySearchEngine implements SearchEngine {
   @Override
   public long seqNoCheckpoint(String index) {
     record("seqNoCheckpoint", index);
-    concrete(index);
-    return seqNo;
+    return checkpointOf(concrete(index));
+  }
+
+  /**
+   * Returns the global sequence number counter less the {@link #globalCheckpointLag}, or empty
+   * after {@link #globalCheckpoints(boolean) globalCheckpoints(false)}. Every operation is
+   * processed at once, so every document written at or below it is visible.
+   */
+  @Override
+  public OptionalLong globalCheckpoint(String index) {
+    record("globalCheckpoint", index);
+    long checkpoint = checkpointOf(concrete(index));
+    return globalCheckpoints
+        ? OptionalLong.of(checkpoint - globalCheckpointLag) : OptionalLong.empty();
+  }
+
+  /**
+   * Sets whether an index created with several shards ({@code number_of_shards}) numbers the
+   * writes of each shard on its own, the shard of a document being the hash of its id, as the
+   * engines do; then documents of different shards share sequence numbers, and the checkpoints are
+   * the lowest over the shards. Off by default: one global counter for every index.
+   */
+  public InMemorySearchEngine shardedSeqNos(boolean value) {
+    this.shardedSeqNos = value;
+    return this;
+  }
+
+  /** Sets whether {@link #globalCheckpoint} reports a checkpoint (default) or none. */
+  public InMemorySearchEngine globalCheckpoints(boolean value) {
+    this.globalCheckpoints = value;
+    return this;
+  }
+
+  /**
+   * Lowers what {@link #globalCheckpoint} reports by {@code lag} sequence numbers, the way the
+   * lowest checkpoint over several shards lies below documents of the other shards: documents just
+   * below the counter then count as written after it, which is safe.
+   */
+  public InMemorySearchEngine globalCheckpointLag(long lag) {
+    this.globalCheckpointLag = lag;
+    return this;
   }
 
   /** Returns every concrete index with its aliases, sorted by name. */
@@ -755,25 +802,36 @@ public class InMemorySearchEngine implements SearchEngine {
     boolean withVersion = Boolean.TRUE.equals(body.get("version"));
     boolean withSeqNo = Boolean.TRUE.equals(body.get("seq_no_primary_term"));
     List<Hit> matches = new ArrayList<>();
+    Map<Hit, Long> seqNoOf = new java.util.IdentityHashMap<>();
     for (String name : names) {
       IndexState state = snapshot != null ? snapshot.get(name) : indices.get(name);
       if (state == null) {
         continue;
       }
-      Long seqNoAbove = seqNoAbove(query);
       for (Map.Entry<String, Map<String, Object>> doc : state.docs.entrySet()) {
-        boolean hit = seqNoAbove == null
-            ? matches(query, doc.getKey(), doc.getValue())
-            : state.seqNos.getOrDefault(doc.getKey(), -1L) > seqNoAbove;
+        CURRENT_SEQ_NO.set(state.seqNos.getOrDefault(doc.getKey(), -1L));
+        boolean hit;
+        try {
+          hit = matches(query, doc.getKey(), doc.getValue());
+        } finally {
+          CURRENT_SEQ_NO.remove();
+        }
         if (hit) {
           String id = doc.getKey();
-          matches.add(new Hit(name, id, 1.0, Json.sortedCopy(doc.getValue()), List.of(),
+          Hit found = new Hit(name, id, 1.0, Json.sortedCopy(doc.getValue()), List.of(),
               withVersion ? state.versions.get(id) : null,
               withSeqNo ? state.seqNos.get(id) : null,
               withSeqNo ? PRIMARY_TERM : null,
-              Map.of()));
+              Map.of());
+          matches.add(found);
+          seqNoOf.put(found, state.seqNos.getOrDefault(id, -1L));
         }
       }
+    }
+    List<Object> order = list(body.get("sort"));
+    if (!order.isEmpty() && map(order.get(0)).containsKey("_seq_no")) {
+      // a stable sort keeps insertion order among equal sequence numbers
+      matches.sort(java.util.Comparator.comparingLong(seqNoOf::get));
     }
     if (body.containsKey("sort")) {
       for (int i = 0; i < matches.size(); i++) {
@@ -853,8 +911,50 @@ public class InMemorySearchEngine implements SearchEngine {
     state.tombstones.remove(id);
     state.tombstoneTimes.remove(id);
     state.versions.put(id, next);
-    state.seqNos.put(id, ++seqNo);
+    state.seqNos.put(id, nextSeqNo(state, id));
     return next;
+  }
+
+  /**
+   * Takes the next sequence number for a write of {@code id}: from the global counter, or with
+   * {@link #shardedSeqNos(boolean)} from the counter of the document's shard when the index has
+   * several, so documents of different shards share sequence numbers as on the engines.
+   */
+  private long nextSeqNo(IndexState state, String id) {
+    int shards = shards(state);
+    if (!shardedSeqNos || shards < 2) {
+      return ++seqNo;
+    }
+    int shard = Math.floorMod(id.hashCode(), shards);
+    long next = state.shardSeqNos.getOrDefault(shard, -1L) + 1;
+    state.shardSeqNos.put(shard, next);
+    return next;
+  }
+
+  /** Returns the shard count an index was created with, 1 when it set none. */
+  private static int shards(IndexState state) {
+    Object shards = state.settings.get("number_of_shards");
+    try {
+      return shards == null ? 1 : Integer.parseInt(shards.toString());
+    } catch (NumberFormatException e) {
+      return 1;
+    }
+  }
+
+  /**
+   * Returns the lowest last sequence number over the shards of an index with per-shard counters,
+   * or the global counter.
+   */
+  private long checkpointOf(IndexState state) {
+    int shards = shards(state);
+    if (!shardedSeqNos || shards < 2) {
+      return seqNo;
+    }
+    long lowest = Long.MAX_VALUE;
+    for (int shard = 0; shard < shards; shard++) {
+      lowest = Math.min(lowest, state.shardSeqNos.getOrDefault(shard, -1L));
+    }
+    return lowest;
   }
 
   /** Returns the tombstone version of an id, dropping it once {@link #gcDeletes} has passed. */
@@ -875,7 +975,7 @@ public class InMemorySearchEngine implements SearchEngine {
       state.tombstoneTimes.put(id, System.nanoTime());
     }
     state.seqNos.remove(id);
-    seqNo++;
+    nextSeqNo(state, id);
     return state.docs.remove(id) != null;
   }
 
@@ -1135,6 +1235,14 @@ public class InMemorySearchEngine implements SearchEngine {
       return list(map(query.get("ids")).get("values")).stream()
           .anyMatch(value -> String.valueOf(value).equals(id));
     }
+    if (query.containsKey("range")) {
+      java.util.function.LongPredicate range = seqNoRange(query);
+      Long seqNo = CURRENT_SEQ_NO.get();
+      if (range == null || map(query.get("range")).size() != 1 || seqNo == null) {
+        throw unsupported(query);
+      }
+      return range.test(seqNo);
+    }
     boolean terms = query.containsKey("terms");
     Map<String, Object> term = map(query.get(terms ? "terms" : "term"));
     if (term.size() != 1) {
@@ -1185,9 +1293,33 @@ public class InMemorySearchEngine implements SearchEngine {
   }
 
   /** Returns {@code gt} of a top-level {@code {"range": {"_seq_no": {"gt": n}}}} query, or null. */
-  private static Long seqNoAbove(Map<String, Object> query) {
-    Object gt = map(map(query.get("range")).get("_seq_no")).get("gt");
-    return gt instanceof Number ? ((Number) gt).longValue() : null;
+  private static java.util.function.LongPredicate seqNoRange(Map<String, Object> query) {
+    Map<String, Object> range = map(map(query.get("range")).get("_seq_no"));
+    if (range.isEmpty()) {
+      return null;
+    }
+    java.util.function.LongPredicate test = seqNo -> true;
+    for (Map.Entry<String, Object> bound : range.entrySet()) {
+      long value = ((Number) bound.getValue()).longValue();
+      switch (bound.getKey()) {
+        case "gt":
+          test = test.and(seqNo -> seqNo > value);
+          break;
+        case "gte":
+          test = test.and(seqNo -> seqNo >= value);
+          break;
+        case "lt":
+          test = test.and(seqNo -> seqNo < value);
+          break;
+        case "lte":
+          test = test.and(seqNo -> seqNo <= value);
+          break;
+        default:
+          throw new EngineException(Kind.BAD_REQUEST, 400,
+              "unsupported _seq_no range bound " + bound.getKey());
+      }
+    }
+    return test;
   }
 
   /** Collects the values at a dotted path, walking into arrays. */
@@ -1243,6 +1375,7 @@ public class InMemorySearchEngine implements SearchEngine {
     private final Map<String, Map<String, Object>> docs = new LinkedHashMap<>();
     private final Map<String, Long> versions = new TreeMap<>();
     private final Map<String, Long> seqNos = new TreeMap<>();
+    private final Map<Integer, Long> shardSeqNos = new TreeMap<>();
     private final Map<String, Long> tombstones = new TreeMap<>();
     private final Map<String, Long> tombstoneTimes = new TreeMap<>();
     private boolean writeBlocked;

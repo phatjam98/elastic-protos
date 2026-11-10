@@ -9,6 +9,8 @@ import com.phatjam98.elasticprotos.proto.EsType
 import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.testkit.InMemorySearchEngine
 import java.time.Duration
+import java.util.OptionalLong
+import com.phatjam98.elasticprotos.engine.SearchResult
 import spock.lang.Specification
 
 /** Zero-downtime reindexing: copy, catch up, swap, freeze, reconcile, sweep, and resuming it. */
@@ -32,6 +34,9 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
         .mapper(args.mapper ?: TITLE_KEYWORD)
         .options(args.options ?: ZD)
         .scriptProvider(args.scripts ?: MigrationScriptProvider.none())
+    if (args.pages) {
+      builder.reconcileProgress(args.pages as int, Duration.ofHours(1))
+    }
     if (args.listen != false) {
       builder.listener({ alias, phase ->
         phases << phase
@@ -83,7 +88,7 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     engine.tombstoneVersion(V2, 'd4') != null
 
     and: 'the reconcile reports what it did'
-    outcome.reconcile() == new ReconcileStats(2, 1, 2, 0)
+    outcome.reconcile() == new ReconcileStats(2, 1, 2, 0, ReconcileStrategy.SEQ_NO_RANGE, true)
     outcome.sourceCount() == 5L
     outcome.destCount() == 5L
     outcome.warnings().isEmpty()
@@ -115,7 +120,7 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     then:
     result.ok()
     titles(V2).d0 == 'during copy'
-    result.outcomes()[0].reconcile() == new ReconcileStats(0, 0, 0, 0)
+    result.outcomes()[0].reconcile() == new ReconcileStats(0, 0, 0, 0, ReconcileStrategy.SEQ_NO_RANGE, false)
   }
 
   def "the operations follow the protocol"() {
@@ -145,8 +150,7 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
         "putMappings ${V2}",
         "openPit ${V1}",
         "closePit PIT",
-        "openPit ${V1}",
-        "closePit PIT",
+        "putMappings ${V2}",
         "putMappings ${V2}",
         "closePit PIT",
         "putMappings ${V2}",
@@ -165,14 +169,15 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     then:
     result.ok()
     seen[Phase.PREPARED] == [action: 'reindex', from: V1, phase: 'copying', checkpoint: 4]
+    seen[Phase.SNAPSHOT].findAll { k, v -> k in ['seq_no_range', 'cold_count'] } == [cold_count: 5, seq_no_range: true]
     seen[Phase.COPIED] == seen[Phase.PREPARED]
     seen[Phase.CAUGHT_UP] == seen[Phase.PREPARED]
     seen[Phase.SNAPSHOT].subMap('action', 'from', 'phase') == [action: 'reindex', from: V1, phase: 'swapping']
     seen[Phase.SNAPSHOT].pit instanceof String
     seen[Phase.SWAPPED] == seen[Phase.SNAPSHOT]
     seen[Phase.FROZEN] == seen[Phase.SNAPSHOT] + [phase: 'reconciling']
-    seen[Phase.RECONCILED] == seen[Phase.FROZEN]
-    seen[Phase.SWEPT] == seen[Phase.FROZEN]
+    seen[Phase.RECONCILED] == seen[Phase.FROZEN] + [progress: [done: ['hot'], cursors: [:], hot_missing: 0]]
+    seen[Phase.SWEPT] == seen[Phase.RECONCILED]
     seen[Phase.FINISHED] == null
     engine.getMappings(V2)._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version', 'static_settings'] as Set
   }
@@ -609,7 +614,7 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     then:
     result.ok()
     outcome.status() == MigrationResult.Status.APPLIED
-    outcome.reconcile() == new ReconcileStats(1, 0, 0, 1)
+    outcome.reconcile() == new ReconcileStats(1, 0, 0, 1, ReconcileStrategy.DEGRADED, false)
     outcome.warnings()[0] == "the snapshot of ${V2} taken at the swap was lost, so missing documents were created (including any deleted".toString() +
         " through the alias since the swap): 1 created, 1 documents differ between ${V1} and ${V2} and were left as they are in ${V2}, and 1 documents exist only in ${V2} and were kept".toString()
     titles(V2).n1 == 'new 1'
@@ -696,6 +701,587 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     result.outcomes()[0].index() == V2
   }
 
+  // ------------------------------------------------------------------ sequence number range
+
+  /** How often the reconcile opened a point in time over the old index (each scan opens one). */
+  int oldIndexScans() {
+    engine.log().count { it == "openPit ${V1}".toString() } as int
+  }
+
+  def "updates and creates after the catch-up are reconciled from the range alone, without a sweep"() {
+    given: 'documents rewritten repeatedly and created, nothing deleted'
+    on[Phase.CAUGHT_UP] = { put('d0', 'one'); put('d0', 'two'); put('d0', 'three'); put('n1', 'new'); put('d1', 'pre-swap') }
+    on[Phase.SWAPPED] = { put('d1', 'after swap') }
+    on[Phase.SNAPSHOT] = { engine.clearLog() }
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    titles(V2) == [d0: 'three', d1: 'after swap', d2: 'Title 2', d3: 'Title 3', d4: 'Title 4', n1: 'new']
+    outcome.reconcile() == new ReconcileStats(2, 1, 0, 0, ReconcileStrategy.SEQ_NO_RANGE, false)
+
+    and: 'one scan of the old index (the range), and the snapshot is only counted, never paged'
+    oldIndexScans() == 1
+    !engine.log().any { it.startsWith('delete') }
+  }
+
+  def "documents deleted from the old index after the copy make the counts disagree, and the sweep runs"() {
+    given:
+    on[Phase.COPIED] = { remove('d1') }
+    on[Phase.CAUGHT_UP] = { remove('d2'); put('d0', 'pre-swap') }
+    on[Phase.SWAPPED] = { put('d2', 'rewritten after swap') }
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then: 'd1 is swept; d2, rewritten through the alias after the swap, is kept'
+    outcome.ok()
+    titles(V2) == [d0: 'pre-swap', d2: 'rewritten after swap', d3: 'Title 3', d4: 'Title 4']
+    outcome.reconcile() == new ReconcileStats(1, 1, 1, 0, ReconcileStrategy.SEQ_NO_RANGE, true)
+  }
+
+  def "deletes the snapshot never saw, and deletes followed by a new write, need no sweep"() {
+    given: 'n1 created and deleted after the catch-up; d0 deleted and written again during the copy'
+    on[Phase.COPIED] = { remove('d0'); put('d0', 'reborn') }
+    on[Phase.CAUGHT_UP] = { put('n1', 'short-lived'); remove('n1') }
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    titles(V2) == [d0: 'reborn', d1: 'Title 1', d2: 'Title 2', d3: 'Title 3', d4: 'Title 4']
+    outcome.reconcile() == new ReconcileStats(0, 0, 0, 0, ReconcileStrategy.SEQ_NO_RANGE, false)
+  }
+
+  def "a checkpoint below the newest writes (several shards) widens the range, never the result"() {
+    given: 'the lowest checkpoint of several shards lies below documents written before the copy'
+    engine.globalCheckpointLag(3)
+    on[Phase.CAUGHT_UP] = { put('d0', 'pre-swap'); remove('d4'); put('n1', 'new') }
+    on[Phase.SWAPPED] = { remove('d3') }
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    titles(V2) == [d0: 'pre-swap', d1: 'Title 1', d2: 'Title 2', n1: 'new']
+    outcome.reconcile() == new ReconcileStats(2, 0, 1, 0, ReconcileStrategy.SEQ_NO_RANGE, true)
+    pending(V2) == null
+  }
+
+  def "the full scan runs when #why"() {
+    given:
+    setUp.call(this)
+    on[Phase.CAUGHT_UP] = { put('d0', 'pre-swap'); remove('d1'); put('n1', 'new') }
+
+    when:
+    def outcome = migrator(options: options).bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    titles(V2) == [d0: 'pre-swap', d2: 'Title 2', d3: 'Title 3', d4: 'Title 4', n1: 'new']
+    outcome.reconcile().strategy() == ReconcileStrategy.FULL_SCAN
+    outcome.reconcile().swept()
+    outcome.reconcile().ghostsDeleted() == 1L
+    oldIndexScans() == 2
+
+    where:
+    why                                         | options                       | setUp
+    'the engine reports no global checkpoint'  | ZD                            | { it.engine.globalCheckpoints(false) }
+    'fullReconcile is set'                      | ZD.withFullReconcile(true)    | { }
+    'the old index uses segment replication'    | ZD                            | { it.engine.putSettings(V1, ['index.replication.type': 'SEGMENT']) }
+  }
+
+  def "a reused leftover index is reconciled with a full scan"() {
+    given: 'a run dies before the swap, so the next one copies into the index it left'
+    on[Phase.SNAPSHOT] = { put('d0', 'pre-crash'); throw new MigrationListener.Abort('killed') }
+    migrator().bootstrap(Document)
+    on.clear()
+    on[Phase.CAUGHT_UP] = { remove('d1') }
+    on[Phase.FROZEN] = { assert pending(V2).seq_no_range == null }
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    titles(V2) == [d0: 'pre-crash', d2: 'Title 2', d3: 'Title 3', d4: 'Title 4']
+    outcome.reconcile().strategy() == ReconcileStrategy.FULL_SCAN
+    outcome.reconcile().ghostsDeleted() == 1L
+  }
+
+  def "a crash after #phase resumes with the sequence number range"() {
+    given:
+    on[Phase.CAUGHT_UP] = { put('d0', 'pre-swap'); remove('d1'); put('n1', 'new') }
+    on[phase] = { throw new MigrationListener.Abort('killed') }
+    migrator().bootstrap(Document)
+
+    when:
+    def outcome = migrator(listen: false).bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    titles(V2) == [d0: 'pre-swap', d2: 'Title 2', d3: 'Title 3', d4: 'Title 4', n1: 'new']
+    outcome.reconcile().strategy() == ReconcileStrategy.SEQ_NO_RANGE
+    outcome.reconcile().swept()
+    pending(V2) == null
+
+    where:
+    phase << [Phase.SWAPPED, Phase.FROZEN, Phase.RECONCILED, Phase.SWEPT]
+  }
+
+  def "a marker written by rc.3 (no seq_no_range) resumes with a full scan"() {
+    given:
+    on[Phase.CAUGHT_UP] = { put('d0', 'pre-swap'); remove('d1'); put('n1', 'new') }
+    on[Phase.FROZEN] = { throw new MigrationListener.Abort('killed') }
+    migrator().bootstrap(Document)
+    def ours = engine.getMappings(V2)._meta.elastic_protos
+    def old = ours.pending.findAll { k, v -> k != 'seq_no_range' }
+    engine.putMappings(V2, [_meta: [elastic_protos: ours + [pending: old]]])
+
+    when:
+    def outcome = migrator(listen: false).bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    titles(V2) == [d0: 'pre-swap', d2: 'Title 2', d3: 'Title 3', d4: 'Title 4', n1: 'new']
+    outcome.reconcile().strategy() == ReconcileStrategy.FULL_SCAN
+    outcome.reconcile().ghostsDeleted() == 1L
+  }
+
+  def "the reviewer's scenario: a document lost on the way to the snapshot plus a real ghost no longer cancel out"() {
+    given: 'd1 is deleted from the old index after the copy (a real ghost), n1 written before the swap,'
+    on[Phase.COPIED] = { remove('d1') }
+    and: 'd3 vanishes from the new index before the snapshot, breaking the premise; the counts would cancel to 0'
+    on[Phase.CAUGHT_UP] = { put('n1', 'new'); engine.delete(V2, 'd3') }
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then: 'the snapshot count disagrees with what the copies created, so the full scan runs'
+    outcome.ok()
+    titles(V2) == [d0: 'Title 0', d2: 'Title 2', d3: 'Title 3', d4: 'Title 4', n1: 'new']
+    outcome.reconcile() == new ReconcileStats(2, 0, 1, 0, ReconcileStrategy.FULL_SCAN, true)
+  }
+
+  def "the same scenario with a checkpoint the engine cannot have (above its max_seq_no) is not trusted"() {
+    given:
+    engine = new LyingCheckpointEngine()
+    setup()
+    on[Phase.COPIED] = { remove('d1') }
+    on[Phase.CAUGHT_UP] = { put('n1', 'new') }
+    on[Phase.FROZEN] = { assert pending(V2).seq_no_range == null }
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    titles(V2) == [d0: 'Title 0', d2: 'Title 2', d3: 'Title 3', d4: 'Title 4', n1: 'new']
+    outcome.reconcile().strategy() == ReconcileStrategy.FULL_SCAN
+  }
+
+  def "a first copy pass that did not create every document it read disables the range: #why"() {
+    given:
+    engine = faulty
+    setup()
+    on[Phase.FROZEN] = { assert pending(V2).seq_no_range == null }
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    outcome.reconcile().strategy() == ReconcileStrategy.FULL_SCAN
+
+    where:
+    why                                   | faulty
+    'a version conflict on a fresh index' | new FirstPassEngine(conflicts: 1)
+    'a no-op (a dropping pipeline)'       | new FirstPassEngine(noops: 1)
+    'fewer documents read than were cold' | new FirstPassEngine(shortTotal: true)
+  }
+
+  def "a catch-up that deleted documents disables the range"() {
+    given:
+    engine = new CatchUpDeleteEngine()
+    setup()
+    on[Phase.FROZEN] = { assert pending(V2).seq_no_range == null }
+
+    expect:
+    migrator().bootstrap(Document).outcomes()[0].reconcile().strategy() == ReconcileStrategy.FULL_SCAN
+  }
+
+  def "more documents at or below the checkpoint at the freeze than at the copy disable the range"() {
+    given: 'a document appears at or below the checkpoint after the copy started'
+    engine = new LateColdEngine()
+    setup()
+    on[Phase.SWAPPED] = { (engine as LateColdEngine).late = true }
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    outcome.reconcile().strategy() == ReconcileStrategy.FULL_SCAN
+    outcome.warnings()[0].startsWith("${V1} holds 6 documents at or below sequence number".toString())
+  }
+
+  def "counts that still do not add up fall back to the cold pass and the sweep, with a warning"() {
+    given: 'the old index is counted one too many at the freeze, after every earlier check passed'
+    engine = new InflatedCountEngine()
+    setup()
+    on[Phase.FROZEN] = { (engine as InflatedCountEngine).inflate = true }
+    on[Phase.CAUGHT_UP] = { put('d0', 'pre-swap') }
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    titles(V2).d0 == 'pre-swap'
+    outcome.reconcile() == new ReconcileStats(1, 0, 0, 0, ReconcileStrategy.FULL_SCAN, true)
+    outcome.warnings()[0] == "the document counts of ${V1} and of the snapshot of ${V2} do not add up (-1 ghosts), so every document was compared after all".toString()
+  }
+
+  def "a count that is not exact at the freeze sweeps, with a warning"() {
+    given:
+    engine = new InexactCountEngine()
+    setup()
+    on[Phase.RECONCILED] = { (engine as InexactCountEngine).inexact = true }
+    on[Phase.SWEPT] = { (engine as InexactCountEngine).inexact = false }
+    on[Phase.CAUGHT_UP] = { put('n1', 'new') }
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    outcome.reconcile() == new ReconcileStats(1, 0, 0, 0, ReconcileStrategy.SEQ_NO_RANGE, true)
+    outcome.warnings()[0] == "the engine counted ${V1} or the snapshot of ${V2} only as a lower bound, so the snapshot was swept".toString()
+  }
+
+  def "an empty shard (global checkpoint -1) means a full scan, not a range over everything"() {
+    given:
+    engine.globalCheckpointLag(100)
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    outcome.reconcile().strategy() == ReconcileStrategy.FULL_SCAN
+  }
+
+  def "a new index with segment replication means a full scan"() {
+    given: 'OpenSearch writes the cluster default replication type into every new index'
+    engine = new SegmentDefaultEngine()
+    setup()
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    outcome.reconcile().strategy() == ReconcileStrategy.FULL_SCAN
+  }
+
+  def "a partial answer #where fails the item or loses the snapshot, never counts as complete"() {
+    given:
+    engine = new PartialEngine(target: target, reason: reason)
+    setup()
+    on[Phase.FROZEN] = { (engine as PartialEngine).on = true }
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.status() == status
+    message == null || outcome.error().message.contains(message)
+
+    where:
+    where                                       | target | reason                              | status                            | message
+    'from the old index'                        | 'old'  | 'es_rejected_execution_exception'   | MigrationResult.Status.FAILED     | 'failed on 1 shards; the migration does not act on partial results'
+    'from the snapshot, its reader gone'        | 'pit'  | 'search_context_missing_exception'  | MigrationResult.Status.INCOMPLETE | null
+    'from the snapshot, a transient failure'    | 'pit'  | 'es_rejected_execution_exception'   | MigrationResult.Status.FAILED     | 'the next run tries the snapshot again'
+    'from the snapshot, no reason listed'       | 'pit'  | null                                | MigrationResult.Status.FAILED     | 'the next run tries the snapshot again'
+  }
+
+  def "a lost snapshot after a range-marked swap is degraded, not ranged"() {
+    given:
+    on[Phase.FROZEN] = { throw new MigrationListener.Abort('killed') }
+    migrator().bootstrap(Document)
+    engine.expirePits()
+
+    when:
+    def outcome = migrator(listen: false).bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.status() == MigrationResult.Status.INCOMPLETE
+    outcome.reconcile().strategy() == ReconcileStrategy.DEGRADED
+    !outcome.reconcile().swept()
+  }
+
+  def "the global checkpoint is recorded instead of the max sequence number when the engine has one"() {
+    given:
+    engine.globalCheckpointLag(2)
+    Map marker = null
+    on[Phase.PREPARED] = { marker = pending(V2) }
+
+    when:
+    migrator().bootstrap(Document)
+
+    then:
+    marker == [action: 'reindex', from: V1, phase: 'copying', checkpoint: 2]
+    engine.log().indexOf("globalCheckpoint ${V1}".toString()) < engine.log().indexOf("seqNoCheckpoint ${V1}".toString())
+  }
+
+  // ------------------------------------------------------------------ resume without replaying creates
+
+  def "the soak reproduction: a resume after #phase does not bring back a document the first run created and the application deleted (#strategy)"() {
+    given: 'x is written through the alias after the catch-up; the first run creates it in the new index and dies'
+    on[Phase.CAUGHT_UP] = { put('x', 'late') }
+    on[phase] = { throw new MigrationListener.Abort('killed') }
+    migrator(options: options).bootstrap(Document)
+    on.clear()
+    assert titles(V2).x == 'late'
+
+    when: 'the application deletes x through the alias, and a fresh run resumes'
+    assert engine.delete('documents', 'x')
+    def outcome = migrator(listen: false, options: options).bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    !titles(V2).containsKey('x')
+    outcome.reconcile().copied() == 0L
+    outcome.reconcile().strategy() == strategy
+    pending(V2) == null
+
+    where:
+    phase            | options                    | strategy
+    Phase.RECONCILED | ZD                         | ReconcileStrategy.SEQ_NO_RANGE
+    Phase.SWEPT      | ZD                         | ReconcileStrategy.SEQ_NO_RANGE
+    Phase.RECONCILED | ZD.withFullReconcile(true) | ReconcileStrategy.FULL_SCAN
+    Phase.SWEPT      | ZD.withFullReconcile(true) | ReconcileStrategy.FULL_SCAN
+  }
+
+  def "a crash in the middle of a pass resumes after the last page whose writes were recorded"() {
+    given: '1005 documents written after the catch-up, so the hot pass has two pages; the second page fails'
+    engine = new FailingSecondCreateEngine()
+    setup()
+    on[Phase.CAUGHT_UP] = { 1005.times { put("n${it}", 'late') } }
+    def first = migrator(pages: 1).bootstrap(Document).outcomes()[0]
+    on.clear()
+    (engine as FailingSecondCreateEngine).fail = false
+
+    expect: 'the first page is in, its cursor recorded'
+    first.status() == MigrationResult.Status.FAILED
+    engine.documents(V2).keySet().count { it.startsWith('n') } == Reconciler.PAGE
+    pending(V2).progress.cursors.hot != null
+
+    when: 'the application deletes a document of the first page, and a fresh run resumes'
+    String deleted = engine.documents(V2).keySet().find { it.startsWith('n') }
+    assert engine.delete('documents', deleted)
+    def outcome = migrator(listen: false, pages: 1).bootstrap(Document).outcomes()[0]
+
+    then: 'only the second page is written'
+    outcome.ok()
+    outcome.reconcile().copied() == 5L
+    !engine.documents(V2).containsKey(deleted)
+    engine.documents(V2).keySet().count { it.startsWith('n') } == 1004
+  }
+
+  def "the residual window: a page written but not yet recorded is replayed"() {
+    given: 'the progress write after the hot page fails, after its creates went in'
+    engine = new FailingProgressEngine()
+    setup()
+    on[Phase.CAUGHT_UP] = { put('x', 'late') }
+    migrator(pages: 1).bootstrap(Document)
+    on.clear()
+    assert titles(V2).x == 'late'
+    assert engine.delete('documents', 'x')
+
+    when:
+    def outcome = migrator(listen: false, pages: 1).bootstrap(Document).outcomes()[0]
+
+    then: 'documented: the documents of that one page that were deleted in between come back'
+    outcome.ok()
+    titles(V2).x == 'late'
+  }
+
+  def "a replayed sweep keeps a ghost the application wrote again after the first sweep"() {
+    given: 'd1 is deleted after the copy; the sweep removes it from the new index; the run dies before recording that'
+    on[Phase.COPIED] = { remove('d1') }
+    on[Phase.SWEPT] = { throw new MigrationListener.Abort('killed') }
+    migrator().bootstrap(Document)
+    on.clear()
+    assert !titles(V2).containsKey('d1')
+    def ours = engine.getMappings(V2)._meta.elastic_protos
+    def progress = ours.pending.progress + [done: ours.pending.progress.done - ['sweep']]
+    engine.putMappings(V2, [_meta: [elastic_protos: ours + [pending: ours.pending + [progress: progress]]]])
+
+    when: 'the application writes d1 again through the alias, and the sweep is replayed'
+    put('d1', 'written again')
+    def outcome = migrator(listen: false).bootstrap(Document).outcomes()[0]
+
+    then: 'the conditional delete finds a newer document (409) and leaves it'
+    outcome.ok()
+    titles(V2).d1 == 'written again'
+    outcome.reconcile().superseded() == 1L
+  }
+
+  def "a resumed CREATE_MISSING reconcile does not create again what it created before"() {
+    given: 'the snapshot is lost; a CREATE_MISSING run creates n1 and dies'
+    on[Phase.CAUGHT_UP] = { put('n1', 'late') }
+    on[Phase.FROZEN] = { throw new MigrationListener.Abort('killed') }
+    migrator().bootstrap(Document)
+    engine.expirePits()
+    on.clear()
+    on[Phase.RECONCILED] = { throw new MigrationListener.Abort('killed') }
+    def options = ZD.withDegradedReconcile(DegradedReconcile.CREATE_MISSING)
+    migrator(options: options).bootstrap(Document)
+    on.clear()
+    assert titles(V2).n1 == 'late'
+    assert engine.delete('documents', 'n1')
+
+    when:
+    def outcome = migrator(listen: false, options: options).bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    !titles(V2).containsKey('n1')
+  }
+
+  def "progress in the marker reads back, and an rc.3 marker has none"() {
+    given:
+    def progress = new Reconciler.Progress()
+    progress.done << 'hot'
+    def cursor = new Reconciler.Progress.Cursor()
+    cursor.seqNo = 7
+    cursor.ids << 'b' << 'a'
+    progress.cursors.cold = cursor
+    progress.hotMissing = 2
+
+    expect:
+    Reconciler.Progress.from(progress.toMap()).toMap() == [done: ['hot'], cursors: [cold: [seq_no: 7, ids: ['a', 'b']]], hot_missing: 2]
+    Reconciler.Progress.from(null).toMap() == null
+    Reconciler.Progress.from([cursors: [hot: [ids: ['x']]], done: []]).toMap() == null
+  }
+
+  def "a resumed CREATE_MISSING pass keeps its own cursor while the run first tries the lost snapshot"() {
+    given: 'the first run dies after the freeze; the snapshot is lost; 1005 documents were written after the catch-up'
+    engine = new FailingSecondCreateEngine()
+    setup()
+    on[Phase.CAUGHT_UP] = { 1005.times { put("n${it}", 'late') } }
+    on[Phase.FROZEN] = { throw new MigrationListener.Abort('killed') }
+    migrator().bootstrap(Document)
+    engine.expirePits()
+    on.clear()
+    def options = ZD.withDegradedReconcile(DegradedReconcile.CREATE_MISSING)
+
+    and: 'run 2 goes degraded, creates the first page, and its second page fails'
+    def second = migrator(options: options, pages: 1).bootstrap(Document).outcomes()[0]
+    assert second.status() == MigrationResult.Status.FAILED
+    assert pending(V2).progress.cursors.degraded != null
+    (engine as FailingSecondCreateEngine).fail = false
+
+    when: 'the application deletes a document run 2 created, and run 3 resumes'
+    String deleted = engine.documents(V2).keySet().find { it.startsWith('n') }
+    assert engine.delete('documents', deleted)
+    def third = migrator(listen: false, options: options, pages: 1).bootstrap(Document).outcomes()[0]
+
+    then: 'only the rest is created; the deleted document stays deleted'
+    third.ok()
+    !engine.documents(V2).containsKey(deleted)
+    engine.documents(V2).keySet().count { it.startsWith('n') } == 1004
+    third.reconcile().strategy() == ReconcileStrategy.DEGRADED
+  }
+
+  def "a transient partial answer from the snapshot never takes the CREATE_MISSING path"() {
+    given: 'd0 is deleted through the alias after the swap; one snapshot lookup is rejected by a full queue'
+    engine = new PartialEngine(target: 'pit-lookup', reason: 'es_rejected_execution_exception')
+    setup()
+    on[Phase.CAUGHT_UP] = { put('n1', 'late') }
+    on[Phase.SWAPPED] = { remove('d0') }
+    on[Phase.FROZEN] = { (engine as PartialEngine).on = true }
+    def options = ZD.withDegradedReconcile(DegradedReconcile.CREATE_MISSING)
+
+    when:
+    def first = migrator(options: options).bootstrap(Document).outcomes()[0]
+    (engine as PartialEngine).on = false
+    on.clear()
+    def second = migrator(listen: false, options: options).bootstrap(Document).outcomes()[0]
+
+    then: 'the run fails and keeps the marker; the next one uses the snapshot, and d0 stays deleted'
+    first.status() == MigrationResult.Status.FAILED
+    second.ok()
+    second.reconcile().strategy() != ReconcileStrategy.DEGRADED
+    !titles(V2).containsKey('d0')
+  }
+
+  def "the hot pass recounts missing documents from zero when it starts over"() {
+    given: 'a marker that says hot documents were missing, but no hot cursor or done'
+    on[Phase.CAUGHT_UP] = { put('n1', 'late') }
+    on[Phase.FROZEN] = { throw new MigrationListener.Abort('killed') }
+    migrator().bootstrap(Document)
+    on.clear()
+    def ours = engine.getMappings(V2)._meta.elastic_protos
+    engine.putMappings(V2, [_meta: [elastic_protos: ours + [pending: ours.pending + [progress: [done: [], cursors: [:], hot_missing: 7]]]]])
+
+    when:
+    def outcome = migrator(listen: false).bootstrap(Document).outcomes()[0]
+
+    then: 'a stale 7 would have made the ghost count 7 and forced a sweep'
+    outcome.ok()
+    !outcome.reconcile().swept()
+    titles(V2).n1 == 'late'
+  }
+
+  def "with per-shard sequence numbers, a crash where a group of equal sequence numbers straddles a page cut resumes without a gap"() {
+    given: 'three shards numbering their own writes; 1100 documents written after the catch-up'
+    engine = new FailingSecondCreateEngine()
+    engine.shardedSeqNos(true)
+    IndexMigrator.builder().engine(engine).mapper(DEFAULT).options(MigrationOptions.standard().withLock(false).withDefaultShards(3)).build().bootstrap(Document)
+    5.times { put("d${it}", "Title ${it}") }
+    on[Phase.CAUGHT_UP] = { 1100.times { put("n${it}", 'late') } }
+    def first = migrator(pages: 1).bootstrap(Document).outcomes()[0]
+    on.clear()
+    (engine as FailingSecondCreateEngine).fail = false
+    def cursor = pending(V2).progress.cursors.hot
+    def sameSeqNo = engine.documents(V1).keySet().findAll { engine.get(V1, it).get().seqNo() == cursor.seq_no }
+
+    expect: 'the cut splits a group of documents sharing the cursor sequence number'
+    first.status() == MigrationResult.Status.FAILED
+    engine.getSettings(V1).index.number_of_shards == '3'
+    sameSeqNo.size() > cursor.ids.size()
+
+    when:
+    def outcome = migrator(listen: false, pages: 1).bootstrap(Document).outcomes()[0]
+
+    then: 'every document is there exactly once: the rest of the group was not skipped'
+    outcome.ok()
+    engine.documents(V2).keySet().count { it.startsWith('n') } == 1100
+    sameSeqNo.every { engine.documents(V2).containsKey(it) }
+  }
+
+  def "a failure to count the documents after the marker is gone is a warning, and deleteOldAfter still runs"() {
+    given:
+    engine = new PartialEngine(target: 'old', reason: 'es_rejected_execution_exception')
+    setup()
+    on[Phase.FINISHED] = { (engine as PartialEngine).on = true }
+
+    when:
+    def outcome = migrator(options: ZD.withDeleteOldAfter(true)).bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.status() == MigrationResult.Status.APPLIED
+    outcome.sourceCount() == null
+    outcome.warnings()[0].startsWith("the reindex finished, but counting the documents of ${V1} and ${V2} failed".toString())
+    !engine.indexExists(V1)
+  }
+
   // ------------------------------------------------------------------ blocking parity
 
   def "BLOCKING keeps the blocking procedure and its operations"() {
@@ -779,6 +1365,11 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     long seqNoCheckpoint(String index) {
       fixed
     }
+
+    @Override
+    OptionalLong globalCheckpoint(String index) {
+      OptionalLong.empty()
+    }
   }
 
   /** Reports no checkpoint, like an engine that does not implement it. */
@@ -786,6 +1377,147 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     @Override
     long seqNoCheckpoint(String index) {
       -1
+    }
+
+    @Override
+    OptionalLong globalCheckpoint(String index) {
+      OptionalLong.empty()
+    }
+  }
+
+  /** Fails the second bulk that creates documents in the new index while {@code fail} is set. */
+  static class FailingSecondCreateEngine extends InMemorySearchEngine {
+    boolean fail = true
+    int creates
+
+    @Override
+    com.phatjam98.elasticprotos.engine.BulkResult bulk(List<com.phatjam98.elasticprotos.engine.BulkOp> operations) {
+      if (fail && operations.any { it.type() == com.phatjam98.elasticprotos.engine.BulkOp.Type.CREATE && it.index() == V2 }
+          && ++creates == 2) {
+        throw new EngineException(EngineException.Kind.TRANSIENT, 503, 'node left')
+      }
+      super.bulk(operations)
+    }
+  }
+
+  /** Fails the first progress write of the hot pass, after its writes went in. */
+  static class FailingProgressEngine extends InMemorySearchEngine {
+    boolean failed
+
+    @Override
+    void putMappings(String index, Map<String, Object> mappings) {
+      if (!failed && mappings._meta?.elastic_protos?.pending?.progress?.cursors?.hot != null) {
+        failed = true
+        throw new EngineException(EngineException.Kind.TRANSIENT, 503, 'node left')
+      }
+      super.putMappings(index, mappings)
+    }
+  }
+
+  /** Reports a global checkpoint far above every write, breaking the promise of the SPI. */
+  static class LyingCheckpointEngine extends InMemorySearchEngine {
+    @Override
+    OptionalLong globalCheckpoint(String index) {
+      OptionalLong.of(1_000_000L)
+    }
+  }
+
+  /** Reports every total as a lower bound once {@code inexact} is set. */
+  static class InexactCountEngine extends InMemorySearchEngine {
+    boolean inexact
+
+    @Override
+    SearchResult search(List<String> targets, Map<String, Object> body) {
+      def result = super.search(targets, body)
+      inexact ? new SearchResult(result.total(), false, result.hits(), result.pitId(), result.aggregations(), result.tookMs()) : result
+    }
+  }
+
+  /** Counts the old index (without a query) one too many once {@code inflate} is set. */
+  static class InflatedCountEngine extends InMemorySearchEngine {
+    boolean inflate
+
+    @Override
+    SearchResult search(List<String> targets, Map<String, Object> body) {
+      def result = super.search(targets, body)
+      inflate && targets == [V1] && body.size == 0 && !body.containsKey('query')
+          ? new SearchResult(result.total() + 1, true, result.hits(), result.pitId(), result.aggregations(), result.tookMs())
+          : result
+    }
+  }
+
+  /** Counts one more document at or below the checkpoint once {@code late} is set. */
+  static class LateColdEngine extends InMemorySearchEngine {
+    boolean late
+
+    @Override
+    SearchResult search(List<String> targets, Map<String, Object> body) {
+      def result = super.search(targets, body)
+      late && body.query?.range?._seq_no?.lte != null
+          ? new SearchResult(result.total() + 1, true, result.hits(), result.pitId(), result.aggregations(), result.tookMs())
+          : result
+    }
+  }
+
+  /** Reports the first copy into the new index with a conflict, a no-op or a short total. */
+  static class FirstPassEngine extends InMemorySearchEngine {
+    long conflicts
+    long noops
+    boolean shortTotal
+    boolean done
+
+    @Override
+    com.phatjam98.elasticprotos.engine.ReindexResult reindex(com.phatjam98.elasticprotos.engine.ReindexRequest request) {
+      def result = super.reindex(request)
+      if (done || request.dest() != V2) {
+        return result
+      }
+      done = true
+      long total = shortTotal ? result.total() - 1 : result.total() + conflicts + noops
+      long created = shortTotal ? result.created() - 1 : result.created()
+      new com.phatjam98.elasticprotos.engine.ReindexResult(total, created, result.updated(), [], 0, false,
+          noops, 0, conflicts)
+    }
+  }
+
+  /** Reports a deleted document from the second (catch-up) copy into the new index. */
+  static class CatchUpDeleteEngine extends InMemorySearchEngine {
+    int passes
+
+    @Override
+    com.phatjam98.elasticprotos.engine.ReindexResult reindex(com.phatjam98.elasticprotos.engine.ReindexRequest request) {
+      def result = super.reindex(request)
+      if (request.dest() != V2 || ++passes != 2) {
+        return result
+      }
+      new com.phatjam98.elasticprotos.engine.ReindexResult(result.total(), result.created(), result.updated(), [], 0, false,
+          result.noops(), 1, result.versionConflicts() - 1)
+    }
+  }
+
+  /** Creates the new index with index.replication.type SEGMENT, like an OpenSearch cluster default. */
+  static class SegmentDefaultEngine extends InMemorySearchEngine {
+    @Override
+    void createIndex(String name, Map<String, Object> settings, Map<String, Object> mappings, Set<String> aliases) {
+      super.createIndex(name, name == V2 ? settings + ['index.replication.type': 'SEGMENT'] : settings, mappings, aliases)
+    }
+  }
+
+  /** Answers searches of the old index, or of a point in time, with one failed shard once {@code on} is set. */
+  static class PartialEngine extends InMemorySearchEngine {
+    boolean on
+    String target
+    String reason
+    boolean lookedUp
+
+    @Override
+    SearchResult search(List<String> targets, Map<String, Object> body) {
+      def result = super.search(targets, body)
+      boolean hit = target == 'old' ? targets == [V1]
+          : target == 'pit-lookup' ? (body.containsKey('pit') && body.query?.ids != null && !lookedUp && (lookedUp = true))
+          : (body.containsKey('pit') && body.size == 0)
+      on && hit ? new SearchResult(result.total(), true, result.hits(), result.pitId(), result.aggregations(), result.tookMs(), 1,
+          reason == null ? [] : [reason]) : result
     }
   }
 

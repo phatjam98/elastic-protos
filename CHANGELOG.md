@@ -20,6 +20,56 @@ requires Java 17. It is not API-compatible with the pre-1.0 `com.phatjam98.elast
 packages, and the private geobuf dependency is gone. The `1.0.0-rc.1`, `1.0.0-rc.2` and
 `1.0.0-rc.3` pre-releases precede it.
 
+### Since 1.0.0-rc.3
+
+#### Changed
+
+- The zero-downtime reconcile reads only the documents of the old index written after its global
+  checkpoint, and sweeps the new index only when document counts show that documents were deleted
+  from the old index during the copy (`ReconcileStrategy.SEQ_NO_RANGE`;
+  [ADR 0007 addendum](docs/adr/0007-zero-downtime-reindex.md)), so the stale-read window after the
+  swap covers the documents above the lowest shard checkpoint instead of every document (about the
+  changed documents on evenly loaded shards; up to most of the index on skewed ones). The range is
+  used only after the copy verifies as clean (first pass created exactly what it read, catch-up
+  deleted nothing, the snapshot count matches, the count at or below the checkpoint did not grow).
+  A full scan remains for migration scripts, reused leftover indices, rollbacks, OpenSearch segment
+  replication on either index, an empty shard, engines without a global checkpoint and markers
+  written by rc.3 or earlier, which still resume. The checkpoint in the marker is now the global
+  checkpoint where the engine reports one.
+- Every search and count the migrator relies on now fails on a partial answer (a shard that did not
+  answer) instead of reading it as complete; on the snapshot that counts as a lost snapshot.
+- `ReconcileStats` equality now includes `strategy` and `swept`: a comparison with
+  `new ReconcileStats(c, s, g, k)` matches only a full scan that swept.
+- `SearchEngine.update` (`JsonRestEngine`) now sends `retry_on_conflict=3` and, on a 409 that
+  survives it, sends the request again up to three times (`JsonRestEngine.UPDATE_RESENDS`, with a
+  short jittered pause): a partial update that raced another write (a backfill's update by query)
+  or an alias swap (where the engine's own retries stay on the old index) is applied to the newest
+  version instead of failing. The new `update(index, id, partial, retryOnConflict)` sets the
+  engine-side count; 0 restores the old behaviour.
+
+#### Fixed
+
+- A resumed zero-downtime reconcile no longer brings back a document the interrupted run created
+  and the application then deleted through the alias (also in 1.0.0-rc.3): the reconcile records
+  its progress in the marker (`pending.progress`, one cursor per pass, recorded every four
+  writing pages or five seconds) and a resume continues after it, replaying at most those pages.
+  A transient partial answer from the snapshot fails the item instead of taking the degraded path.
+  Markers written by rc.3 still resume, replaying the whole reconcile as before.
+
+#### Added
+
+- `SearchEngine.globalCheckpoint` (default empty), implemented by both adapters from
+  `_stats?level=shards`.
+- `ReconcileStats.strategy()` (`ReconcileStrategy`: `SEQ_NO_RANGE`, `FULL_SCAN`, `DEGRADED`) and
+  `swept()`; the four-argument constructor remains and means a full scan that swept.
+- `MigrationOptions.fullReconcile` (default false) forces the full scan.
+- `SearchResult.shardsFailed()`, `shardFailures()` (the `reason.type` of each) and `partial()`, from
+  `_shards` (the six-argument constructor remains and means no failed shard).
+- Testkit: `InMemorySearchEngine.shardedSeqNos(boolean)` numbers the writes of each shard of a
+  multi-shard index on its own, as the engines do.
+- Testkit: `InMemorySearchEngine` `_seq_no` ranges with `gte`, `lt` and `lte`, `globalCheckpoint`, `globalCheckpoints(boolean)` and
+  `globalCheckpointLag(long)`.
+
 ### Since 1.0.0-rc.2
 
 #### Added

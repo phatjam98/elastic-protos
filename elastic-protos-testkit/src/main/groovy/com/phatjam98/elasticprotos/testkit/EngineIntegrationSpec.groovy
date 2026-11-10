@@ -39,6 +39,7 @@ import com.phatjam98.elasticprotos.migration.MigrationPlan
 import com.phatjam98.elasticprotos.migration.MigrationResult
 import com.phatjam98.elasticprotos.migration.MigrationScriptProvider
 import com.phatjam98.elasticprotos.migration.ReconcileStats
+import com.phatjam98.elasticprotos.migration.ReconcileStrategy
 import com.phatjam98.elasticprotos.migration.RollbackMode
 import com.phatjam98.elasticprotos.migration.StaticSettingsPolicy
 import com.phatjam98.elasticprotos.migration.RemovedFieldPolicy
@@ -986,7 +987,7 @@ abstract class EngineIntegrationSpec extends Specification {
     result.outcomes()[0].retainedIndices() == [v1.name()]
     result.outcomes()[0].sourceCount() == 6L
     result.outcomes()[0].destCount() == 6L
-    result.outcomes()[0].reconcile() == new ReconcileStats(0, 0, 0, 0)
+    result.outcomes()[0].reconcile() == new ReconcileStats(0, 0, 0, 0, ReconcileStrategy.SEQ_NO_RANGE, false)
     engine.getAliases(v1.alias()).keySet() == [v2.name()] as Set
     engine.getMappings(v2.name())._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version', 'static_settings'] as Set
     ids(engine.search([v1.alias()], [query: [term: ['body.keyword':
@@ -1174,6 +1175,297 @@ abstract class EngineIntegrationSpec extends Specification {
     then:
     written != null
     count(alias) == 12
+  }
+
+  def "on a multi-shard index the reconcile reads only the sequence number range, and sweeps only after deletes"() {
+    given: 'a three-shard documents alias under -sq with the sample set and thirty more documents'
+    IndexNamingStrategy sqNaming = IndexNamingStrategy.prefixed(prefix + '-sq')
+    def shards = { MappingOverrides.Builder b -> b.setting('number_of_shards', 3).build() }
+    def plain = ProtoMapper.builder().naming(sqNaming).overrides(shards(MappingOverrides.builder())).build()
+    def titleKeyword = ProtoMapper.builder().naming(sqNaming).overrides(shards(MappingOverrides.builder()
+        .forField(Document.descriptor, 'title') { it.setType(EsType.KEYWORD) })).build()
+    def bodyKeyword = ProtoMapper.builder().naming(sqNaming).overrides(shards(MappingOverrides.builder()
+        .forField(Document.descriptor, 'title') { it.setType(EsType.KEYWORD) }
+        .forField(Document.descriptor, 'body') { it.setKeywordSubfield(Bool3.TRUE) })).build()
+    IndexDefinition v1 = plain.map(Document)
+    IndexDefinition v2 = titleKeyword.map(Document)
+    IndexDefinition v3 = bodyKeyword.map(Document)
+    String alias = v1.alias()
+    indexSampleDocuments(plain)
+    30.times { write(alias, "sq-${it}", 'before') }
+    engine.refresh(alias)
+    Map<String, String> expected = titles(v1.name())
+    Map<Phase, Closure> on = [:]
+    def migrator = { ProtoMapper with ->
+      IndexMigrator.builder().engine(engine).mapper(with).options(FAST.withBackfill(false))
+          .listener({ a, phase -> on[phase]?.call() } as MigrationListener).build()
+    }
+
+    when: 'updates (one document three times), creates, and a create-then-delete after the catch-up, more writes after the swap'
+    on[Phase.COPIED] = { write(alias, 'sq-0', 'copy window') }
+    on[Phase.CAUGHT_UP] = {
+      write(alias, 'sq-1', 'a'); write(alias, 'sq-1', 'b'); write(alias, 'sq-1', 'c')
+      write(alias, 'sq-new-1', 'created'); write(alias, 'sq-tmp', 'temp'); engine.delete(alias, 'sq-tmp')
+    }
+    on[Phase.SWAPPED] = { write(alias, 'sq-2', 'after swap'); engine.delete(alias, 'sq-3'); write(alias, 'sq-new-2', 'after swap') }
+    def first = migrator(titleKeyword).bootstrap(Document).outcomes()[0]
+    expected += ['sq-0': 'copy window', 'sq-1': 'c', 'sq-new-1': 'created', 'sq-2': 'after swap', 'sq-new-2': 'after swap']
+    expected.remove('sq-3')
+
+    then: 'the old index has three shards, the state is exact, and no sweep was needed'
+    first.ok()
+    first.index() == v2.name()
+    engine.getSettings(v1.name()).index.number_of_shards == '3'
+    titles(v2.name()) == expected
+    first.reconcile() == new ReconcileStats(2, 0, 0, 0, ReconcileStrategy.SEQ_NO_RANGE, false)
+
+    when: 'the next reindex sees deletes in the old index after the copy and after the catch-up'
+    on.clear()
+    on[Phase.COPIED] = { engine.delete(alias, 'sq-4') }
+    on[Phase.CAUGHT_UP] = { engine.delete(alias, 'sq-5'); write(alias, 'sq-6', 'late') }
+    on[Phase.SWAPPED] = { write(alias, 'sq-5', 'reborn after swap'); engine.delete(alias, 'sq-7') }
+    def second = migrator(bodyKeyword).bootstrap(Document).outcomes()[0]
+    expected += ['sq-5': 'reborn after swap', 'sq-6': 'late']
+    expected.remove('sq-4')
+    expected.remove('sq-7')
+
+    then: 'the sweep ran: sq-4 is gone, sq-5, written again through the alias after the swap, is kept'
+    second.ok()
+    second.index() == v3.name()
+    titles(v3.name()) == expected
+    second.reconcile() == new ReconcileStats(1, 1, 1, 0, ReconcileStrategy.SEQ_NO_RANGE, true)
+    engine.getMappings(v3.name())._meta.elastic_protos.pending == null
+
+    when: 'the same reindex with fullReconcile scans everything and reaches the same state'
+    def third = IndexMigrator.builder().engine(engine).mapper(plain).options(FAST.withFullReconcile(true)).build()
+        .bootstrap(Document).outcomes()[0]
+
+    then:
+    third.ok()
+    third.reconcile() == new ReconcileStats(0, 0, 0, 0, ReconcileStrategy.FULL_SCAN, true)
+    titles(third.index()) == expected
+  }
+
+  def "concurrent writers through the alias during a zero-downtime reindex end in exactly their acknowledged state"() {
+    given: 'a three-shard alias under -cw with thirty documents, and three writer threads'
+    IndexNamingStrategy cwNaming = IndexNamingStrategy.prefixed(prefix + '-cw')
+    def plain = ProtoMapper.builder().naming(cwNaming)
+        .overrides(MappingOverrides.builder().setting('number_of_shards', 3).build()).build()
+    def titleKeyword = ProtoMapper.builder().naming(cwNaming).overrides(MappingOverrides.builder()
+        .setting('number_of_shards', 3).forField(Document.descriptor, 'title') { it.setType(EsType.KEYWORD) }.build()).build()
+    String alias = plain.map(Document).alias()
+    assert IndexMigrator.builder().engine(engine).mapper(plain).build().bootstrap(Document).ok()
+    30.times { write(alias, "cw-${it}", 'before') }
+    engine.refresh(alias)
+    Map<String, String> model = new java.util.concurrent.ConcurrentHashMap<>()
+    30.times { model["cw-${it}".toString()] = 'before' }
+    def stop = new java.util.concurrent.atomic.AtomicBoolean()
+    List<Throwable> errors = Collections.synchronizedList([])
+    int[] operations = new int[3]
+    // ids written by one thread only; a deleted id is never written again and a created id never
+    // deleted, which keeps out the documented create-after-catch-up-then-delete-after-swap case
+    def writers = (0..<3).collect { int t ->
+      Thread.start {
+        def random = new Random(t)
+        List<String> owned = (0..<10).collect { "cw-${t * 10 + it}".toString() }
+        List<String> created = []
+        int n = 0
+        try {
+          while (!stop.get()) {
+            n++
+            int dice = random.nextInt(10)
+            if (dice < 4 && !owned.isEmpty()) {
+              String id = owned[random.nextInt(owned.size())]
+              retryBlocked { write(alias, id, "t${t}-${n}") }
+              model[id] = "t${t}-${n}".toString()
+            } else if (dice < 5 && owned.size() > 2) {
+              String id = owned.remove(random.nextInt(owned.size()))
+              retryBlocked { engine.delete(alias, id) }
+              model.remove(id)
+            } else if (dice < 8 || created.isEmpty()) {
+              String id = "cw-${t}-new-${n}".toString()
+              retryBlocked { write(alias, id, "t${t}-${n}") }
+              created << id
+              model[id] = "t${t}-${n}".toString()
+            } else {
+              String id = created[random.nextInt(created.size())]
+              retryBlocked { write(alias, id, "t${t}-${n}") }
+              model[id] = "t${t}-${n}".toString()
+            }
+            operations[t]++
+            Thread.sleep(3)
+          }
+        } catch (Throwable e) {
+          errors << e
+        }
+      }
+    }
+    def migrator = IndexMigrator.builder().engine(engine).mapper(titleKeyword).options(FAST)
+        .listener({ a, phase -> Thread.sleep(150) } as MigrationListener).build()
+
+    when: 'the reindex runs while they write'
+    Thread.sleep(200)
+    def outcome = migrator.bootstrap(Document).outcomes()[0]
+    Thread.sleep(200)
+    stop.set(true)
+    writers*.join()
+    engine.refresh(alias)
+    Map<String, String> actual = engine.search([titleKeyword.map(Document).name()], [query: [match_all: [:]], size: 1000])
+        .hits().collectEntries { [(it.id()): it.source().title] }
+
+    then: 'every acknowledged write is there, nothing deleted came back, and the range was used'
+    errors.isEmpty()
+    operations.sum() > 100
+    outcome.ok()
+    outcome.index() == titleKeyword.map(Document).name()
+    actual == new TreeMap(model)
+    outcome.reconcile().strategy() == ReconcileStrategy.SEQ_NO_RANGE
+  }
+
+  def "a resumed reconcile does not bring back a document the first run created and the application deleted"() {
+    given: 'an alias under -rr; x is written through it after the catch-up and the run dies after the reconcile'
+    IndexNamingStrategy rrNaming = IndexNamingStrategy.prefixed(prefix + '-rr')
+    def plain = ProtoMapper.builder().naming(rrNaming).build()
+    def titleKeyword = ProtoMapper.builder().naming(rrNaming).overrides(MappingOverrides.builder()
+        .forField(Document.descriptor, 'title') { it.setType(EsType.KEYWORD) }.build()).build()
+    String alias = plain.map(Document).alias()
+    String next = titleKeyword.map(Document).name()
+    indexSampleDocuments(plain)
+    def crashing = IndexMigrator.builder().engine(engine).mapper(titleKeyword).options(FAST.withLock(false))
+        .listener({ a, phase ->
+          if (phase == Phase.CAUGHT_UP) {
+            write(alias, 'x', 'late')
+          }
+          if (phase == Phase.RECONCILED) {
+            throw new MigrationListener.Abort('killed')
+          }
+        } as MigrationListener).build()
+    assert crashing.bootstrap(Document).outcomes()[0].status() == MigrationResult.Status.FAILED
+    assert engine.get(alias, 'x').get().index() == next
+
+    when: 'the application deletes x through the alias and a fresh run resumes'
+    assert engine.delete(alias, 'x', IndexOptions.refreshed())
+    def outcome = IndexMigrator.builder().engine(engine).mapper(titleKeyword).options(FAST).build()
+        .bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    outcome.reconcile().copied() == 0L
+    !engine.get(alias, 'x').isPresent()
+    engine.getMappings(next)._meta.elastic_protos.pending == null
+
+    when: 'a partial update through the alias, with the engine retrying on conflict'
+    def updated = engine.update(alias, 'doc-1', [title: 'patched'])
+    def once = engine.update(alias, 'doc-1', [title: 'patched again'], 0)
+
+    then:
+    updated.result() == 'updated'
+    once.result() == 'updated'
+  }
+
+  def "a reconcile that fails in the middle of a pass on a three-shard index resumes after its recorded cursor"() {
+    given: 'a three-shard alias under -mp; 4100 documents written after the catch-up, so the hot pass has five pages'
+    IndexNamingStrategy mpNaming = IndexNamingStrategy.prefixed(prefix + '-mp')
+    def shards = { MappingOverrides.Builder b -> b.setting('number_of_shards', 3).build() }
+    def plain = ProtoMapper.builder().naming(mpNaming).overrides(shards(MappingOverrides.builder())).build()
+    def titleKeyword = ProtoMapper.builder().naming(mpNaming).overrides(shards(MappingOverrides.builder()
+        .forField(Document.descriptor, 'title') { it.setType(EsType.KEYWORD) })).build()
+    String alias = plain.map(Document).alias()
+    String next = titleKeyword.map(Document).name()
+    indexSampleDocuments(plain)
+    def late = {
+      (0..<4100).collate(1000).each { chunk ->
+        assert !engine.bulk(chunk.collect { BulkOp.index(alias, "mp-${it}".toString(),
+            codec.toDocument(SampleData.documents()[0].toBuilder().setId("mp-${it}").setTitle('late').build())) }).errors()
+      }
+    }
+    and: 'the fifth bulk of creates into the new index fails, after the cursor of page four was recorded'
+    def failing = failingOnCreateBulk(engine, next, 5)
+    def first = IndexMigrator.builder().engine(failing).mapper(titleKeyword).options(FAST.withLock(false))
+        .listener({ a, phase -> if (phase == Phase.CAUGHT_UP) { late() } } as MigrationListener).build()
+        .bootstrap(Document).outcomes()[0]
+
+    expect:
+    first.status() == MigrationResult.Status.FAILED
+    engine.getMappings(next)._meta.elastic_protos.pending.progress.cursors.hot != null
+
+    when: 'the application deletes a document of an earlier page, and a fresh run resumes'
+    engine.refresh(next)
+    String deleted = engine.search([next], [query: [match_all: [:]], size: 100]).hits()*.id().find { it.startsWith('mp-') }
+    assert engine.delete(alias, deleted, IndexOptions.refreshed())
+    def outcome = IndexMigrator.builder().engine(engine).mapper(titleKeyword).options(FAST).build()
+        .bootstrap(Document).outcomes()[0]
+    engine.refresh(next)
+
+    then: 'the recorded pages are not replayed, and no document after the cursor is skipped'
+    outcome.ok()
+    !engine.get(alias, deleted).isPresent()
+    count(next) == SampleData.documents().size() + 4099
+    engine.getMappings(next)._meta.elastic_protos.pending == null
+  }
+
+  /** Wraps an engine so that its {@code failAt}-th bulk with creates into {@code index} fails. */
+  static SearchEngine failingOnCreateBulk(SearchEngine delegate, String index, int failAt) {
+    int[] creates = [0]
+    (SearchEngine) java.lang.reflect.Proxy.newProxyInstance(SearchEngine.classLoader, [SearchEngine] as Class[],
+        { proxy, java.lang.reflect.Method method, Object[] args ->
+          if (method.name == 'bulk' && (args[0] as List<BulkOp>).any { it.type() == BulkOp.Type.CREATE && it.index() == index }
+              && ++creates[0] == failAt) {
+            throw new EngineException(EngineException.Kind.TRANSIENT, 503, 'injected failure')
+          }
+          try {
+            method.invoke(delegate, args)
+          } catch (java.lang.reflect.InvocationTargetException e) {
+            throw e.cause
+          }
+        } as java.lang.reflect.InvocationHandler)
+  }
+
+  /** Runs a write, retrying it while it fails with the write block of an old index after a swap. */
+  static void retryBlocked(Closure write) {
+    for (int attempt = 0; ; attempt++) {
+      try {
+        write()
+        return
+      } catch (EngineException e) {
+        if (e.kind != EngineException.Kind.BLOCKED || attempt > 50) {
+          throw e
+        }
+        Thread.sleep(20)
+      }
+    }
+  }
+
+  def "a search that fails on one shard reports it next to the other shards' results"() {
+    given: 'a three-shard index where a script throws on one document'
+    String index = prefix + '-partial'
+    engine.createIndex(index, [number_of_shards: 3, number_of_replicas: 0], [properties: [n: [type: 'long']]], [] as Set)
+    assert !engine.bulk((1..12).collect { BulkOp.index(index, "p${it}", [n: it]) }).errors()
+    engine.refresh(index)
+    def query = [script: [script: [source: 'if (doc[\'n\'].value == 3) { throw new IllegalArgumentException(\'boom\'); } return true;']]]
+
+    when:
+    SearchResult result = engine.search([index], [query: query, size: 20, track_total_hits: true])
+
+    then: 'a 200 with an exact-looking total of the other shards only'
+    result.shardsFailed() == 1
+    result.shardFailures() == ['script_exception']
+    result.partial()
+    result.totalExact()
+    result.total() < 12
+    !engine.search([index], [size: 0, track_total_hits: true]).partial()
+
+    when: 'a point in time whose readers are gone (closed) is searched'
+    def pit = engine.openPit([index], java.time.Duration.ofMinutes(1))
+    engine.closePit(pit)
+    engine.search([], [pit: [id: pit.id(), keep_alive: '1m'], size: 0])
+
+    then: 'a 404 (search_context_missing_exception on every shard), which the reconcile treats as a lost snapshot'
+    def gone = thrown(EngineException)
+    gone.kind == EngineException.Kind.NOT_FOUND
+
+    cleanup:
+    engine.deleteIndex(index)
   }
 
   // ------------------------------------------------------------------ settings

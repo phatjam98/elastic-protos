@@ -16,6 +16,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.function.Consumer;
 
@@ -36,6 +37,10 @@ import java.util.function.Consumer;
  * <p>Sweep: every document of the snapshot that the old index no longer has was deleted there after
  * the copy, and is deleted from the new index on the snapshot's sequence number.
  *
+ * <p>With a sound checkpoint ({@link ReconcileStrategy#SEQ_NO_RANGE}) the cold pass is left out,
+ * and {@link #ghosts} counts the documents the sweep would delete from the document counts alone,
+ * so that the sweep runs only when there are any.
+ *
  * <p>The old index is scanned without sources; sources are fetched only for the documents that
  * are written.
  */
@@ -49,19 +54,152 @@ final class Reconciler {
   private final Duration timeout;
   private final List<Object> sort;
   private final Runnable guard;
+  private final Progress progress;
+  private final Consumer<Progress> save;
+  private final int savePages;
+  private final Duration saveInterval;
+
+  /**
+   * Creates a reconciler that keeps no progress, for the probe.
+   *
+   * @param guard run before every page is written; throws to stop, for a lost alias lock
+   */
+  Reconciler(SearchEngine engine, Duration keepAlive, Duration timeout, Runnable guard) {
+    this(engine, keepAlive, timeout, guard, new Progress(), progress -> {});
+  }
 
   /**
    * Creates a reconciler.
    *
    * @param guard run before every page is written; throws to stop, for a lost alias lock
+   * @param progress where an earlier run stopped; the passes it completed are skipped and the
+   *     pass it was in resumes after the last page whose writes it recorded
+   * @param save records the progress, after every page that wrote and at the end of every pass
    */
-  Reconciler(SearchEngine engine, Duration keepAlive, Duration timeout, Runnable guard) {
+  Reconciler(SearchEngine engine, Duration keepAlive, Duration timeout, Runnable guard,
+      Progress progress, Consumer<Progress> save) {
+    this(engine, keepAlive, timeout, guard, progress, save, SAVE_PAGES, SAVE_INTERVAL);
+  }
+
+  /**
+   * Creates a reconciler that records its progress at another cadence, for tests.
+   *
+   * @param savePages record the cursor once this many pages wrote since the last record
+   * @param saveInterval record the cursor after a page once this long passed since the last record
+   */
+  Reconciler(SearchEngine engine, Duration keepAlive, Duration timeout, Runnable guard,
+      Progress progress, Consumer<Progress> save, int savePages, Duration saveInterval) {
     this.guard = guard;
     this.engine = engine;
     this.keepAlive = keepAlive;
     this.timeout = timeout;
     this.sort = List.of(Map.of(engine.info().supportsShardDoc() ? "_shard_doc" : "_id", "asc"));
+    this.progress = progress;
+    this.save = save;
+    this.savePages = savePages;
+    this.saveInterval = saveInterval;
   }
+
+  /**
+   * How many pages that wrote may go unrecorded: each record of the cursor is a mapping update, a
+   * cluster-state publication, so recording after every page loads the master on large reconciles,
+   * while every unrecorded page is replayed after a crash. Four pages (4,000 documents) keep the
+   * mapping updates to one per 4,000 written documents at most.
+   */
+  static final int SAVE_PAGES = 4;
+
+  /** How long the cursor may go unrecorded while pages are read, written or not. */
+  static final Duration SAVE_INTERVAL = Duration.ofSeconds(5);
+
+  /**
+   * How far the reconcile got, kept in the marker ({@code pending.progress}) so that a resumed run
+   * never repeats a write it already made and recorded. A replayed {@code create} would bring back
+   * a document the earlier run created and the application then deleted through the alias, since
+   * the snapshot still lacks it; conditional writes and deletes are safe to repeat (409), but
+   * creates are not.
+   *
+   * <p>A pass reads the frozen old index ordered by {@code _seq_no} (then by shard), so its order
+   * does not depend on the point in time or on merges. Each pass has its own cursor: the last
+   * sequence number processed and the ids at it (sequence numbers are per shard, so several
+   * documents can share one). A resumed pass reads from that sequence number on, without those
+   * ids; a cursor of one pass is never touched by another (a resumed degraded pass keeps its
+   * cursor while the run first tries the snapshot). Completed passes are listed in {@code done}.
+   * {@code hot_missing} counts the hot documents the snapshot lacks, up to the hot cursor.
+   */
+  static final class Progress {
+    final Set<String> done = new java.util.TreeSet<>();
+    final Map<String, Cursor> cursors = new java.util.TreeMap<>();
+    long hotMissing;
+
+    /** Where a pass got to: the last sequence number, and the ids at it already processed. */
+    static final class Cursor {
+      long seqNo;
+      final Set<String> ids = new java.util.TreeSet<>();
+    }
+
+    /** Reads the progress a marker records, or an empty one (markers of 1.0.0-rc.3). */
+    static Progress from(Object value) {
+      Progress progress = new Progress();
+      if (!(value instanceof Map<?, ?> map)) {
+        return progress;
+      }
+      if (map.get("done") instanceof List<?> done) {
+        done.forEach(pass -> progress.done.add(String.valueOf(pass)));
+      }
+      if (map.get("cursors") instanceof Map<?, ?> cursors) {
+        cursors.forEach((pass, raw) -> {
+          if (raw instanceof Map<?, ?> fields && fields.get("seq_no") instanceof Number seqNo) {
+            Cursor cursor = new Cursor();
+            cursor.seqNo = seqNo.longValue();
+            if (fields.get("ids") instanceof List<?> ids) {
+              ids.forEach(id -> cursor.ids.add(String.valueOf(id)));
+            }
+            progress.cursors.put(String.valueOf(pass), cursor);
+          }
+        });
+      }
+      if (map.get("hot_missing") instanceof Number missing) {
+        progress.hotMissing = missing.longValue();
+      }
+      return progress;
+    }
+
+    /** Returns the marker form; null when nothing happened yet. */
+    Map<String, Object> toMap() {
+      if (done.isEmpty() && cursors.isEmpty() && hotMissing == 0) {
+        return null;
+      }
+      Map<String, Object> map = new LinkedHashMap<>();
+      map.put("done", new ArrayList<>(done));
+      Map<String, Object> marks = new java.util.TreeMap<>();
+      cursors.forEach((pass, cursor) -> {
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("seq_no", cursor.seqNo);
+        fields.put("ids", new ArrayList<>(cursor.ids));
+        marks.put(pass, fields);
+      });
+      map.put("cursors", marks);
+      map.put("hot_missing", hotMissing);
+      return map;
+    }
+
+    boolean done(String name) {
+      return done.contains(name);
+    }
+
+    void finish(String name) {
+      done.add(name);
+      cursors.remove(name);
+    }
+  }
+
+  /** The shard failure of a point in time whose reader is gone on that shard. */
+  static final String CONTEXT_MISSING = "search_context_missing_exception";
+
+  static final String HOT = "hot";
+  static final String COLD = "cold";
+  static final String SWEEP = "sweep";
+  static final String DEGRADED = "degraded";
 
   /** The point in time over the new index is gone, so its snapshot cannot be read. */
   static final class SnapshotLost extends RuntimeException {
@@ -69,6 +207,10 @@ final class Reconciler {
 
     SnapshotLost(Throwable cause) {
       super("the point in time over the new index is gone: " + cause.getMessage(), cause);
+    }
+
+    SnapshotLost(String message) {
+      super(message);
     }
   }
 
@@ -90,10 +232,12 @@ final class Reconciler {
     long ghostsDeleted;
     long staleSkipped;
     long missing;
+    ReconcileStrategy strategy = ReconcileStrategy.FULL_SCAN;
+    boolean swept;
     final List<String> warnings = new ArrayList<>();
 
     ReconcileStats stats() {
-      return new ReconcileStats(copied, superseded, ghostsDeleted, staleSkipped);
+      return new ReconcileStats(copied, superseded, ghostsDeleted, staleSkipped, strategy, swept);
     }
   }
 
@@ -112,6 +256,21 @@ final class Reconciler {
    */
   void reconcile(String from, String to, String snapshotPit, long checkpoint, Staging staging,
       boolean compareSources, Counts counts) {
+    reconcileHot(from, to, snapshotPit, checkpoint, staging, counts);
+    if (checkpoint >= 0) {
+      reconcileCold(from, to, snapshotPit, checkpoint, staging, compareSources, counts);
+    }
+  }
+
+  /**
+   * The hot pass: copies the documents of {@code from} written after the checkpoint (every
+   * document when it is negative) that the snapshot lacks or holds differently.
+   *
+   * @return how many of those documents the snapshot lacks
+   * @throws SnapshotLost when the snapshot's point in time is gone
+   */
+  long reconcileHot(String from, String to, String snapshotPit, long checkpoint, Staging staging,
+      Counts counts) {
     // without a script, a hot document is compared by version and source; with one, the copy's
     // source differs by design, so every hot document is written
     boolean bySource = staging == null;
@@ -122,51 +281,58 @@ final class Reconciler {
     if (checkpoint >= 0) {
       hot.put("query", Map.of("range", Map.of("_seq_no", Map.of("gt", checkpoint))));
     }
-    scan(from, hot, page -> {
+    scanBySeqNo(HOT, from, hot, page -> {
       Map<String, Hit> snapshot = snapshot(snapshotPit, ids(page), bySource);
       List<String> changed = new ArrayList<>();
       for (Hit hit : page) {
         Hit seen = snapshot.get(hit.id());
+        if (seen == null) {
+          progress.hotMissing++;
+        }
         if (!bySource || seen == null || differs(hit, seen, false) || differs(hit, seen, true)) {
           changed.add(hit.id());
         }
       }
-      write(from, to, changed, snapshot, staging, counts);
+      return write(from, to, changed, snapshot, staging, counts);
     });
-    if (checkpoint < 0) {
-      return;
-    }
+    return progress.hotMissing;
+  }
+
+  /**
+   * The cold pass: compares every document of {@code from} at or below the checkpoint with the
+   * snapshot, by version or, with {@code compareSources}, by source, and copies those that differ.
+   *
+   * @throws SnapshotLost when the snapshot's point in time is gone
+   */
+  void reconcileCold(String from, String to, String snapshotPit, long checkpoint, Staging staging,
+      boolean compareSources, Counts counts) {
     Map<String, Object> cold = new LinkedHashMap<>();
     cold.put("_source", compareSources);
     cold.put("version", true);
     cold.put("seq_no_primary_term", true);
-    scan(from, cold, page -> {
-      List<Hit> unchanged = new ArrayList<>();
-      for (Hit hit : page) {
-        if (hit.seqNo() == null || hit.seqNo() <= checkpoint) {
-          unchanged.add(hit);
-        }
-      }
-      if (unchanged.isEmpty()) {
-        return;
-      }
-      Map<String, Hit> snapshot = snapshot(snapshotPit, ids(unchanged), compareSources);
+    cold.put("query", Map.of("range", Map.of("_seq_no", Map.of("lte", checkpoint))));
+    scanBySeqNo(COLD, from, cold, page -> {
+      Map<String, Hit> snapshot = snapshot(snapshotPit, ids(page), compareSources);
       List<String> changed = new ArrayList<>();
-      for (Hit hit : unchanged) {
+      for (Hit hit : page) {
         Hit seen = snapshot.get(hit.id());
         if (seen == null || differs(hit, seen, compareSources)) {
           changed.add(hit.id());
         }
       }
-      write(from, to, changed, snapshot, staging, counts);
+      return write(from, to, changed, snapshot, staging, counts);
     });
   }
 
-  /** Writes documents of {@code from} into {@code to}, conditional on the snapshot. */
-  private void write(String from, String to, List<String> ids, Map<String, Hit> snapshot,
+  /**
+   * Writes documents of {@code from} into {@code to}, conditional on the snapshot.
+   *
+   * @return whether anything was written
+   */
+  private boolean write(String from, String to, List<String> ids, Map<String, Hit> snapshot,
       Staging staging, Counts counts) {
     if (ids.isEmpty()) {
-      return;
+      return false;
     }
     Map<String, Map<String, Object>> sources = staging == null
         ? sources(from, ids) : stage(from, staging, ids);
@@ -188,6 +354,32 @@ final class Reconciler {
     }
     apply(ops, counts, false);
     apply(deletes, counts, true);
+    return !ops.isEmpty() || !deletes.isEmpty();
+  }
+
+  /**
+   * Counts the documents of the snapshot that the frozen old index no longer has, without reading
+   * them: the snapshot's count, minus the old index's count, plus the hot documents the snapshot
+   * lacks. This holds when every document of {@code from} at or below the checkpoint is in the
+   * snapshot (the new index was created by the run that copied into it, with no script, after the
+   * global checkpoint was taken), because the snapshot then holds every document of {@code from}
+   * except those hot ones, and the ghosts besides.
+   *
+   * @param hotMissing what {@link #reconcileHot} returned
+   * @return the number of ghosts, or empty when a count is not exact
+   * @throws SnapshotLost when the snapshot's point in time is gone
+   */
+  OptionalLong ghosts(String from, String snapshotPit, long hotMissing) {
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("pit", pit(snapshotPit));
+    body.put("size", 0);
+    body.put("track_total_hits", true);
+    SearchResult snapshot = searchPit(body);
+    SearchResult old = search(List.of(from), Map.of("size", 0, "track_total_hits", true));
+    if (!snapshot.totalExact() || !old.totalExact()) {
+      return OptionalLong.empty();
+    }
+    return OptionalLong.of(snapshot.total() - old.total() + hotMissing);
   }
 
   /**
@@ -196,6 +388,10 @@ final class Reconciler {
    * @throws SnapshotLost when the snapshot's point in time is gone
    */
   void sweep(String from, String to, String snapshotPit, Counts counts) {
+    if (progress.done(SWEEP)) {
+      counts.swept = true;
+      return;
+    }
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("_source", false);
     body.put("seq_no_primary_term", true);
@@ -209,6 +405,9 @@ final class Reconciler {
       }
       apply(deletes, counts, true);
     });
+    counts.swept = true;
+    progress.finish(SWEEP);
+    save.accept(progress);
   }
 
   /**
@@ -220,10 +419,13 @@ final class Reconciler {
    */
   void degraded(String from, String to, Staging staging, boolean compareSources,
       boolean createMissing, Counts counts) {
+    counts.strategy = ReconcileStrategy.DEGRADED;
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("version", true);
     body.put("_source", compareSources);
-    scan(from, body, page -> {
+    body.put("seq_no_primary_term", true);
+    // only CREATE_MISSING writes, and only its progress is kept: REPORT must see everything again
+    scanBySeqNo(createMissing ? DEGRADED : null, from, body, page -> {
       Map<String, Hit> live = lookup(to, ids(page), compareSources);
       List<String> missing = new ArrayList<>();
       for (Hit hit : page) {
@@ -235,17 +437,18 @@ final class Reconciler {
         }
       }
       if (missing.isEmpty()) {
-        return;
+        return false;
       }
       if (!createMissing) {
         counts.missing += missing.size();
-        return;
+        return false;
       }
       Map<String, Map<String, Object>> sources = staging == null
           ? sources(from, missing) : stage(from, staging, missing);
       List<BulkOp> ops = new ArrayList<>();
       sources.forEach((id, source) -> ops.add(BulkOp.create(to, id, source)));
       apply(ops, counts, false);
+      return !ops.isEmpty();
     });
     long[] onlyInNew = {0};
     Map<String, Object> ghostBody = new LinkedHashMap<>();
@@ -287,7 +490,7 @@ final class Reconciler {
     body.put("_source", false);
     body.put("size", PAGE);
     body.put("track_total_hits", false);
-    List<String> ids = ids(engine.search(List.of(from), body).hits());
+    List<String> ids = ids(search(List.of(from), body).hits());
     if (ids.isEmpty()) {
       return;
     }
@@ -349,7 +552,7 @@ final class Reconciler {
     body.put("size", ids.size());
     body.put("track_total_hits", false);
     Map<String, Map<String, Object>> found = new LinkedHashMap<>();
-    for (Hit hit : engine.search(List.of(index), body).hits()) {
+    for (Hit hit : search(List.of(index), body).hits()) {
       found.put(hit.id(), hit.source());
     }
     return found;
@@ -417,7 +620,7 @@ final class Reconciler {
     body.put("size", ids.size());
     body.put("track_total_hits", false);
     Map<String, Hit> found = new LinkedHashMap<>();
-    for (Hit hit : engine.search(List.of(index), body).hits()) {
+    for (Hit hit : search(List.of(index), body).hits()) {
       found.put(hit.id(), hit);
     }
     return found;
@@ -427,11 +630,94 @@ final class Reconciler {
     return new HashSet<>(lookup(index, ids, false).keySet());
   }
 
+  /**
+   * Runs a pass over the frozen old index in {@code _seq_no} order, resuming after its recorded
+   * cursor and skipping it when it is done; records the cursor after a page that wrote once
+   * {@link #savePages} pages wrote since the last record or {@link #saveInterval} passed, and the
+   * pass as done at its end. A null {@code pass} keeps no progress.
+   *
+   * @param pages handles a page and returns whether it wrote anything
+   */
+  private void scanBySeqNo(String pass, String index, Map<String, Object> body,
+      java.util.function.Function<List<Hit>, Boolean> pages) {
+    if (pass != null && progress.done(pass)) {
+      return;
+    }
+    Map<String, Object> request = new LinkedHashMap<>(body);
+    request.put("seq_no_primary_term", true);
+    Progress.Cursor resumeAt = pass == null ? null : progress.cursors.get(pass);
+    if (resumeAt != null) {
+      List<Object> filter = new ArrayList<>();
+      if (body.get("query") != null) {
+        filter.add(body.get("query"));
+      }
+      // gte, not gt: other shards' documents can share the cursor's sequence number
+      filter.add(Map.of("range", Map.of("_seq_no", Map.of("gte", resumeAt.seqNo))));
+      Map<String, Object> bool = new LinkedHashMap<>();
+      bool.put("filter", filter);
+      if (!resumeAt.ids.isEmpty()) {
+        bool.put("must_not", List.of(idsQuery(new ArrayList<>(resumeAt.ids))));
+      }
+      request.put("query", Map.of("bool", bool));
+    } else if (HOT.equals(pass)) {
+      // the hot pass starts over: its count of missing documents starts over with it
+      progress.hotMissing = 0;
+    }
+    List<Object> order = new ArrayList<>();
+    order.add(Map.of("_seq_no", "asc"));
+    order.addAll(sort);
+    int[] unsaved = {0};
+    long[] savedAt = {System.nanoTime()};
+    Pit pit = engine.openPit(List.of(index), keepAlive);
+    try {
+      scanPit(pit.id(), request, false, order, page -> {
+        final boolean wrote = pages.apply(page);
+        if (pass == null) {
+          return;
+        }
+        Progress.Cursor cursor = progress.cursors.computeIfAbsent(pass, key -> {
+          Progress.Cursor fresh = new Progress.Cursor();
+          fresh.seqNo = Long.MIN_VALUE;
+          return fresh;
+        });
+        long last = seqNo(page.get(page.size() - 1));
+        if (last != cursor.seqNo) {
+          cursor.ids.clear();
+        }
+        cursor.seqNo = last;
+        for (Hit hit : page) {
+          if (seqNo(hit) == last) {
+            cursor.ids.add(hit.id());
+          }
+        }
+        if (wrote) {
+          unsaved[0]++;
+        }
+        boolean due = System.nanoTime() - savedAt[0] >= saveInterval.toNanos();
+        if (unsaved[0] >= savePages || due) {
+          save.accept(progress);
+          unsaved[0] = 0;
+          savedAt[0] = System.nanoTime();
+        }
+      });
+    } finally {
+      try {
+        engine.closePit(pit);
+      } catch (RuntimeException e) {
+        // it expires on its own
+      }
+    }
+    if (pass != null) {
+      progress.finish(pass);
+      save.accept(progress);
+    }
+  }
+
   /** Pages through an index under a point in time of its own. */
   private void scan(String index, Map<String, Object> body, Consumer<List<Hit>> pages) {
     Pit pit = engine.openPit(List.of(index), keepAlive);
     try {
-      scanPit(pit.id(), body, false, pages);
+      scanPit(pit.id(), body, false, sort, pages);
     } finally {
       try {
         engine.closePit(pit);
@@ -444,17 +730,22 @@ final class Reconciler {
   /** Pages through a point in time with {@code search_after}. */
   private void scanPit(String pitId, Map<String, Object> body, boolean snapshot,
       Consumer<List<Hit>> pages) {
+    scanPit(pitId, body, snapshot, sort, pages);
+  }
+
+  private void scanPit(String pitId, Map<String, Object> body, boolean snapshot,
+      List<Object> order, Consumer<List<Hit>> pages) {
     List<Object> after = null;
     while (true) {
       Map<String, Object> request = new LinkedHashMap<>(body);
       request.put("pit", pit(pitId));
       request.put("size", PAGE);
-      request.put("sort", sort);
+      request.put("sort", order);
       request.put("track_total_hits", false);
       if (after != null) {
         request.put("search_after", after);
       }
-      SearchResult result = snapshot ? searchPit(request) : engine.search(List.of(), request);
+      SearchResult result = snapshot ? searchPit(request) : search(List.of(), request);
       if (result.hits().isEmpty()) {
         return;
       }
@@ -469,13 +760,61 @@ final class Reconciler {
   /** Searches the snapshot, turning a missing point in time into {@link SnapshotLost}. */
   private SearchResult searchPit(Map<String, Object> body) {
     try {
-      return engine.search(List.of(), body);
+      SearchResult result = engine.search(List.of(), body);
+      if (!result.partial()) {
+        return result;
+      }
+      // only a reader that is gone (its node restarted, say) loses the snapshot; any other shard
+      // failure (a full search queue, a relocating shard) is transient: the run fails and the next
+      // one tries the same snapshot again, never the degraded path that cannot tell deletes apart
+      if (!result.shardFailures().isEmpty() && result.shardFailures().stream()
+          .allMatch(CONTEXT_MISSING::equals)) {
+        throw new SnapshotLost("the point in time over the new index lost its reader on "
+            + result.shardsFailed() + " shards (" + CONTEXT_MISSING + ")");
+      }
+      throw new MigrationException("a search of the snapshot failed on " + result.shardsFailed()
+          + " shards " + result.shardFailures() + "; the migration does not act on partial"
+          + " results, and the next run tries the snapshot again");
     } catch (EngineException e) {
       if (e.getKind() == EngineException.Kind.NOT_FOUND) {
         throw new SnapshotLost(e);
       }
       throw e;
     }
+  }
+
+  /**
+   * Searches and fails when a shard did not answer: the engines return 200 with the other shards'
+   * hits and an exact-looking total, which the reconcile must never take for the whole index.
+   */
+  SearchResult search(List<String> indices, Map<String, Object> body) {
+    return strict(engine, indices, body);
+  }
+
+  /** Searches with {@code engine} and fails on a partial answer; see {@link #search}. */
+  static SearchResult strict(SearchEngine engine, List<String> indices, Map<String, Object> body) {
+    SearchResult result = engine.search(indices, body);
+    if (result.partial()) {
+      throw new MigrationException("a search of " + (indices.isEmpty() ? "a point in time"
+          : String.join(",", indices)) + " failed on " + result.shardsFailed() + " shards;"
+          + " the migration does not act on partial results");
+    }
+    return result;
+  }
+
+  /** Counts the documents of an index exactly, failing on a partial answer. */
+  static long count(SearchEngine engine, String index, Map<String, Object> query) {
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("size", 0);
+    body.put("track_total_hits", true);
+    if (query != null) {
+      body.put("query", query);
+    }
+    SearchResult result = strict(engine, List.of(index), body);
+    if (!result.totalExact()) {
+      throw new MigrationException("the engine counted " + index + " only as a lower bound");
+    }
+    return result.total();
   }
 
   private Map<String, Object> pit(String id) {

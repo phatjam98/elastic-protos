@@ -123,6 +123,38 @@ class JsonRestEngineSpec extends Specification {
     engine.seqNoCheckpoint('docs') == -1
   }
 
+  def "globalCheckpoint is the lowest primary global_checkpoint, once every primary reported"() {
+    given:
+    def copy = { boolean primary, Object gcp -> [routing: [primary: primary], seq_no: [max_seq_no: 99, global_checkpoint: gcp]] }
+    http.enqueue(200, [indices: [docs: [shards: ['0': [copy(true, 7), copy(false, 2)], '1': [copy(true, 4)]]]]])
+        .enqueue(200, [docs: [settings: [index: [number_of_shards: '2']]]])
+    http.enqueue(200, [indices: [docs: [shards: ['0': [copy(true, -1)]]]]])
+        .enqueue(200, [docs: [settings: [index: [number_of_shards: '1']]]])
+    http.enqueue(200, [indices: [docs: [shards: ['0': [copy(true, 7)]]]]])
+        .enqueue(200, [docs: [settings: [index: [number_of_shards: '2']]]])
+    http.enqueue(200, [indices: [docs: [shards: ['0': [copy(true, null)]]]]])
+        .enqueue(200, [docs: [settings: [index: [number_of_shards: '1']]]])
+    http.enqueue(200, [indices: [docs: [shards: ['0': [copy(false, 3)]]]]])
+        .enqueue(200, [docs: [settings: [index: [number_of_shards: '1']]]])
+    http.enqueue(200, [indices: [docs: [shards: ['0': [copy(true, 3)]]]]])
+        .enqueue(200, [docs: [settings: [index: [number_of_shards: 'many']]]])
+    http.enqueue(200, [indices: [docs: [shards: ['0': [copy(true, 3)]]]]])
+        .enqueue(200, [docs: [settings: [index: [:]]]])
+
+    expect: 'replicas are ignored; an empty shard is -1'
+    engine.globalCheckpoint('docs') == OptionalLong.of(4)
+    http.requests[0].path == '/docs/_stats'
+    http.requests[0].params == [level: 'shards']
+    engine.globalCheckpoint('docs') == OptionalLong.of(-1)
+
+    and: 'a missing primary, a missing value, no primary or an unreadable shard count is unknown'
+    engine.globalCheckpoint('docs') == OptionalLong.empty()
+    engine.globalCheckpoint('docs') == OptionalLong.empty()
+    engine.globalCheckpoint('docs') == OptionalLong.empty()
+    engine.globalCheckpoint('docs') == OptionalLong.empty()
+    engine.globalCheckpoint('docs') == OptionalLong.empty()
+  }
+
   def "flattened fields are spelled flat_object on OpenSearch and read back as flattened"() {
     given:
     def mappings = [_meta: [type: 'flattened'], properties: [meta: [type: 'flattened'], doc: [properties: [inner: [type: 'flattened'], type: [type: 'keyword']]]]]
@@ -648,11 +680,88 @@ class JsonRestEngineSpec extends Specification {
     http.requests[1].method == 'POST' && http.requests[1].path == '/docs/_doc' && http.requests[1].params == [:]
     http.requests[2].path == '/docs/_create/2' && http.requests[2].params == [refresh: 'wait_for']
     http.requests[3].method == 'POST' && http.requests[3].path == '/docs/_update/1' && http.requests[3].json() == [doc: [a: 2]]
+    http.requests[3].params == [retry_on_conflict: '3']
 
     and:
     engine.delete('docs', '1')
     !engine.delete('docs', '9')
     http.requests[4].method == 'DELETE' && http.requests[4].path == '/docs/_doc/1' && http.requests[4].params == [:]
+  }
+
+  static final Map CONFLICT_BODY = [error: [type: 'version_conflict_engine_exception', reason: '[x]: version conflict'], status: 409]
+
+  def "an update that still conflicts is sent again, up to UPDATE_RESENDS times"() {
+    given: 'the engine retried on its first index; the alias moved meanwhile'
+    http.enqueue(409, CONFLICT_BODY).enqueue(409, CONFLICT_BODY).enqueue(200, [_index: 'b', _id: 'x', result: 'updated'])
+
+    when:
+    def result = engine.update('alias', 'x', [n: 1])
+
+    then:
+    result.result() == 'updated'
+    result.index() == 'b'
+    http.requests.size() == 3
+    http.requests.every { it.path == '/alias/_update/x' && it.params == [retry_on_conflict: '3'] && it.json() == [doc: [n: 1]] }
+  }
+
+  def "an update gives up after the resends, with the conflict"() {
+    given:
+    (JsonRestEngine.UPDATE_RESENDS + 1).times { http.enqueue(409, CONFLICT_BODY) }
+
+    when:
+    engine.update('alias', 'x', [n: 1])
+
+    then:
+    def e = thrown(EngineException)
+    e.kind == EngineException.Kind.CONFLICT
+    http.requests.size() == JsonRestEngine.UPDATE_RESENDS + 1
+  }
+
+  def "retryOnConflict 0 sends an update once, and other failures are never resent"() {
+    given:
+    http.enqueue(409, CONFLICT_BODY).enqueue(404, [error: [type: 'document_missing_exception'], status: 404])
+        .enqueue(503, [error: [type: 'unavailable'], status: 503])
+
+    when:
+    engine.update('alias', 'x', [n: 1], 0)
+
+    then:
+    thrown(EngineException)
+    http.requests.size() == 1
+
+    when:
+    engine.update('alias', 'x', [n: 1])
+
+    then:
+    def missing = thrown(EngineException)
+    missing.kind == EngineException.Kind.NOT_FOUND
+    http.requests.size() == 2
+
+    when:
+    engine.update('alias', 'x', [n: 1])
+
+    then:
+    def busy = thrown(EngineException)
+    busy.kind == EngineException.Kind.TRANSIENT
+    http.requests.size() == 3
+  }
+
+  def "update takes a retry_on_conflict, 0 sending none"() {
+    given:
+    http.enqueue(200, [_index: 'd', _id: '1', result: 'updated']).enqueue(200, [_index: 'd', _id: '1', result: 'updated'])
+
+    when:
+    engine.update('d', '1', [a: 1], 0)
+    engine.update('d', '1', [a: 1], 7)
+
+    then:
+    http.requests*.params == [[:], [retry_on_conflict: '7']]
+
+    when:
+    engine.update('d', '1', [a: 1], -1)
+
+    then:
+    thrown(IllegalArgumentException)
   }
 
   def "document ids are percent-encoded as a single path segment"() {
@@ -938,6 +1047,27 @@ class JsonRestEngineSpec extends Specification {
     !result.totalExact()
     !result.hasTotal()
     result.hits()*.id() == ['1']
+  }
+
+  def "a search some shards failed reports them, with the other shards' results"() {
+    given: 'the engines answer 200 with _shards.failed and an exact-looking total'
+    http.enqueue(200, [took: 1, _shards: [total: 3, successful: 2, failed: 1,
+                                          failures: [[shard: 0, reason: [type: 'search_context_missing_exception']]]],
+                       hits: [total: [value: 4, relation: 'eq'], hits: []]])
+    http.enqueue(200, [took: 1, _shards: [total: 3, successful: 3, failed: 0], hits: [total: [value: 4, relation: 'eq'], hits: []]])
+
+    expect:
+    with(engine.search(['a'], [size: 0])) {
+      shardsFailed() == 1
+      shardFailures() == ['search_context_missing_exception']
+      partial()
+      total() == 4L
+      totalExact()
+    }
+    !engine.search(['a'], [size: 0]).partial()
+    new SearchResult(0, true, [], null, [:], 0).shardsFailed() == 0
+    new SearchResult(0, true, [], null, [:], 0, 2).shardFailures().isEmpty()
+    new SearchResult(0, true, [], null, [:], 0, 1, null).shardFailures().isEmpty()
   }
 
   def "null sort values, as returned for a missing sort field, are kept"() {
