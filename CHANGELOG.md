@@ -25,7 +25,7 @@ packages, and the private geobuf dependency is gone. The `1.0.0-rc.1`, `1.0.0-rc
 #### Added
 
 - Filter, filters and composite aggregations and deeper sub-aggregations
-  ([ADR 0011](docs/adr/0011-filter-composite-and-deeper-aggregations.md)): `Aggregation.filter`
+  ([ADR 0012](docs/adr/0012-filter-composite-and-deeper-aggregations.md)): `Aggregation.filter`
   (`FilterAggregation`), `filters` (`FiltersAggregation`, `KeyedFilter`, `other_bucket_key`) and
   `composite` (`CompositeAggregation` with terms, date histogram and histogram `CompositeSource`s,
   `order`, `missing_bucket`, `size` and an `after` key). Filter conditions are `SearchCondition`s
@@ -42,7 +42,7 @@ packages, and the private geobuf dependency is gone. The `1.0.0-rc.1`, `1.0.0-rc
 - `InMemorySearchEngine` (testkit) runs `filter` and `filters` aggregations and sub-aggregations
   at any depth; `composite` fails with `BAD_REQUEST`.
 - Highlighting of text fields inside nested objects
-  ([ADR 0012](docs/adr/0012-nested-highlighting-through-inner-hits.md)) through `inner_hits` on the
+  ([ADR 0013](docs/adr/0013-nested-highlighting-through-inner-hits.md)) through `inner_hits` on the
   query's `nested` clauses on their path, read back as `Hit.nestedHighlights()`
   (`NestedHighlight`: path, offsets, fragments) and `Hit.fragments(field)`.
   `Highlight.include_nested` adds nested full-text fields to the default set;

@@ -15,8 +15,8 @@ Short records of the decisions that shape elastic-protos, in the
 | [0008](0008-migration-lock-index.md) | A per-alias lock in a lock index coordinates concurrent bootstraps | Accepted | 2026-11-09 |
 | [0009](0009-aggregation-and-highlight-dsl.md) | Aggregation and highlight DSL in the proto query model | Accepted | 2026-11-09 |
 | [0010](0010-typed-maps-through-dynamic-templates.md) | Typed maps through dynamic templates | Accepted | 2026-11-09 |
-| [0011](0011-filter-composite-and-deeper-aggregations.md) | Filter, filters and composite aggregations, and deeper sub-aggregations | Accepted | 2026-11-10 |
-| [0012](0012-nested-highlighting-through-inner-hits.md) | Highlighting nested text fields through inner hits | Accepted | 2026-11-10 |
+| [0012](0012-filter-composite-and-deeper-aggregations.md) | Filter, filters and composite aggregations, and deeper sub-aggregations | Accepted | 2026-11-10 |
+| [0013](0013-nested-highlighting-through-inner-hits.md) | Highlighting nested text fields through inner hits | Accepted | 2026-11-10 |
 
 ## Adding a record
 

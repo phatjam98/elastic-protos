@@ -1,4 +1,4 @@
-# 0012. Highlighting nested text fields through inner hits
+# 0013. Highlighting nested text fields through inner hits
 
 - Status: Accepted
 - Date: 2026-11-10
