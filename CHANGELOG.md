@@ -39,11 +39,33 @@ packages, and the private geobuf dependency is gone. The `1.0.0-rc.1`, `1.0.0-rc
   any key (`IndexDefinition.resolve`, `typedMapValues` and `nestedAncestors` handle several keys),
   and keys of a flattened field inside the values (`outer.a.labels.env`) take `EQUALS`, `ANY_IN`,
   `EXISTS` and `TEXT_PREFIX`. The codec checks keys at every level.
-- `Struct`/`Value`/`ListValue` with an explicit `type: OBJECT` or `NESTED` inside the values of a
-  typed map, an explicit `type` other than `IGNORE` on an `Any`/`FieldMask`/`Empty` there, and an
-  `elastic_field.name` holding `*` there throw `MappingException`; with
-  `MappingDefaults.structKind(OBJECT)` such a `Struct` is mapped `flattened` with a warning
-  (ADR 0011 explains why a dynamic object there would be captured by the map's templates).
+- **Breaking (mapping output):** `google.protobuf.Value` and `ListValue` are
+  `{"type": "object", "enabled": false}` by default, at the top level and inside typed map values:
+  kept in `_source`, not searchable. They print as any JSON value, and `flattened`/`flat_object`
+  reject a bare scalar or an array of scalars ("expecting START_OBJECT but found VALUE_STRING",
+  observed on Elasticsearch 8.19/9.5 and OpenSearch 2.19/3.9), so the rc.3 `flattened` default
+  failed such documents. Indices with such fields get a new content hash and are reindexed once.
+  An explicit `type` (`FLATTENED`, `OBJECT`) on a top-level `Value`/`ListValue` is kept, with a
+  warning that non-object values are rejected; inside typed map values it is refused.
+  `MappingDefaults.structKind` now governs `Struct` only. `Struct` stays `flattened`.
+- `FieldInfo` gains the component `enabled` (false for an object mapped with `enabled: false`);
+  the seven- and eight-argument constructors remain and create enabled fields.
+- `Struct` with an explicit `type: OBJECT` or `NESTED` inside the values of a typed map, and an
+  explicit `type` other than `IGNORE` on a `Value`/`ListValue`/`Any`/`FieldMask`/`Empty` there,
+  throw `MappingException`; with `MappingDefaults.structKind(OBJECT)` such a `Struct` is mapped
+  `flattened` with a warning (ADR 0011 explains why a dynamic object there would be captured by the
+  map's templates).
+- An `elastic_field.name` (or programmatic override) holding `*` throws `MappingException`
+  everywhere, since `*` is the wildcard of the typed map templates.
+- Conditions on a disabled object (`EXISTS`, `EQUALS` null and every other operation) throw
+  `QueryCompileException`, strict or lenient, instead of compiling to a query that never matches;
+  a path below a disabled object names it in the strict error (lenient skips it like an unknown
+  field).
+- The codec leaves an `Any` inside typed map values out of the document when no
+  `CodecConfig.anyTypes` registry is configured, as it does with a top-level `Any`, instead of
+  failing the document; keys of typed maps holding `*` throw `CodecException`; error messages of
+  the codec (key checks, unknown fields under `UnknownFieldPolicy.FAIL`, values that do not fit a
+  `long`) name the concrete path (`outer.a.parts.p.counts`) instead of the pattern.
 
 ### Since 1.0.0-rc.2
 
