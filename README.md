@@ -573,6 +573,9 @@ message Document {
 | `reindexMode` | `ZERO_DOWNTIME`; `BLOCKING` write-blocks the old index for the whole copy |
 | `swapGrace` | 5 seconds: how long a zero-downtime reindex waits after the alias swap before it write-blocks the old index |
 | `backfill` | `true`: apply unindexed additions with `BACKFILL`; `false` reindexes them |
+| `lock` | `true`: take a per-alias lock and plan again under it (see [Running from several instances](#running-from-several-instances)) |
+| `lockWait` | 10 minutes: how long to wait for another holder before the item is `LOCKED`; zero fails at once |
+| `lockTtl` | 2 minutes (at least 1 second): a lock not renewed for this long is taken over |
 | `degradedReconcile` | `REPORT`: when the snapshot is lost after the swap, write nothing and end `INCOMPLETE`; `CREATE_MISSING` creates the missing documents (and so brings back documents deleted since the swap) |
 
 ### Dry run
@@ -742,14 +745,58 @@ apply. The alias must point at the plan's target index only.
 | `REVERSE_DELTA_FORCE` | `REVERSE_DELTA` even when a migration script exists |
 | `ALIAS_ONLY` | Unblocks the previous index, swaps the alias, waits `swapGrace` and write-blocks the new index. Writes made to the new index since the reindex are not carried back |
 
-### Run the bootstrap from one place
+### Running from several instances
 
-Plan and apply are not coordinated across processes. **Running the migrator for the same aliases
-from several instances at once is unsupported and can be destructive**: one instance can lift the
-write block, or delete the index, that another is reindexing into, and documents written in that
-window can be lost. Run the bootstrap from a single instance, a deploy job or an init container,
-not from every replica at once. The Micronaut module's `elastic-protos.bootstrap.enabled: false`
-turns it off on the other instances.
+Several instances may start, and bootstrap, at once. `apply` takes a lock per alias before it
+changes anything, so one instance does the work and the others wait and then find it done:
+
+- The lock is a document named after the alias in the lock index, `elastic-protos-locks` (with a
+  naming prefix, `<prefix>-elastic-protos-locks`; see `IndexNamingStrategy.lockIndex()`). The index
+  is created on first use with one shard, replicas from `replicas`, and a strict mapping (`alias`,
+  `holder` = `hostname/pid/uuid8`, `action`, `hash`, `acquired_at`, `expires_at`). An alias of
+  yours named like the lock index collides with it.
+- Taking the lock creates the document with `op_type: create`, so exactly one instance wins. The
+  holder renews it every third of `lockTtl` (default 2 minutes) with a write conditional on its
+  previous sequence number, and deletes it when done. A document whose `expires_at` has passed
+  belongs to a dead holder and is deleted on the sequence number it was read with, so of several
+  instances taking it over exactly one succeeds.
+- **Under the lock the item is planned again** and the fresh plan applied. An instance that waited
+  sees the alias already migrated (`NO_OP`, `SKIPPED`), or picks up what a crashed holder left
+  (the `pending` marker of a [zero-downtime reindex](#zero-downtime-reindex) or a backfill).
+- An instance waits up to `lockWait` (default 10 minutes; `Duration.ZERO` fails at once); after
+  that the item is `LOCKED` (not ok) with a `LockException` naming the holder, and the run goes on
+  with the other aliases even under `FAIL_FAST`. `NO_OP` and `BLOCKED` items take no lock. A plan
+  whose target hash differs from the plan made under the lock (the mapper changed in between) is
+  `FAILED` with "plan is stale: plan again". `Outcome.plan()` is the fresh plan when it was
+  applied, and the original item otherwise.
+- An expired lock is taken over only a third of `lockTtl` after its `expires_at`, as an allowance
+  for clock skew.
+- Before every step that cannot be taken back (alias swaps, write blocks, mapping and `_meta`
+  updates, deleting the old index) the lease is checked. A lease found lost (taken over, or the
+  document deleted, typically after the holder could not reach the cluster for longer than
+  `lockTtl`) stops the item without cleanup (`FAILED` with a `LockException`), and the next run
+  resumes from the marker. A lease is also treated as lost once two thirds of `lockTtl` have
+  passed since its last successful write was sent, whatever the renewals report, so a holder cut
+  off from the cluster stops before anyone can take over. Failed cleanups, the staging index and
+  long copies check the lease too. `rollback` takes the same lock.
+- The check is check-then-act, without fencing tokens: a lease can be lost between a check and the
+  engine call that follows it (request latency plus up to a third of `lockTtl`).
+- The lock coordinates migrators only. It does not protect against application writers going
+  through the alias (the zero-downtime reindex handles those), external tools changing the
+  indices, or migrators running with `lock(false)`.
+- The lock index takes its replica count from `replicas` (possibly 0); while it is red, every item
+  fails. Deleting it while instances run can let a lock write auto-create it with dynamic
+  mappings; the migrator then logs a warning, and the index should be deleted again when nothing
+  migrates.
+- Clocks of the instances must agree to well within `lockTtl`: expiry compares the holder's
+  `expires_at` with the reader's clock.
+- Make `lockWait` fit your startup budget: an instance waiting for another one's reindex is not
+  ready until it gets the lock or `lockWait` passes. With a long reindex, run the migration from
+  one place (a Job, or `elastic-protos.bootstrap.enabled: false` on all but one instance) and let
+  the others start without it.
+- A single-writer deployment can turn the lock off (`lock(false)`, or
+  `elastic-protos.bootstrap.lock.enabled: false`); several instances must then never migrate the
+  same aliases at once, which is unsupported and can be destructive.
 
 A reindex can take minutes. Whatever runs it must not be killed mid-copy: on Kubernetes, give the
 pod that migrates a startup probe budget (`failureThreshold` x `periodSeconds`) longer than the
@@ -1324,13 +1371,14 @@ such as a `MappingException` from invalid proto options: the application starts 
 and writes to it fail later. Keep the default `true` in deployments. An empty class list skips the
 bootstrap; `enabled: false` removes the listener.
 
-The bootstrap is enabled by default and runs in every instance that starts. **Concurrent bootstrap
-from several instances is unsupported and can be destructive** (see
-[Run the bootstrap from one place](#run-the-bootstrap-from-one-place)). With more than one replica,
-set `elastic-protos.bootstrap.enabled: false` on all but one instance, or on all of them and run
-the migration from a dedicated job. Because the bootstrap runs during startup, a reindex delays
-readiness: on Kubernetes, make the startup probe budget longer than
-`elastic-protos.bootstrap.reindex-timeout` so the pod is not killed mid-copy.
+The bootstrap is enabled by default and runs in every instance that starts. Instances that start
+together coordinate through the per-alias lock (see
+[Running from several instances](#running-from-several-instances)): one migrates, the others wait
+up to `elastic-protos.bootstrap.lock.wait` and then find the work done; an index still locked
+after that aborts startup under `fail-on-error`. Because the bootstrap runs during startup, a
+reindex delays readiness: on Kubernetes, make the startup probe budget longer than
+`elastic-protos.bootstrap.reindex-timeout` (and the lock wait) so the pod is not killed mid-copy, or
+run the migration from a dedicated job with `enabled: false` on the application instances.
 
 ### ElasticProtosService
 
@@ -1420,6 +1468,9 @@ that do not fit together such as a `max-page-size` below `default-size`, abort
 | `elastic-protos.bootstrap.reindex-timeout` | `10m` | How long a reindex or backfill may take |
 | `elastic-protos.bootstrap.reindex-mode` | `ZERO_DOWNTIME` | Or `BLOCKING` (write-block the old index during the copy) |
 | `elastic-protos.bootstrap.swap-grace` | `5s` | Wait after the alias swap before the old index is write-blocked |
+| `elastic-protos.bootstrap.lock.enabled` | `true` | Take a per-alias lock in the lock index, so several instances can bootstrap at once |
+| `elastic-protos.bootstrap.lock.wait` | `10m` | How long to wait for a lock another instance holds; `0s` fails at once |
+| `elastic-protos.bootstrap.lock.ttl` | `2m` | How long a lock lives without a heartbeat |
 | `elastic-protos.bootstrap.backfill` | `true` | Apply additions existing documents were never indexed into with an update by query; `false` reindexes |
 | `elastic-protos.defaults.shards` | `1` | Shards of new indices (message options win) |
 | `elastic-protos.defaults.replicas` | `-1` | Replicas of new indices; negative means data nodes minus one, at most 1 |
@@ -1465,8 +1516,6 @@ before 3.3); `pager(...)` always adapts.
 - Keys of typed maps must not contain dots; dynamic keys count toward
   `index.mapping.total_fields.limit` (and nested fields in their values toward
   `index.mapping.nested_fields.limit`) at index time; inner maps inside typed map values stay untyped.
-- Plans are not coordinated across processes; concurrent bootstrap is unsupported and can be
-  destructive. Run the bootstrap from one place.
 - The aggregation DSL covers terms, date histograms, histograms, ranges and single-value metrics
   with one level of sub-aggregations; pipeline, filter, composite and other aggregations go into a
   copy of the body by hand. Aggregations on nested paths inside typed map values are refused.

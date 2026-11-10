@@ -20,7 +20,7 @@ class IndexMigratorRollbackSpec extends Specification {
       .build()
   static final String V1 = DEFAULT.map(Document).name()
   static final String V2 = TITLE_KEYWORD.map(Document).name()
-  static final MigrationOptions ZD = MigrationOptions.standard().withSwapGrace(Duration.ZERO)
+  static final MigrationOptions ZD = MigrationOptions.standard().withSwapGrace(Duration.ZERO).withLock(false)
 
   InMemorySearchEngine engine = new InMemorySearchEngine()
   Map<Phase, Closure> on = [:]
@@ -32,7 +32,7 @@ class IndexMigratorRollbackSpec extends Specification {
   }
 
   def setup() {
-    IndexMigrator.builder().engine(engine).mapper(DEFAULT).build().bootstrap(Document)
+    IndexMigrator.builder().engine(engine).mapper(DEFAULT).options(MigrationOptions.standard().withLock(false)).build().bootstrap(Document)
     4.times { put("d${it}", "Title ${it}") }
   }
 

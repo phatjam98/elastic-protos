@@ -47,6 +47,12 @@ arrive with that `min` or `max` unset and therefore open. Rebuild producers agai
 persist criteria with `includingDefaultValueFields`. A range with no bound, a NaN bound or an empty
 range is rejected with `QueryCompileException`.
 
+Concurrent bootstrap before 1.0.0 ([ADR 0008](docs/adr/0008-migration-lock-index.md)): `apply`
+and `rollback` take a per-alias lock in a lock index (`IndexNamingStrategy.lockIndex()`), plan the
+item again under it and check the lease before every irreversible step, so several instances can
+bootstrap at once; `MigrationOptions.lock`, `lockWait` and `lockTtl` (Micronaut
+`elastic-protos.bootstrap.lock.*`), the new `Status.LOCKED` and `LockException`.
+
 Engine SPI additions before 1.0.0 (conditional writes, `updateByQuery`, `putSettings`, hit
 metadata):
 

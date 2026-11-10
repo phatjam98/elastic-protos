@@ -173,6 +173,9 @@ public class ElasticProtosFactory {
         .reindexMode(bootstrap.getReindexMode())
         .swapGrace(bootstrap.getSwapGrace())
         .backfill(bootstrap.isBackfill())
+        .lock(bootstrap.getLock().isEnabled())
+        .lockWait(bootstrap.getLock().getWait())
+        .lockTtl(bootstrap.getLock().getTtl())
         .build();
   }
 

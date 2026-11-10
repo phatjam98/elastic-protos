@@ -22,7 +22,7 @@ class IndexMigratorBackfillSpec extends Specification {
       .build()
   static final String V1 = DEFAULT.map(Document).name()
   static final String HASH2 = BODY_KEYWORD.map(Document).contentHash()
-  static final MigrationOptions OPTIONS = MigrationOptions.standard().withSwapGrace(Duration.ZERO)
+  static final MigrationOptions OPTIONS = MigrationOptions.standard().withSwapGrace(Duration.ZERO).withLock(false)
 
   InMemorySearchEngine engine = new InMemorySearchEngine()
   List<Phase> phases = []
@@ -38,7 +38,7 @@ class IndexMigratorBackfillSpec extends Specification {
   }
 
   def setup() {
-    IndexMigrator.builder().engine(engine).mapper(DEFAULT).build().bootstrap(Document)
+    IndexMigrator.builder().engine(engine).mapper(DEFAULT).options(MigrationOptions.standard().withLock(false)).build().bootstrap(Document)
     3.times { put("d${it}", "body ${it}") }
   }
 
@@ -202,7 +202,7 @@ class IndexMigratorBackfillSpec extends Specification {
     def open = ProtoMapper.builder().overrides(MappingOverrides.builder()
         .forMessage(Document.descriptor) { it.setDynamic(DynamicMode.DYNAMIC_TRUE) }.build()).build()
     engine = new InMemorySearchEngine()
-    IndexMigrator.builder().engine(engine).mapper(closed).build().bootstrap(Document)
+    IndexMigrator.builder().engine(engine).mapper(closed).options(OPTIONS).build().bootstrap(Document)
 
     when:
     def item = migrator(mapper: open).plan(Document).items()[0]

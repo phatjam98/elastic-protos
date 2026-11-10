@@ -41,6 +41,9 @@ import spock.lang.Specification
 @Property(name = 'elastic-protos.bootstrap.reindex-mode', value = 'blocking')
 @Property(name = 'elastic-protos.bootstrap.swap-grace', value = '250ms')
 @Property(name = 'elastic-protos.bootstrap.backfill', value = 'false')
+@Property(name = 'elastic-protos.bootstrap.lock.enabled', value = 'false')
+@Property(name = 'elastic-protos.bootstrap.lock.wait', value = '30s')
+@Property(name = 'elastic-protos.bootstrap.lock.ttl', value = '45s')
 @Property(name = 'elastic-protos.defaults.shards', value = '3')
 @Property(name = 'elastic-protos.defaults.replicas', value = '2')
 @Property(name = 'elastic-protos.naming.prefix', value = 'dev')
@@ -116,6 +119,9 @@ class ConfigurationBindingSpec extends Specification {
       reindexMode == ReindexMode.BLOCKING
       swapGrace == Duration.ofMillis(250)
       !backfill
+      !lock.enabled
+      lock.wait == Duration.ofSeconds(30)
+      lock.ttl == Duration.ofSeconds(45)
     }
   }
 
@@ -173,7 +179,7 @@ class ConfigurationBindingSpec extends Specification {
         .deleteOldAfter(true).removedFields(RemovedFieldPolicy.REINDEX).defaultShards(3)
         .replicas(ReplicaPolicy.fixed(2)).reindexTimeout(Duration.ofSeconds(90)).dryRun(true)
         .clearStaleWriteBlock(false).reindexMode(ReindexMode.BLOCKING).swapGrace(Duration.ofMillis(250))
-        .backfill(false).build()
+        .backfill(false).lock(false).lockWait(Duration.ofSeconds(30)).lockTtl(Duration.ofSeconds(45)).build()
     migrator.options() == migrationOptions
   }
 }
