@@ -293,7 +293,7 @@ Index settings follow the same idea: `shards`/`replicas` options, then `settings
 | repeated scalar | same type as the scalar (engines index arrays natively) |
 | singular message | `object` |
 | repeated message | `nested` |
-| `map<K, V>` | `flattened` (OpenSearch: `flat_object`); keys are queried by dotted path (`labels.env`). `type: OBJECT` (or `NESTED`) maps a typed map: an `object` with `dynamic: true` plus `dynamic_templates` that give every key the value type |
+| `map<K, V>` | `flattened` (OpenSearch: `flat_object`); keys are queried by dotted path (`labels.env`). `type: OBJECT` (or `NESTED`) maps a typed map: an `object` (or `nested`) field with `dynamic: true` plus `dynamic_templates` that give every key the value type |
 | `google.protobuf.Timestamp` | `date`, format `strict_date_optional_time` |
 | `google.protobuf.Duration` | `keyword` |
 | wrapper types (`StringValue`, `Int64Value`, ...) | the wrapped scalar's type |
@@ -310,7 +310,8 @@ A flattened field indexes every leaf as a keyword under one mapping entry; its k
 `ANY_IN`, `EXISTS` and `TEXT_PREFIX` (see [Query DSL](#query-dsl)).
 
 Use `type: OBJECT` (or `NESTED`) when the values need their own type, for example numeric ranges
-or full text on map values. The map becomes a typed map: an `object` with `dynamic: true` and, on
+or full text on map values. The map becomes a typed map: an `object` (or `nested`) field with
+`dynamic: true` and, on
 the root mapping, one `dynamic_templates` entry per value field, named `ep:<path>`, so every key
 the engine sees takes the type the value would get as an ordinary field. A scalar, enum, wrapper,
 `Timestamp`, `LatLon` or `GeoShape` value is one template (`counters.*` => `long`); a message
@@ -437,7 +438,8 @@ Inside `forField` / `forMessage` callbacks, `skip`, `id` and `full_text` are `Bo
 
 - Applications always use the **alias** (`documents`).
 - The concrete index is `<index or alias>-v<hash>` (`documents-vcccb33c0`), where the hash is the
-  first 8 hex digits of a SHA-256 over the canonical `dynamic` + `properties` mapping. Any mapping
+  first 8 hex digits of a SHA-256 over the canonical `dynamic` + `properties` mapping (plus
+  `dynamic_templates` when the index has typed maps). Any mapping
   change gives a new hash; settings and the naming prefix do not affect it (see
   [Settings changes](#settings-changes)).
 - `IndexNamingStrategy.prefixed("dev")` prefixes both alias and index (`dev-documents`,
@@ -647,7 +649,8 @@ MigrationResult wouldDo = dryRun.bootstrap(Document.class);   // every outcome i
 
 ### Zero-downtime reindex
 
-A `REINDEX` never blocks writes to the index the alias points at. It runs in phases; the new index
+A zero-downtime `REINDEX` (the default `ReindexMode`) never blocks writes to the index the alias
+points at. It runs in phases; the new index
 records the phase in `_meta.elastic_protos.pending`, which is how an interrupted run is picked up
 ([ADR 0007](docs/adr/0007-zero-downtime-reindex.md)):
 
@@ -1565,17 +1568,23 @@ before 3.3); `pager(...)` always adapts.
   in that window applies to the possibly stale copy and can drop those field changes (see
   [Zero-downtime reindex](#zero-downtime-reindex)). `BLOCKING` avoids both by failing writes for
   the whole copy instead.
+- The one write a zero-downtime reindex can fail: a write that resolved the alias to the old index
+  before the swap and arrives after `swapGrace` gets a `cluster_block_exception` (`BLOCKED`) and
+  can be retried against the alias ([ADR 0007](docs/adr/0007-zero-downtime-reindex.md)).
 - A document created after the catch-up pass and deleted through the alias after the swap,
   before the reconcile reached it, is created again by the reconcile: the new index never held it,
   so there is nothing to compare the delete with. The hot pass keeps this window short.
+- Static settings of an existing index change only through a reindex
+  (`StaticSettingsPolicy.REINDEX`; the default only warns), and a setting removed from the proto is
+  never reset (see [Settings changes](#settings-changes)).
 - Inner maps inside the values of a typed map (and `Struct`, `Value`, `ListValue` or `Any` values)
   stay untyped. Keys of typed maps must not be blank or contain dots, and every distinct key adds
   fields that count toward `index.mapping.total_fields.limit` (and nested fields in the values
   toward `index.mapping.nested_fields.limit`) at index time (see [Mapping](#default-rules)).
 - The aggregation DSL covers terms, date histograms, histograms, ranges and single-value metrics
   with one level of sub-aggregations; pipeline, filter, composite and other aggregations go into a
-  copy of the body by hand. Aggregations on nested paths inside typed map values are refused.
-  Highlighting covers text fields outside nested objects (nested fields would need `inner_hits`).
+  copy of the body by hand. Aggregations and sorts on nested paths inside typed map values are
+  refused. Highlighting covers text fields outside nested objects (nested fields would need `inner_hits`).
   `InMemorySearchEngine` (testkit) runs only terms, the six metrics, `nested` and `reverse_nested`
   aggregations, and ignores `highlight`.
 - The migration lock compares the holder's `expires_at` with the reader's clock, so the clocks of

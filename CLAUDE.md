@@ -124,8 +124,8 @@ Checkstyle, JaCoCo and Javadoc.
 - `REINDEX` defaults to `ReindexMode.ZERO_DOWNTIME` (ADR 0007): prepare (seq_no checkpoint), copy, catch up
   (external versioning), probe (scripts), snapshot (PIT), swap, freeze (`_block/write` after `swapGrace`),
   reconcile (hot pass then cold, conditional writes), sweep, finish. The phase lives in
-  `_meta.elastic_protos.pending` on the new index (backfills use it too); `plan` resumes from it
-  (`IndexPlan.resume`). `BLOCKING` is the old write-blocking copy. Rollback: `RollbackMode`
+  `_meta.elastic_protos.pending` on the new index (backfills use it too); `plan` reads the pending
+  marker into `IndexPlan.resume` and `apply` continues from there. `BLOCKING` is the old write-blocking copy. Rollback: `RollbackMode`
   (`REVERSE_DELTA` default, `REVERSE_DELTA_FORCE`, `ALIAS_ONLY`).
 - `apply` and `rollback` take a per-alias lock (ADR 0008, `AliasLock`) in `IndexNamingStrategy.lockIndex()`
   (`elastic-protos-locks`, prefixed by `prefixed(...)`), re-plan under it and check the lease before

@@ -29,11 +29,12 @@ pre-releases precede it.
   reconciles with conditional writes, recording its phase in `_meta.elastic_protos.pending` so an
   interrupted run resumes (`IndexPlan.resume`, `ReindexResume`). `MigrationOptions.reindexMode`,
   `swapGrace` and `degradedReconcile` (`DegradedReconcile.REPORT` / `CREATE_MISSING`);
-  `Outcome.reconcile` (`ReconcileStats`); the new `Status.INCOMPLETE`; `MigrationListener` with
-  `MigrationListener.Abort` (`IndexMigrator.Builder.listener`).
+  `Outcome.reconcile` (`ReconcileStats`); the new `Status.INCOMPLETE`; `MigrationListener`
+  (`IndexMigrator.Builder.listener`), whose exceptions are logged and ignored except
+  `MigrationListener.Abort`, which stops the run.
 - `Action.BACKFILL`: additions existing documents were never indexed into (an added multi-field,
   typed properties under a dynamic object) extend the mapping in place and re-index the documents
-  with `_update_by_query` (`MigrationOptions.backfill`; `MappingDiff.unindexedAdditions`).
+  with `_update_by_query` (`MigrationOptions.backfill`).
 - Rollback modes: `rollback(item, previousIndex, RollbackMode)` with `REVERSE_DELTA` (default),
   `REVERSE_DELTA_FORCE` and `ALIAS_ONLY`.
 - Per-alias migration lock ([ADR 0008](docs/adr/0008-migration-lock-index.md)): `apply` and
@@ -47,7 +48,8 @@ pre-releases precede it.
   `MappingDiff.settings` (`SettingsDiff`), and a static-settings digest in
   `_meta.elastic_protos.static_settings`. Settings stay outside the content hash.
 - Typed maps ([ADR 0010](docs/adr/0010-typed-maps-through-dynamic-templates.md)): `type: OBJECT`
-  or `NESTED` on a `map` field maps it through `dynamic_templates` so every key takes the value
+  or `NESTED` on a `map` field maps it as an `object` or `nested` field with `dynamic: true` and
+  `dynamic_templates` on the root mapping, so every key takes the value
   type; the new `value_type` field option; the query compiler, sorts, aggregations and codec treat
   keys as typed fields.
 - Open-ended `NUM_RANGE`: `RangeValue.min` and `max` are proto3 `optional`; `Values` and
@@ -87,16 +89,21 @@ pre-releases precede it.
 - An omitted `RangeValue.min` or `max` is now an open bound; rc.1/rc.2 compiled an unset bound as
   `0`. Wire break: with implicit presence, rc.1/rc.2 generated code never put `0.0` on the wire and
   the default `JsonFormat` printer omits it, so criteria built with rc.2 such as `between(0, 100)`
-  or `range(-50, 0)` and then serialized (binary or JSON), or saved queries, now arrive with that
-  bound unset and therefore open. Rebuild producers against rc.3 or persist criteria with
-  `includingDefaultValueFields`. A range with no bound, a NaN bound or an empty range is rejected
+  or `between(-50, 0)` and then serialized (binary or JSON), or saved queries, now arrive with that
+  bound unset and therefore open. Rebuild producers against rc.3 (binary or JSON), or, for JSON,
+  persist with `JsonFormat.printer().includingDefaultValueFields()`. A range with no bound, a NaN bound or an empty range is rejected
   with `QueryCompileException`.
-- A typed map (`type: OBJECT` on a `map`) changes the content hash of its index, which reindexes;
-  `flattened` maps are unchanged.
+- A typed map (`type: OBJECT` or `NESTED` on a `map`) changes the mapping and the content hash of
+  its index (the hash now covers `dynamic_templates`), which reindexes; `flattened` maps are
+  unchanged.
+- Additions that existing documents were never indexed into (`MappingDiff.unindexedAdditions`)
+  are a `BACKFILL` (mapping put plus `_update_by_query` on the current index) instead of a
+  `REINDEX`; `backfill(false)` (Micronaut `elastic-protos.bootstrap.backfill: false`) keeps the
+  rc.2 reindex.
 - `rollback` returns an `Outcome` instead of `void`; the one- and two-argument overloads use
   `REVERSE_DELTA` and throw `MigrationException` when it fails.
 - `SearchEngine.setWriteBlock(index, true)` uses `PUT /<index>/_block/write`, which waits for
-  writes in flight; only `MigrationListener.Abort` stops a run.
+  writes in flight.
 - `SearchEngine` gains the abstract methods `updateByQuery` and `putSettings` (and the default
   `seqNoCheckpoint`); custom implementations must add them.
 - Records gained components, each with the previous constructor kept: `Hit` (`version`, `seqNo`,
