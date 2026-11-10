@@ -1443,6 +1443,18 @@ abstract class EngineIntegrationSpec extends Specification {
     engine.getMappings(v1.name())._meta.elastic_protos.dynamic_settings == ['max_result_window']
     engine.getMappings(v1.name())._meta.elastic_protos.hash == v1.contentHash()
     migrator(kept).plan(Document).items()*.action() == [Action.NO_OP]
+
+    when: 'the record lists a key the engine does not know (a null for it would be a 400)'
+    def ours = engine.getMappings(v1.name())._meta.elastic_protos
+    engine.putMappings(v1.name(), [_meta: [elastic_protos: ours + [dynamic_settings: ['max_result_window', 'merge.no_such_setting']]]])
+    MigrationPlan release = migrator(kept).plan(Document)
+    def released = migrator(kept).apply(release)
+
+    then: 'it is never sent, it only leaves the record'
+    release.items()[0].reason() == 'dynamic settings changed: no longer declared, left as they are: [merge.no_such_setting]'
+    released.ok()
+    engine.getMappings(v1.name())._meta.elastic_protos.dynamic_settings == ['max_result_window']
+    migrator(kept).plan(Document).items()*.action() == [Action.NO_OP]
   }
 
   // ------------------------------------------------------------------ concurrent bootstrap

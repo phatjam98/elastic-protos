@@ -387,13 +387,15 @@ public final class DiffClassifier {
    * Compares the settings the proto declares with the index's settings, and lists for a reset
    * the dynamic settings the index records as declared that the proto no longer declares.
    *
-   * <p>A recorded key is reset when it is not declared any more, is dynamic under {@code
-   * extraDynamicSettings} and is not managed; the reset's {@code after} is null (the engine
-   * default). {@code number_of_replicas} is not reset while {@code auto_expand_replicas} manages
-   * it (declared, or set on the index and not being reset); otherwise its reset is null here too,
-   * and {@link IndexMigrator} replaces it with the count of the replica policy. A reset {@code
-   * auto_expand_replicas} no longer keeps a declared {@code number_of_replicas} from being
-   * compared.
+   * <p>A recorded key (a leading {@code index.} is stripped) that is not declared any more is
+   * reset when it is dynamic under {@code extraDynamicSettings}, is not managed and the index
+   * carries it; the reset's {@code after} is null (the engine default). Otherwise it is released:
+   * it only leaves the record. {@code number_of_replicas} is released while {@code
+   * auto_expand_replicas} manages it (declared, or set on the index and not being reset);
+   * otherwise its reset is null here too, and {@link IndexMigrator} replaces it with the count of
+   * the replica policy. A reset {@code auto_expand_replicas} resets an undeclared {@code
+   * number_of_replicas} with it (back to the policy), and no longer keeps a declared one from
+   * being compared.
    *
    * @param existingSettings the index's settings as the engine returns them, or null
    * @param desiredSettings the settings the proto produces, or null
@@ -407,12 +409,18 @@ public final class DiffClassifier {
     Map<String, Object> existing = flattenSettings(existingSettings);
     Map<String, Object> desired = flattenSettings(desiredSettings);
     Set<String> resetting = new TreeSet<>();
-    if (recordedDynamic != null) {
-      for (String key : recordedDynamic) {
-        if (!desired.containsKey(key) && !isManagedSetting(key)
-            && isDynamicSetting(key, extraDynamicSettings)) {
-          resetting.add(key);
-        }
+    Set<String> released = new TreeSet<>();
+    for (String key : normalizeKeys(recordedDynamic)) {
+      if (desired.containsKey(key)) {
+        continue;
+      }
+      if (!isManagedSetting(key) && isDynamicSetting(key, extraDynamicSettings)
+          && existing.containsKey(key)) {
+        resetting.add(key);
+      } else {
+        // a null for a key the engine does not know is a 400, and one the index does not carry
+        // is already at the default: either way the key only leaves the record
+        released.add(key);
       }
     }
     boolean expands = expands(desired.get("auto_expand_replicas"));
@@ -442,14 +450,61 @@ public final class DiffClassifier {
         staticChanges.add(change);
       }
     }
+    if (resetting.contains("auto_expand_replicas") && !desired.containsKey("number_of_replicas")) {
+      // auto-expand stops, and the replica count goes back to the policy with it
+      resetting.add("number_of_replicas");
+    }
     List<Change> resets = new ArrayList<>();
     for (String key : resetting) {
       if ("number_of_replicas".equals(key) && (expands || existingExpands)) {
+        released.add(key);
         continue;
       }
       resets.add(new Change(key, existing.get(key), null));
     }
-    return new SettingsDiff(dynamicChanges, staticChanges, ignored, resets);
+    return new SettingsDiff(dynamicChanges, staticChanges, ignored, resets,
+        new ArrayList<>(released));
+  }
+
+  /**
+   * Normalises recorded keys: strips a leading {@code index.}, drops null and blank entries.
+   *
+   * @param keys recorded keys, or null
+   * @return the normalised keys, possibly empty
+   */
+  static List<String> normalizeKeys(Collection<?> keys) {
+    List<String> normalized = new ArrayList<>();
+    if (keys == null) {
+      return normalized;
+    }
+    for (Object key : keys) {
+      if (key == null || key.toString().isBlank()) {
+        continue;
+      }
+      String text = key.toString().trim();
+      normalized.add(text.startsWith("index.") ? text.substring("index.".length()) : text);
+    }
+    return normalized;
+  }
+
+  /**
+   * Returns the static settings among the declared ones, flattened and with normalised values,
+   * sorted: what {@link IndexMigrator} records in {@code _meta.elastic_protos.static_values} when
+   * it creates an index. Managed and dynamic keys are left out.
+   *
+   * @param desiredSettings the settings the proto produces
+   * @param extraDynamicSettings setting keys to treat as dynamic
+   * @return the static keys and their values
+   */
+  public static Map<String, Object> declaredStaticSettings(Map<String, Object> desiredSettings,
+      Set<String> extraDynamicSettings) {
+    Map<String, Object> statics = new TreeMap<>();
+    flattenSettings(desiredSettings).forEach((key, value) -> {
+      if (!isManagedSetting(key) && !isDynamicSetting(key, extraDynamicSettings)) {
+        statics.put(key, normalizeValue(value));
+      }
+    });
+    return statics;
   }
 
   /**
@@ -514,13 +569,8 @@ public final class DiffClassifier {
    */
   public static String staticSettingsDigest(Map<String, Object> desiredSettings,
       Set<String> extraDynamicSettings) {
-    Map<String, Object> statics = new TreeMap<>();
-    flattenSettings(desiredSettings).forEach((key, value) -> {
-      if (!isManagedSetting(key) && !isDynamicSetting(key, extraDynamicSettings)) {
-        statics.put(key, normalizeValue(value));
-      }
-    });
-    return Json.sha256Hex(statics).substring(0, 8);
+    return Json.sha256Hex(declaredStaticSettings(desiredSettings, extraDynamicSettings))
+        .substring(0, 8);
   }
 
   /**

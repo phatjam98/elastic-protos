@@ -40,20 +40,28 @@ packages, and the private geobuf dependency is gone. The `1.0.0-rc.1`, `1.0.0-rc
   answer) instead of reading it as complete; on the snapshot that counts as a lost snapshot.
 - `ReconcileStats` equality now includes `strategy` and `swept`: a comparison with
   `new ReconcileStats(c, s, g, k)` matches only a full scan that swept.
-- A dynamic setting removed from the proto is reset to the engine default
+- A dynamic setting removed from the proto is reset to the engine default, once
   ([ADR 0006 addendum](docs/adr/0006-settings-outside-the-content-hash.md)): the migrator records
   the declared dynamic keys in `_meta.elastic_protos.dynamic_settings` whenever it writes an index,
-  and a recorded key no longer declared is reset (`PUT _settings` with null) as an
-  `UPDATE_SETTINGS` or before a `PUT_MAPPING`/`BACKFILL`. A removed `number_of_replicas` goes back
-  to the replica policy. Indices created by rc.3 or earlier get the record on their next settings
-  or mapping update, with nothing reset. A static setting removed from the proto is now a warning.
+  and a recorded key no longer declared leaves the record the first time it is found, reset
+  (`PUT _settings` with null) when the index carries it, released otherwise, as an
+  `UPDATE_SETTINGS` or before a `PUT_MAPPING`/`BACKFILL`. A removed `number_of_replicas`, or a
+  removed `auto_expand_replicas` with no declared replica count, goes back to the replica policy.
+  A reused zero-downtime leftover is brought in line before the copy. Indices created by rc.3 or
+  earlier get the record on their next settings or mapping update, with nothing reset.
+- Created indices also record their declared static values (`_meta.elastic_protos.static_values`);
+  planning compares declared static keys with them instead of with the engine's spelling, and a
+  static setting removed from the proto is a warning naming it (never a reset or a reindex).
+- `SettingsDiff.isEmpty()` and `MappingDiff.settingsChanged()` are now also true when the only
+  difference is a reset or a released key.
 
 #### Added
 
-- `SettingsDiff.resets()` (with `hasDynamicWork()` and `describeDynamic()`; the three-argument
-  constructor remains), `DiffClassifier.settingsDiff`/`diff` overloads taking the recorded keys,
-  `DiffClassifier.declaredDynamicSettings`, and `reset` in `MigrationPlan.toJson()` and
-  `toReport()`.
+- `SettingsDiff.resets()` and `released()` (with `hasDynamicWork()`, `hasRecordWork()`,
+  `describeDynamic()`, `withStaticChanges()` and `withResets()`; the three-argument constructor
+  remains), `DiffClassifier.settingsDiff`/`diff` overloads taking the recorded keys,
+  `DiffClassifier.declaredDynamicSettings` and `declaredStaticSettings`, and `reset` / `released`
+  in `MigrationPlan.toJson()` and `toReport()` (empty for a reindex, which resets nothing).
 - `SearchEngine.globalCheckpoint` (default empty), implemented by both adapters from
   `_stats?level=shards`.
 - `ReconcileStats.strategy()` (`ReconcileStrategy`: `SEQ_NO_RANGE`, `FULL_SCAN`, `DEGRADED`) and

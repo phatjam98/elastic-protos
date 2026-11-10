@@ -120,11 +120,16 @@ Checkstyle, JaCoCo and Javadoc.
   generation per `StaticSettingsPolicy`. New indices record a static-settings digest in
   `_meta.elastic_protos.static_settings`. Every migrator write (CREATE, REINDEX, PUT_MAPPING,
   BACKFILL, UPDATE_SETTINGS; never NO_OP) records the declared dynamic keys in
-  `_meta.elastic_protos.dynamic_settings` (omitted when empty); a recorded key no longer declared is
-  reset with a null value (`SettingsDiff.resets`, ADR 0006 second addendum), except
-  `number_of_replicas`, which goes back to the replica policy (and is left to `auto_expand_replicas`).
-  Indices without the record (rc.3) get it on their next write, nothing reset. A removed static
-  setting only warns (digest mismatch).
+  `_meta.elastic_protos.dynamic_settings` (omitted when empty); a recorded key no longer declared leaves
+  the record the first time it is found: reset with a null value when the index carries it
+  (`SettingsDiff.resets`, ADR 0006 second addendum), else released (`SettingsDiff.released`, a
+  `_meta`-only `UPDATE_SETTINGS`); never a null for an absent key (400 on unknown keys).
+  `number_of_replicas` goes back to the replica policy (released under `auto_expand_replicas`); a reset
+  `auto_expand_replicas` takes an undeclared replica count to the policy too. A reused ZDT leftover gets
+  its dynamic settings aligned in `prepareTarget`. Indices without the record (rc.3) get it on their next
+  write, nothing reset. Created indices also record `static_values` (declared static map, omitted when
+  empty); static changes compare against it (spelling-proof), and a removed static key is a warning
+  naming it, never a reindex.
 - `BACKFILL` puts the mapping and runs `_update_by_query` for `MappingDiff.unindexedAdditions` (added
   multi-fields, typed properties under a dynamic object).
 - `REINDEX` defaults to `ReindexMode.ZERO_DOWNTIME` (ADR 0007): prepare (seq_no checkpoint), copy, catch up

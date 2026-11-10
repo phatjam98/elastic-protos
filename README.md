@@ -473,8 +473,9 @@ Inside `forField` / `forMessage` callbacks, `skip`, `id` and `full_text` are `Bo
 }
 ```
 
-The migrator adds `static_settings` (a digest of the declared static settings) and, when the proto
-declares any, `dynamic_settings` (the declared dynamic keys); see
+The migrator adds `static_settings` (a digest of the declared static settings), `static_values`
+(those settings) and `dynamic_settings` (the declared dynamic keys), the last two only when there
+are any; see
 [Settings changes](#settings-changes).
 Indices without this block (created by other tools) are treated as hash `legacy`. While a
 backfill or a zero-downtime reindex is in progress, `elastic_protos` also carries a `pending`
@@ -515,7 +516,7 @@ MigrationResult result = migrator.apply(plan);
 | `CREATE` | The alias does not exist | Creates the index with settings, mappings and the alias in one request |
 | `NO_OP` | Hash matches, or the mappings already match | Nothing |
 | `PUT_MAPPING` | Only fields were added that existing documents can be indexed into (new top-level fields, new properties under an object that already has typed properties, new typed maps with their `dynamic_templates`, new fields in the values of typed maps), or only `dynamic` changed | Extends the mapping of the current index in place (after updating dynamic settings that differ) |
-| `UPDATE_SETTINGS` | The mappings match, and dynamic settings the proto declares differ, or dynamic settings it declared before were removed ([Settings changes](#settings-changes)) | `PUT /<index>/_settings` with the differing dynamic settings and a null for each removed one, then records the declared dynamic keys in `_meta` |
+| `UPDATE_SETTINGS` | The mappings match, and dynamic settings the proto declares differ, or dynamic settings it declared before were removed ([Settings changes](#settings-changes)) | `PUT /<index>/_settings` with the differing dynamic settings and a null for each removed one the index carries (skipped when there are none), then records the declared dynamic keys in `_meta` |
 | `BACKFILL` | Fields were added that existing documents were never indexed into: a multi-field added to an existing field (for example `name.keyword`), or a typed property added under an object whose current mapping is dynamic; nothing else needs a reindex | Extends the mapping in place, then re-indexes every document of the current index with `_update_by_query` (below) |
 | `REINDEX` | A field changed type or any mapping parameter other than `dynamic` (analyzer, `search_analyzer`, format, `ignore_above`, normalizer, `copy_to`, `index`, `doc_values`, `null_value`, `coerce`, `enabled`, ...); a template of a typed map that already exists changed or went away (except a removed map under `RemovedFieldPolicy.KEEP`), or an untyped map became typed; fields were removed under `RemovedFieldPolicy.REINDEX`; a `BACKFILL` with `backfill` off or a migration script for the change; or static settings differ under `StaticSettingsPolicy.REINDEX` | New index, copy, swap the alias, reconcile ([Zero-downtime reindex](#zero-downtime-reindex)) |
 | `BLOCKED` | A concrete index is named like the alias; the alias points at several indices; or a breaking change with `allowReindex` off | Nothing; the outcome's status is `BLOCKED`, the plan's `reason` says why and `MigrationResult.ok()` is false |
@@ -559,22 +560,38 @@ compared with the live index on every plan, key by key, after flattening both si
   `dataNodesMinusOne` never shows up as a change. `number_of_replicas` is not compared while the
   proto sets `auto_expand_replicas` to anything but `false`, nor while the index has one and the
   proto declares none (with a warning).
-- **A dynamic setting removed from the proto is reset.** Every index the migrator creates, and
-  every settings or mapping update it makes, records the dynamic keys the proto declares in
+- **A dynamic setting removed from the proto is reset, once.** Every index the migrator creates,
+  and every settings or mapping update it makes, records the dynamic keys the proto declares in
   `_meta.elastic_protos.dynamic_settings` (left out when there are none). A recorded key the proto
-  no longer declares is reset to the engine default (`PUT /<index>/_settings` with a null value),
-  as an `UPDATE_SETTINGS` or before a `PUT_MAPPING` / `BACKFILL`, and the record is rewritten; the
-  plan reports it (`diff().settings().resets()`, `reset` in `toJson()`, a `reset:` line in
-  `toReport()`, `refresh_interval 5s -> default` in the reason), so a dry run shows it. A reindex
-  creates the new index with the declared settings only. Exceptions: a removed `number_of_replicas`
-  goes back to the count the `replicas` policy gives a new index (not to the engine default of 1),
-  and is left alone while `auto_expand_replicas` manages it; a removed `auto_expand_replicas` is
-  reset to `false`, which keeps the current replica count and lets a declared `number_of_replicas`
-  be applied. A recorded key that is not dynamic under the current `extraDynamicSettings` is not
-  reset (warning); keep `extraDynamicSettings` the same on every instance. Indices created by
-  1.0.0-rc.3 or earlier have no record: they get one on their next settings or mapping update, and
-  nothing is reset until a key is recorded and later removed. The replica policy and
-  `defaultShards` are never recorded.
+  no longer declares leaves the record the first time a plan finds it, so the library acts on a
+  removal exactly once: when the index carries it, it is reset to the engine default
+  (`PUT /<index>/_settings` with a null value); otherwise, or when it cannot be reset (below), it
+  is only released from the record. This is an `UPDATE_SETTINGS` (which then rewrites only `_meta`
+  when nothing is reset), or happens before a `PUT_MAPPING` / `BACKFILL`; the next plan is a
+  `NO_OP`. The plan reports it (`diff().settings().resets()` and `released()`, `reset` and
+  `released` in `toJson()`, `reset:` and `released` lines in `toReport()`, `refresh_interval 5s ->
+  default` in the reason), so a dry run shows it. A reindex creates the new index with the declared
+  settings only, and a leftover index a zero-downtime reindex reuses gets its dynamic settings
+  brought in line (changed, reset) before the copy. Details:
+  - a removed `number_of_replicas` goes back to the count the `replicas` policy gives a new index
+    (not to the engine default of 1), and is only released while `auto_expand_replicas` manages
+    it; a removed `auto_expand_replicas` is reset to `false` and, unless `number_of_replicas` is
+    declared (which then applies), the replica count goes back to the policy in the same request;
+  - a key the index does not carry is never sent: the engines answer a null for a key they do not
+    know with 400 (a setting an upgrade dropped), and a carried-but-unset key is already default;
+  - a recorded key that is not dynamic under the current `extraDynamicSettings` is released with a
+    warning; keep `extraDynamicSettings` the same on every instance;
+  - once any write recorded a key, the proto owns it: a value an operator set by hand, that the
+    proto later declared with the same value, is reset when the proto drops it if a settings or
+    mapping update happened in between (and left alone otherwise);
+  - a reset goes to the engine's built-in default, not to an index template's value; on
+    Elasticsearch, resetting a declared `routing.allocation.include._tier_preference` removes the
+    `data_content` preference the engine sets at creation, so declare it rather than remove it;
+  - during a rolling deploy with old and new protos side by side, each restart of an old or a new
+    instance sets or resets the setting until the old instances are gone;
+  - indices created by 1.0.0-rc.3 or earlier have no record: they get one on their next settings
+    or mapping update, and nothing is reset until a key is recorded and later removed. The replica
+    policy and `defaultShards` are never recorded.
 - **Dynamic settings are applied in place.** A plan whose mappings match but whose dynamic settings
   differ is `UPDATE_SETTINGS` (`PUT /<index>/_settings`, under the alias lock); a `PUT_MAPPING` or
   `BACKFILL` updates the dynamic settings first (so a raised `mapping.total_fields.limit` is in
@@ -602,16 +619,22 @@ compared with the live index on every plan, key by key, after flattening both si
   name (the hash does not change, so the new index is `<name>-g2`, `-g3`, ...), with the reason
   `static settings changed: ...`, or `BLOCKED` when `allowReindex` is off. The warning is left out
   when the item reindexes anyway, since the new index gets every setting.
-- Every index the migrator creates records a digest of the declared static settings in
-  `_meta.elastic_protos.static_settings` (the first 8 hex digits of the SHA-256 of their canonical
-  flattened key/value map). When it is present, planning compares the declared static settings
-  with the digest rather than with the values the engine reports, so an engine that spells a value
-  differently cannot make `REINDEX` loop; indices without it are compared by value. Under
+- Every index the migrator creates records the declared static settings: their values in
+  `_meta.elastic_protos.static_values` (flattened, left out when there are none) and a digest in
+  `static_settings` (the first 8 hex digits of the SHA-256 of that map). Planning compares a
+  declared static key with its recorded value rather than with the value the engine reports, so an
+  engine that spells a value differently cannot make `REINDEX` loop; a key added since is compared
+  with the engine. Indices with only the digest (1.0.0-rc.3) compare the digest, and the engine
+  values when it differs; indices with neither are compared by value. Under
   `StaticSettingsPolicy.REINDEX` a new index whose engine-reported static values still differ from
   the declaration fails the item ("engine reports `<v>` for `<key>`; declare it that way") and is
-  deleted. A static setting removed from the proto changes the digest but no declared key differs:
-  that is a warning ("... a static setting was removed from the proto (it stays on the index until
-  it is reindexed) ..."), under either policy, and never a reindex or a reset.
+  deleted. A static setting removed from the proto stays on the index: the warning `static settings
+  no longer declared stay on <index> until it is reindexed: [<key>, ...]` names it, under either
+  policy, on every plan until the index is reindexed for another reason (it is a lasting
+  difference, like any other static difference under `WARN`); it is never a reset, and with the
+  recorded values never a reindex. A static setting added with the value the index already has,
+  or a declared key moved into `extraDynamicSettings`, is not a removal and gives no warning.
+  Indices without recorded values give no removal warning.
 - Keys the engine or the migrator manages (`blocks.*`, `uuid`, `creation_date`, `version.*`,
   `provided_name`) are never applied; a warning names them when their value differs.
 - For dynamic keys, equivalent values in another spelling (`5000ms` against `5s`) compare as
@@ -1662,9 +1685,12 @@ before 3.3); `pager(...)` always adapts.
   so there is nothing to compare the delete with. The hot pass keeps this window short.
 - Static settings of an existing index change only through a reindex
   (`StaticSettingsPolicy.REINDEX`; the default only warns), and a static setting removed from the
-  proto stays on the index (with a warning) until the index is reindexed for another reason. A
-  removed dynamic setting is reset only once the index records it as declared, which indices
-  created by 1.0.0-rc.3 or earlier do from their next settings or mapping update on (see
+  proto stays on the index (with a warning naming it) until the index is reindexed for another
+  reason. A removed dynamic setting is reset only once the index records it as declared, which
+  indices created by 1.0.0-rc.3 or earlier do from their next settings or mapping update on; it
+  goes to the engine's built-in default, not to an index template's value (on Elasticsearch, a
+  removed `_tier_preference` loses `data_content`); and during a rolling deploy with old and new
+  protos it toggles on each restart until the old instances are gone (see
   [Settings changes](#settings-changes)).
 - Inner maps inside the values of a typed map (and `Struct`, `Value`, `ListValue` or `Any` values)
   stay untyped. Keys of typed maps must not be blank or contain dots, and every distinct key adds
