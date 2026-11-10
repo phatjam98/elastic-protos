@@ -111,18 +111,50 @@ where that is provably sound (`ReconcileStrategy.SEQ_NO_RANGE`, recorded in `Rec
   document at or below it is visible to the first copy and is copied with its version. When the
   run created the new index itself (no reused leftover), no script runs, and it is not a rollback,
   nothing else writes the new index before the snapshot, so every such document is in the snapshot
-  unchanged. The hot pass (`range` on `_seq_no` above the checkpoint) is then the whole reconcile.
-  The marker records this as `pending.seq_no_range: true`; a marker without it (written by
-  1.0.0-rc.3 or earlier, or by a run that did not qualify) resumes with the full scan, as does
-  `MigrationOptions.fullReconcile`. OpenSearch segment replication is excluded, because a replica
-  can serve a search from older segments after a refresh.
+  unchanged (premise P). The hot pass (`range` on `_seq_no` above the checkpoint) is then the whole
+  reconcile. A checkpoint of -1 (a shard without operations) would make the range the whole index
+  and is a full scan instead. OpenSearch segment replication on either index is excluded, because
+  a replica can serve a search (the copy's scroll, or the snapshot) from older segments after a
+  refresh.
 - **Skipping the sweep.** A delete leaves nothing a range query can find, so the sweep is decided
   by counting. With S the snapshot, A the frozen old index and H its documents above the
-  checkpoint, every document of A outside H is in S (above), so `|S \ A| = |S| - |A| + |H \ S|`,
-  where `|H \ S|` falls out of the hot pass. Both counts are exact (`track_total_hits`) on a point
-  in time and on a write-blocked, refreshed index. Zero ghosts skips the sweep; a positive count
-  runs it; a negative one can only come from a broken premise and runs the cold pass and the sweep,
-  with a warning.
+  checkpoint, P gives `A \ H ⊆ S`, so `|S \ A| = |S| - |A| + |H \ S|`, where `|H \ S|` falls out
+  of the hot pass. Zero ghosts skips the sweep; a positive count runs it.
+- **Checking P, not assuming it** (review). If P fails for k documents, the count reads
+  `ghosts - k`, so a violation that loses as many documents as there are real ghosts reads 0 and
+  silently skips both the sweep and the cold pass. The negative branch (cold pass and sweep, with
+  a warning) is therefore only a last-resort inconsistency detector, not a guard. P is checked
+  where it is cheap, before the swap, and the range is dropped (full scan) when any check fails:
+  - the checkpoint is not above the engine's own lowest `max_seq_no` (no valid global checkpoint
+    is);
+  - right after the refresh that precedes the first pass, the old index's documents at or below
+    the checkpoint are counted (C1); the first pass must read at least C1 documents and create
+    exactly every document it read: no failure, version conflict (on a fresh index: duplicate ids
+    under custom routing), no-op (a dropping ingest pipeline), update or delete;
+  - the catch-up deletes nothing;
+  - the snapshot holds exactly the number of documents the two passes created (nothing else
+    wrote or deleted the fresh index before the swap);
+  - at the freeze, the documents at or below the checkpoint are counted again and must not exceed
+    C1 (no later operation can add one).
+
+  The decision and C1 are written into the marker only at `phase: swapping` (`seq_no_range: true`,
+  `cold_count`), so a resume cannot turn the range on; a marker without both (1.0.0-rc.3 or
+  earlier, or a run that did not qualify) resumes with the full scan, as does
+  `MigrationOptions.fullReconcile`. What stays assumed is the engine's global checkpoint promise
+  itself (processed on every copy before it is reported; never reused after a failover), which a
+  single-node test cannot exercise.
+- **Partial answers.** The engines answer a search that some shards could not run with 200, the
+  other shards' hits and a total with `relation: eq` (verified on all four engines, plain and with
+  a point in time, by a script query that throws on one shard; `_count` behaves the same;
+  `allow_partial_search_results=false` turns it into a 400 `search_phase_execution_exception` on
+  all four). `SearchResult` now carries `shardsFailed`, and every search and count the migrator
+  relies on fails on a partial answer: on the old index the item fails and resumes; on the snapshot
+  it counts as a lost snapshot. The response check was chosen over the request parameter because
+  the SPI's `search` carries no request parameters and the check works the same everywhere;
+  ordinary searches are unchanged.
+- **Cost.** Under the same checkpoint the range path does a subset of the full scan's work, so
+  there is no size threshold; but the checkpoint is the minimum over shards whose sequence numbers
+  are not aligned in time, so on skewed shards the range can cover most of the index.
 
 Rejected:
 
@@ -139,6 +171,6 @@ Rejected:
   neither and only fires on an actual ghost.
 - **A per-shard hot pass** (`preference=_shards:<n>`, sorted on `_seq_no`, against per-shard
   checkpoints): exact rather than a superset on multi-shard indices, but more requests and a wider
-  SPI for a saving that is small on evenly routed indices.
+  SPI (search request parameters). It is the fix for skewed and empty shards, left for later.
 - **Counting deletes** with `indexing.delete_total` from `_stats`: a per-copy counter that resets
   when a shard copy restarts or relocates, so a difference of zero proves nothing.

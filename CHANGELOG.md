@@ -28,10 +28,18 @@ packages, and the private geobuf dependency is gone. The `1.0.0-rc.1`, `1.0.0-rc
   checkpoint, and sweeps the new index only when document counts show that documents were deleted
   from the old index during the copy (`ReconcileStrategy.SEQ_NO_RANGE`;
   [ADR 0007 addendum](docs/adr/0007-zero-downtime-reindex.md)), so the stale-read window after the
-  swap is O(changed documents) instead of O(N). A full scan remains for migration scripts, reused
-  leftover indices, rollbacks, OpenSearch segment replication, engines without a global checkpoint
-  and markers written by rc.3 or earlier, which still resume. The checkpoint in the marker is now
-  the global checkpoint where the engine reports one.
+  swap covers the documents above the lowest shard checkpoint instead of every document (about the
+  changed documents on evenly loaded shards; up to most of the index on skewed ones). The range is
+  used only after the copy verifies as clean (first pass created exactly what it read, catch-up
+  deleted nothing, the snapshot count matches, the count at or below the checkpoint did not grow).
+  A full scan remains for migration scripts, reused leftover indices, rollbacks, OpenSearch segment
+  replication on either index, an empty shard, engines without a global checkpoint and markers
+  written by rc.3 or earlier, which still resume. The checkpoint in the marker is now the global
+  checkpoint where the engine reports one.
+- Every search and count the migrator relies on now fails on a partial answer (a shard that did not
+  answer) instead of reading it as complete; on the snapshot that counts as a lost snapshot.
+- `ReconcileStats` equality now includes `strategy` and `swept`: a comparison with
+  `new ReconcileStats(c, s, g, k)` matches only a full scan that swept.
 - A dynamic setting removed from the proto is reset to the engine default
   ([ADR 0006 addendum](docs/adr/0006-settings-outside-the-content-hash.md)): the migrator records
   the declared dynamic keys in `_meta.elastic_protos.dynamic_settings` whenever it writes an index,
@@ -46,13 +54,14 @@ packages, and the private geobuf dependency is gone. The `1.0.0-rc.1`, `1.0.0-rc
   constructor remains), `DiffClassifier.settingsDiff`/`diff` overloads taking the recorded keys,
   `DiffClassifier.declaredDynamicSettings`, and `reset` in `MigrationPlan.toJson()` and
   `toReport()`.
-
 - `SearchEngine.globalCheckpoint` (default empty), implemented by both adapters from
   `_stats?level=shards`.
 - `ReconcileStats.strategy()` (`ReconcileStrategy`: `SEQ_NO_RANGE`, `FULL_SCAN`, `DEGRADED`) and
   `swept()`; the four-argument constructor remains and means a full scan that swept.
 - `MigrationOptions.fullReconcile` (default false) forces the full scan.
-- Testkit: `InMemorySearchEngine.globalCheckpoint`, `globalCheckpoints(boolean)` and
+- `SearchResult.shardsFailed()` and `partial()`, from `_shards.failed` (the six-argument
+  constructor remains and means no failed shard).
+- Testkit: `InMemorySearchEngine` `_seq_no` ranges with `gte`, `lt` and `lte`, `globalCheckpoint`, `globalCheckpoints(boolean)` and
   `globalCheckpointLag(long)`.
 
 ### Since 1.0.0-rc.2

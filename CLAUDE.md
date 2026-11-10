@@ -134,12 +134,17 @@ Checkstyle, JaCoCo and Javadoc.
   marker into `IndexPlan.resume` and `apply` continues from there. `BLOCKING` is the old write-blocking copy. Rollback: `RollbackMode`
   (`REVERSE_DELTA` default, `REVERSE_DELTA_FORCE`, `ALIAS_ONLY`).
 - The checkpoint is `SearchEngine.globalCheckpoint` (lowest primary `global_checkpoint`), else
-  `seqNoCheckpoint`. With a global checkpoint, a new index this run created, no script, no rollback and no
-  segment replication, the marker carries `seq_no_range: true` and the reconcile is
-  `ReconcileStrategy.SEQ_NO_RANGE`: hot pass only, and the sweep only when
-  `count(snapshot) - count(old) + hot docs missing from the snapshot` is not zero (ADR 0007 addendum).
-  Everything else (rc.3 markers, `MigrationOptions.fullReconcile`) is `FULL_SCAN`; a lost PIT is `DEGRADED`.
-  `ReconcileStats` records `strategy` and `swept`.
+  `seqNoCheckpoint`. With a global checkpoint >= 0 and <= the lowest max_seq_no, a new index this run
+  created, no script, no rollback, no segment replication on either index, and a copy that verifies
+  clean (pass 1 created exactly what it read and at least the count at or below the checkpoint, catch-up
+  deleted nothing, snapshot count == created by both passes), the swapping marker carries
+  `seq_no_range: true` + `cold_count` and the reconcile is `ReconcileStrategy.SEQ_NO_RANGE`: hot pass
+  only (after re-checking that the cold count did not grow), and the sweep only when
+  `count(snapshot) - count(old) + hot docs missing from the snapshot` is not zero (ADR 0007 addendum;
+  the negative branch is a last-resort detector, not a guard). Everything else (rc.3 markers,
+  `MigrationOptions.fullReconcile`) is `FULL_SCAN`; a lost PIT is `DEGRADED`. `ReconcileStats` records
+  `strategy` and `swept`. Migrator searches/counts go through `Reconciler.strict`/`count`, which fail on
+  `SearchResult.shardsFailed() > 0` (partial snapshot = `SnapshotLost`).
 - `apply` and `rollback` take a per-alias lock (ADR 0008, `AliasLock`) in `IndexNamingStrategy.lockIndex()`
   (`elastic-protos-locks`, prefixed by `prefixed(...)`), re-plan under it and check the lease before
   irreversible steps. `MigrationOptions.lock` / `lockWait` (10m) / `lockTtl` (2m); `Status.LOCKED`,
@@ -149,4 +154,4 @@ Checkstyle, JaCoCo and Javadoc.
   `<name>__nested` / `<name>__reverse`. `RangeValue.min`/`max` are `optional` (open bounds).
 - `InMemorySearchEngine` (testkit) runs only terms, the six metrics, `nested` and `reverse_nested`
   aggregations, ignores `highlight`, and models seq_no, tombstones and PIT snapshots like the engines.
-  `EngineIntegrationSpec` has 54 feature methods.
+  `EngineIntegrationSpec` has 56 feature methods.

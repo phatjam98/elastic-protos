@@ -1246,6 +1246,119 @@ abstract class EngineIntegrationSpec extends Specification {
     titles(third.index()) == expected
   }
 
+  def "concurrent writers through the alias during a zero-downtime reindex end in exactly their acknowledged state"() {
+    given: 'a three-shard alias under -cw with thirty documents, and three writer threads'
+    IndexNamingStrategy cwNaming = IndexNamingStrategy.prefixed(prefix + '-cw')
+    def plain = ProtoMapper.builder().naming(cwNaming)
+        .overrides(MappingOverrides.builder().setting('number_of_shards', 3).build()).build()
+    def titleKeyword = ProtoMapper.builder().naming(cwNaming).overrides(MappingOverrides.builder()
+        .setting('number_of_shards', 3).forField(Document.descriptor, 'title') { it.setType(EsType.KEYWORD) }.build()).build()
+    String alias = plain.map(Document).alias()
+    assert IndexMigrator.builder().engine(engine).mapper(plain).build().bootstrap(Document).ok()
+    30.times { write(alias, "cw-${it}", 'before') }
+    engine.refresh(alias)
+    Map<String, String> model = new java.util.concurrent.ConcurrentHashMap<>()
+    30.times { model["cw-${it}".toString()] = 'before' }
+    def stop = new java.util.concurrent.atomic.AtomicBoolean()
+    List<Throwable> errors = Collections.synchronizedList([])
+    int[] operations = new int[3]
+    // ids written by one thread only; a deleted id is never written again and a created id never
+    // deleted, which keeps out the documented create-after-catch-up-then-delete-after-swap case
+    def writers = (0..<3).collect { int t ->
+      Thread.start {
+        def random = new Random(t)
+        List<String> owned = (0..<10).collect { "cw-${t * 10 + it}".toString() }
+        List<String> created = []
+        int n = 0
+        try {
+          while (!stop.get()) {
+            n++
+            int dice = random.nextInt(10)
+            if (dice < 4 && !owned.isEmpty()) {
+              String id = owned[random.nextInt(owned.size())]
+              retryBlocked { write(alias, id, "t${t}-${n}") }
+              model[id] = "t${t}-${n}".toString()
+            } else if (dice < 5 && owned.size() > 2) {
+              String id = owned.remove(random.nextInt(owned.size()))
+              retryBlocked { engine.delete(alias, id) }
+              model.remove(id)
+            } else if (dice < 8 || created.isEmpty()) {
+              String id = "cw-${t}-new-${n}".toString()
+              retryBlocked { write(alias, id, "t${t}-${n}") }
+              created << id
+              model[id] = "t${t}-${n}".toString()
+            } else {
+              String id = created[random.nextInt(created.size())]
+              retryBlocked { write(alias, id, "t${t}-${n}") }
+              model[id] = "t${t}-${n}".toString()
+            }
+            operations[t]++
+            Thread.sleep(3)
+          }
+        } catch (Throwable e) {
+          errors << e
+        }
+      }
+    }
+    def migrator = IndexMigrator.builder().engine(engine).mapper(titleKeyword).options(FAST)
+        .listener({ a, phase -> Thread.sleep(150) } as MigrationListener).build()
+
+    when: 'the reindex runs while they write'
+    Thread.sleep(200)
+    def outcome = migrator.bootstrap(Document).outcomes()[0]
+    Thread.sleep(200)
+    stop.set(true)
+    writers*.join()
+    engine.refresh(alias)
+    Map<String, String> actual = engine.search([titleKeyword.map(Document).name()], [query: [match_all: [:]], size: 1000])
+        .hits().collectEntries { [(it.id()): it.source().title] }
+
+    then: 'every acknowledged write is there, nothing deleted came back, and the range was used'
+    errors.isEmpty()
+    operations.sum() > 100
+    outcome.ok()
+    outcome.index() == titleKeyword.map(Document).name()
+    actual == new TreeMap(model)
+    outcome.reconcile().strategy() == ReconcileStrategy.SEQ_NO_RANGE
+  }
+
+  /** Runs a write, retrying it while it fails with the write block of an old index after a swap. */
+  static void retryBlocked(Closure write) {
+    for (int attempt = 0; ; attempt++) {
+      try {
+        write()
+        return
+      } catch (EngineException e) {
+        if (e.kind != EngineException.Kind.BLOCKED || attempt > 50) {
+          throw e
+        }
+        Thread.sleep(20)
+      }
+    }
+  }
+
+  def "a search that fails on one shard reports it next to the other shards' results"() {
+    given: 'a three-shard index where a script throws on one document'
+    String index = prefix + '-partial'
+    engine.createIndex(index, [number_of_shards: 3, number_of_replicas: 0], [properties: [n: [type: 'long']]], [] as Set)
+    assert !engine.bulk((1..12).collect { BulkOp.index(index, "p${it}", [n: it]) }).errors()
+    engine.refresh(index)
+    def query = [script: [script: [source: 'if (doc[\'n\'].value == 3) { throw new IllegalArgumentException(\'boom\'); } return true;']]]
+
+    when:
+    SearchResult result = engine.search([index], [query: query, size: 20, track_total_hits: true])
+
+    then: 'a 200 with an exact-looking total of the other shards only'
+    result.shardsFailed() == 1
+    result.partial()
+    result.totalExact()
+    result.total() < 12
+    !engine.search([index], [size: 0, track_total_hits: true]).partial()
+
+    cleanup:
+    engine.deleteIndex(index)
+  }
+
   // ------------------------------------------------------------------ settings
 
   def "dynamic settings are updated in place, and a static change reindexes into the next generation"() {

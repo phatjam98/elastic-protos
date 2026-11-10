@@ -21,6 +21,9 @@ import java.util.Map;
  * @param pitId the point-in-time id to use for the next page, when the search used one
  * @param aggregations raw aggregation results, possibly empty
  * @param tookMs engine-side time
+ * @param shardsFailed how many shards failed ({@code _shards.failed}): the engines answer a search
+ *     that some shards could not run with 200 and the results of the others, so hits and totals
+ *     (even with {@code relation: eq}) are then partial; 0 when every shard answered
  */
 public record SearchResult(
     long total,
@@ -28,7 +31,8 @@ public record SearchResult(
     List<Hit> hits,
     String pitId,
     Map<String, Object> aggregations,
-    long tookMs) {
+    long tookMs,
+    int shardsFailed) {
 
   /** The {@link #total()} of a search that did not count hits. */
   public static final long NO_TOTAL = -1L;
@@ -37,6 +41,26 @@ public record SearchResult(
   public SearchResult {
     hits = hits == null ? List.of() : Copies.list(hits);
     aggregations = aggregations == null ? Map.of() : Copies.map(aggregations);
+  }
+
+  /**
+   * Creates a result from a search every shard answered.
+   *
+   * @param total the total hit count, or {@link #NO_TOTAL}
+   * @param totalExact whether {@code total} is exact
+   * @param hits the hits in order
+   * @param pitId the point-in-time id, or null
+   * @param aggregations raw aggregation results
+   * @param tookMs engine-side time
+   */
+  public SearchResult(long total, boolean totalExact, List<Hit> hits, String pitId,
+      Map<String, Object> aggregations, long tookMs) {
+    this(total, totalExact, hits, pitId, aggregations, tookMs, 0);
+  }
+
+  /** Returns whether some shards failed, so that hits and totals are partial. */
+  public boolean partial() {
+    return shardsFailed > 0;
   }
 
   /** Returns whether the engine counted hits, so that {@link #total()} is meaningful. */

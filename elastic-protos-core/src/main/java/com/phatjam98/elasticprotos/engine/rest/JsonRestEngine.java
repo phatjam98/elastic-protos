@@ -596,7 +596,8 @@ public final class JsonRestEngine implements SearchEngine {
         parsed,
         string(response.get("pit_id")),
         map(response.get("aggregations")),
-        number(response.get("took")));
+        number(response.get("took")),
+        (int) number(map(response.get("_shards")).get("failed")));
   }
 
   @Override

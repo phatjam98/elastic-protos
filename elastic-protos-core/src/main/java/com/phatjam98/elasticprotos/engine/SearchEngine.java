@@ -114,8 +114,9 @@ public interface SearchEngine extends AutoCloseable {
    *
    * <p>Implementations promise more than {@link #seqNoCheckpoint}: on every shard, every operation
    * with a sequence number at or below the returned value was processed by every in-sync copy
-   * before this call returned (so a refresh after the call makes its effect visible to every
-   * search), and no operation started later gets a sequence number at or below it, even after a
+   * before this call returned (so, with document replication, a refresh after the call makes its
+   * effect visible to every search; segment replication gives no such guarantee for replicas),
+   * and no operation started later gets a sequence number at or below it, even after a
    * primary fails over. The value may be -1 (a shard without operations). An implementation that
    * cannot promise this, or that misses a shard (an unassigned primary), returns empty.
    *
