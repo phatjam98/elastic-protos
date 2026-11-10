@@ -150,6 +150,11 @@ Checkstyle, JaCoCo and Javadoc.
   `MigrationOptions.fullReconcile`) is `FULL_SCAN`; a lost PIT is `DEGRADED`. `ReconcileStats` records
   `strategy` and `swept`. Migrator searches/counts go through `Reconciler.strict`/`count`, which fail on
   `SearchResult.shardsFailed() > 0` (partial snapshot = `SnapshotLost`).
+- Reconcile passes (hot, cold, sweep, degraded CREATE_MISSING) read the frozen old index sorted by
+  `_seq_no` and record `pending.progress` (`done`, `pass`, `seq_no`, `ids`, `hot_missing`) after every
+  page that wrote, so a resume never replays a recorded `create` (which would resurrect a document deleted
+  through the alias); residual = one page. rc.3 markers (no progress) replay everything.
+  `SearchEngine.update` retries conflicts in the engine (`retry_on_conflict` 3; 4-arg overload).
 - `apply` and `rollback` take a per-alias lock (ADR 0008, `AliasLock`) in `IndexNamingStrategy.lockIndex()`
   (`elastic-protos-locks`, prefixed by `prefixed(...)`), re-plan under it and check the lease before
   irreversible steps. `MigrationOptions.lock` / `lockWait` (10m) / `lockTtl` (2m); `Status.LOCKED`,
@@ -159,4 +164,4 @@ Checkstyle, JaCoCo and Javadoc.
   `<name>__nested` / `<name>__reverse`. `RangeValue.min`/`max` are `optional` (open bounds).
 - `InMemorySearchEngine` (testkit) runs only terms, the six metrics, `nested` and `reverse_nested`
   aggregations, ignores `highlight`, and models seq_no, tombstones and PIT snapshots like the engines.
-  `EngineIntegrationSpec` has 56 feature methods.
+  `EngineIntegrationSpec` has 57 feature methods.

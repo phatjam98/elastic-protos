@@ -478,8 +478,20 @@ public final class JsonRestEngine implements SearchEngine {
 
   @Override
   public IndexResult update(String index, String id, Map<String, Object> partial) {
+    return update(index, id, partial, DEFAULT_UPDATE_RETRIES);
+  }
+
+  @Override
+  public IndexResult update(String index, String id, Map<String, Object> partial,
+      int retryOnConflict) {
+    if (retryOnConflict < 0) {
+      throw new IllegalArgumentException(
+          "retryOnConflict must not be negative: " + retryOnConflict);
+    }
     String path = "/" + index + "/_update/" + pathSegment(id);
-    return indexResult(object(require(perform("POST", path, Map.of(),
+    Map<String, String> params = retryOnConflict == 0
+        ? Map.of() : Map.of("retry_on_conflict", Integer.toString(retryOnConflict));
+    return indexResult(object(require(perform("POST", path, params,
         Json.canonical(Map.of("doc", partial)), RawHttp.JSON))));
   }
 

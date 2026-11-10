@@ -155,6 +155,8 @@ public final class IndexMigrator {
   private static final String SEQ_NO_RANGE = "seq_no_range";
   /** The marker key of the number of old-index documents at or below the checkpoint at the copy. */
   private static final String COLD_COUNT = "cold_count";
+  /** The marker key of the reconcile's progress ({@link Reconciler.Progress}). */
+  private static final String PROGRESS = "progress";
 
   private final SearchEngine engine;
   private final ProtoMapper mapper;
@@ -1045,7 +1047,7 @@ public final class IndexMigrator {
     }
     phase(alias, Phase.SWAPPED);
     return afterSwap(plan, new Move(alias, next, previous, meta, pit.id(), null, true, null,
-        false, snapshot.checkpoint(), -1));
+        false, snapshot.checkpoint(), -1, new Reconciler.Progress()));
   }
 
   private static MigrationException rollbackAborted(String alias, String next, Exception e) {
@@ -1364,7 +1366,8 @@ public final class IndexMigrator {
     }
     phase(alias, Phase.SWAPPED);
     return afterSwap(item, new Move(alias, current, next, meta, snapshot.pit().id(), staging,
-        false, null, options.deleteOldAfter(), snapshot.checkpoint(), snapshot.coldCount()));
+        false, null, options.deleteOldAfter(), snapshot.checkpoint(), snapshot.coldCount(),
+        new Reconciler.Progress()));
   }
 
   /**
@@ -1393,7 +1396,7 @@ public final class IndexMigrator {
       boolean rollback, boolean fresh, Reconciler.Staging staging, IndexDefinition target) {
     OptionalLong global = engine.globalCheckpoint(from);
     long checkpoint = global.isPresent() ? global.getAsLong() : engine.seqNoCheckpoint(from);
-    writePending(to, meta, pending(from, PHASE_COPYING, null, rollback, checkpoint, -1));
+    writePending(to, meta, pending(from, PHASE_COPYING, null, rollback, checkpoint, -1, null));
     phase(alias, Phase.PREPARED);
     ReindexRequest copy = ReindexRequest.of(from, to)
         .withVersionType(ReindexRequest.VersionType.EXTERNAL)
@@ -1454,7 +1457,7 @@ public final class IndexMigrator {
         }
       }
       writePending(to, meta,
-          pending(from, PHASE_SWAPPING, pit.id(), rollback, checkpoint, coldCount));
+          pending(from, PHASE_SWAPPING, pit.id(), rollback, checkpoint, coldCount, null));
       phase(alias, Phase.SNAPSHOT);
     } catch (RuntimeException e) {
       closeQuietly(alias, pit);
@@ -1566,7 +1569,7 @@ public final class IndexMigrator {
   /** The state of a reindex or rollback after its alias swap. */
   private record Move(String alias, String from, String to, Map<String, Object> meta,
       String pitId, Reconciler.Staging staging, boolean rollback, String phase,
-      boolean deleteOld, long checkpoint, long coldCount) {}
+      boolean deleteOld, long checkpoint, long coldCount, Reconciler.Progress progress) {}
 
   /** Continues a zero-downtime reindex or rollback whose alias swap is done. */
   private Outcome resumeAfterSwap(IndexPlan item) {
@@ -1589,7 +1592,8 @@ public final class IndexMigrator {
         resume.rollback(), resume.phase(), !resume.rollback() && options.deleteOldAfter(),
         checkpoint instanceof Number ? ((Number) checkpoint).longValue() : -1,
         checkpoint instanceof Number && Boolean.TRUE.equals(pending.get(SEQ_NO_RANGE))
-            && pending.get(COLD_COUNT) instanceof Number count ? count.longValue() : -1));
+            && pending.get(COLD_COUNT) instanceof Number count ? count.longValue() : -1,
+        Reconciler.Progress.from(pending.get(PROGRESS))));
   }
 
   /**
@@ -1625,7 +1629,7 @@ public final class IndexMigrator {
         }
         writePending(to, move.meta(),
             pending(from, PHASE_FINISHING, pitId, move.rollback(), move.checkpoint(),
-                move.coldCount()));
+                move.coldCount(), null));
       }
       if (pitId != null) {
         closeQuietly(alias, new Pit(pitId, pitKeepAlive()));
@@ -1681,7 +1685,7 @@ public final class IndexMigrator {
     engine.refresh(from);
     writePending(move.to(), move.meta(),
         pending(from, PHASE_RECONCILING, move.pitId(), move.rollback(), move.checkpoint(),
-            move.coldCount()));
+            move.coldCount(), move.progress().toMap()));
     phase(move.alias(), Phase.FROZEN);
   }
 
@@ -1694,7 +1698,9 @@ public final class IndexMigrator {
   private boolean reconcile(Move move, Reconciler.Counts counts) {
     String alias = move.alias();
     Reconciler reconciler = new Reconciler(engine, pitKeepAlive(), options.reindexTimeout(),
-        this::guard);
+        this::guard, move.progress(), progress -> writePending(move.to(), move.meta(),
+            pending(move.from(), PHASE_RECONCILING, move.pitId(), move.rollback(),
+                move.checkpoint(), move.coldCount(), progress.toMap())));
     if (move.staging() != null) {
       createStaging(move.staging(), move.to());
     }
@@ -1841,12 +1847,15 @@ public final class IndexMigrator {
   }
 
   private static Map<String, Object> pending(String from, String phase, String pitId,
-      boolean rollback, long checkpoint, long coldCount) {
+      boolean rollback, long checkpoint, long coldCount, Map<String, Object> progress) {
     Map<String, Object> pending = new LinkedHashMap<>();
     pending.put("action", ACTION_REINDEX);
     pending.put("from", from);
     pending.put("phase", phase);
     pending.put("checkpoint", checkpoint);
+    if (progress != null) {
+      pending.put(PROGRESS, progress);
+    }
     if (coldCount >= 0) {
       pending.put(SEQ_NO_RANGE, true);
       pending.put(COLD_COUNT, coldCount);

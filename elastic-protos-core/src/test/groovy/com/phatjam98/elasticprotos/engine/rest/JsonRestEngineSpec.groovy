@@ -680,11 +680,30 @@ class JsonRestEngineSpec extends Specification {
     http.requests[1].method == 'POST' && http.requests[1].path == '/docs/_doc' && http.requests[1].params == [:]
     http.requests[2].path == '/docs/_create/2' && http.requests[2].params == [refresh: 'wait_for']
     http.requests[3].method == 'POST' && http.requests[3].path == '/docs/_update/1' && http.requests[3].json() == [doc: [a: 2]]
+    http.requests[3].params == [retry_on_conflict: '3']
 
     and:
     engine.delete('docs', '1')
     !engine.delete('docs', '9')
     http.requests[4].method == 'DELETE' && http.requests[4].path == '/docs/_doc/1' && http.requests[4].params == [:]
+  }
+
+  def "update takes a retry_on_conflict, 0 sending none"() {
+    given:
+    http.enqueue(200, [_index: 'd', _id: '1', result: 'updated']).enqueue(200, [_index: 'd', _id: '1', result: 'updated'])
+
+    when:
+    engine.update('d', '1', [a: 1], 0)
+    engine.update('d', '1', [a: 1], 7)
+
+    then:
+    http.requests*.params == [[:], [retry_on_conflict: '7']]
+
+    when:
+    engine.update('d', '1', [a: 1], -1)
+
+    then:
+    thrown(IllegalArgumentException)
   }
 
   def "document ids are percent-encoded as a single path segment"() {

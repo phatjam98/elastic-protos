@@ -1322,6 +1322,47 @@ abstract class EngineIntegrationSpec extends Specification {
     outcome.reconcile().strategy() == ReconcileStrategy.SEQ_NO_RANGE
   }
 
+  def "a resumed reconcile does not bring back a document the first run created and the application deleted"() {
+    given: 'an alias under -rr; x is written through it after the catch-up and the run dies after the reconcile'
+    IndexNamingStrategy rrNaming = IndexNamingStrategy.prefixed(prefix + '-rr')
+    def plain = ProtoMapper.builder().naming(rrNaming).build()
+    def titleKeyword = ProtoMapper.builder().naming(rrNaming).overrides(MappingOverrides.builder()
+        .forField(Document.descriptor, 'title') { it.setType(EsType.KEYWORD) }.build()).build()
+    String alias = plain.map(Document).alias()
+    String next = titleKeyword.map(Document).name()
+    indexSampleDocuments(plain)
+    def crashing = IndexMigrator.builder().engine(engine).mapper(titleKeyword).options(FAST.withLock(false))
+        .listener({ a, phase ->
+          if (phase == Phase.CAUGHT_UP) {
+            write(alias, 'x', 'late')
+          }
+          if (phase == Phase.RECONCILED) {
+            throw new MigrationListener.Abort('killed')
+          }
+        } as MigrationListener).build()
+    assert crashing.bootstrap(Document).outcomes()[0].status() == MigrationResult.Status.FAILED
+    assert engine.get(alias, 'x').get().index() == next
+
+    when: 'the application deletes x through the alias and a fresh run resumes'
+    assert engine.delete(alias, 'x', IndexOptions.refreshed())
+    def outcome = IndexMigrator.builder().engine(engine).mapper(titleKeyword).options(FAST).build()
+        .bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    outcome.reconcile().copied() == 0L
+    !engine.get(alias, 'x').isPresent()
+    engine.getMappings(next)._meta.elastic_protos.pending == null
+
+    when: 'a partial update through the alias, with the engine retrying on conflict'
+    def updated = engine.update(alias, 'doc-1', [title: 'patched'])
+    def once = engine.update(alias, 'doc-1', [title: 'patched again'], 0)
+
+    then:
+    updated.result() == 'updated'
+    once.result() == 'updated'
+  }
+
   /** Runs a write, retrying it while it fails with the write block of an old index after a swap. */
   static void retryBlocked(Closure write) {
     for (int attempt = 0; ; attempt++) {

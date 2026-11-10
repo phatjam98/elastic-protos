@@ -148,6 +148,7 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
         "openPit ${V1}",
         "closePit PIT",
         "putMappings ${V2}",
+        "putMappings ${V2}",
         "closePit PIT",
         "putMappings ${V2}",
         "refresh ${V2}",
@@ -172,8 +173,8 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     seen[Phase.SNAPSHOT].pit instanceof String
     seen[Phase.SWAPPED] == seen[Phase.SNAPSHOT]
     seen[Phase.FROZEN] == seen[Phase.SNAPSHOT] + [phase: 'reconciling']
-    seen[Phase.RECONCILED] == seen[Phase.FROZEN]
-    seen[Phase.SWEPT] == seen[Phase.FROZEN]
+    seen[Phase.RECONCILED] == seen[Phase.FROZEN] + [progress: [done: ['hot'], hot_missing: 0]]
+    seen[Phase.SWEPT] == seen[Phase.RECONCILED]
     seen[Phase.FINISHED] == null
     engine.getMappings(V2)._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version', 'static_settings'] as Set
   }
@@ -1032,6 +1033,137 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     engine.log().indexOf("globalCheckpoint ${V1}".toString()) < engine.log().indexOf("seqNoCheckpoint ${V1}".toString())
   }
 
+  // ------------------------------------------------------------------ resume without replaying creates
+
+  def "the soak reproduction: a resume after #phase does not bring back a document the first run created and the application deleted (#strategy)"() {
+    given: 'x is written through the alias after the catch-up; the first run creates it in the new index and dies'
+    on[Phase.CAUGHT_UP] = { put('x', 'late') }
+    on[phase] = { throw new MigrationListener.Abort('killed') }
+    migrator(options: options).bootstrap(Document)
+    on.clear()
+    assert titles(V2).x == 'late'
+
+    when: 'the application deletes x through the alias, and a fresh run resumes'
+    assert engine.delete('documents', 'x')
+    def outcome = migrator(listen: false, options: options).bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    !titles(V2).containsKey('x')
+    outcome.reconcile().copied() == 0L
+    outcome.reconcile().strategy() == strategy
+    pending(V2) == null
+
+    where:
+    phase            | options                    | strategy
+    Phase.RECONCILED | ZD                         | ReconcileStrategy.SEQ_NO_RANGE
+    Phase.SWEPT      | ZD                         | ReconcileStrategy.SEQ_NO_RANGE
+    Phase.RECONCILED | ZD.withFullReconcile(true) | ReconcileStrategy.FULL_SCAN
+    Phase.SWEPT      | ZD.withFullReconcile(true) | ReconcileStrategy.FULL_SCAN
+  }
+
+  def "a crash in the middle of a pass resumes after the last page whose writes were recorded"() {
+    given: '1005 documents written after the catch-up, so the hot pass has two pages; the second page fails'
+    engine = new FailingSecondCreateEngine()
+    setup()
+    on[Phase.CAUGHT_UP] = { 1005.times { put("n${it}", 'late') } }
+    def first = migrator().bootstrap(Document).outcomes()[0]
+    on.clear()
+    (engine as FailingSecondCreateEngine).fail = false
+
+    expect: 'the first page is in, its cursor recorded'
+    first.status() == MigrationResult.Status.FAILED
+    engine.documents(V2).keySet().count { it.startsWith('n') } == Reconciler.PAGE
+    pending(V2).progress.pass == 'hot'
+
+    when: 'the application deletes a document of the first page, and a fresh run resumes'
+    String deleted = engine.documents(V2).keySet().find { it.startsWith('n') }
+    assert engine.delete('documents', deleted)
+    def outcome = migrator(listen: false).bootstrap(Document).outcomes()[0]
+
+    then: 'only the second page is written'
+    outcome.ok()
+    outcome.reconcile().copied() == 5L
+    !engine.documents(V2).containsKey(deleted)
+    engine.documents(V2).keySet().count { it.startsWith('n') } == 1004
+  }
+
+  def "the residual window: a page written but not yet recorded is replayed"() {
+    given: 'the progress write after the hot page fails, after its creates went in'
+    engine = new FailingProgressEngine()
+    setup()
+    on[Phase.CAUGHT_UP] = { put('x', 'late') }
+    migrator().bootstrap(Document)
+    on.clear()
+    assert titles(V2).x == 'late'
+    assert engine.delete('documents', 'x')
+
+    when:
+    def outcome = migrator(listen: false).bootstrap(Document).outcomes()[0]
+
+    then: 'documented: the documents of that one page that were deleted in between come back'
+    outcome.ok()
+    titles(V2).x == 'late'
+  }
+
+  def "a replayed sweep keeps a ghost the application wrote again after the first sweep"() {
+    given: 'd1 is deleted after the copy; the sweep removes it from the new index; the run dies before recording that'
+    on[Phase.COPIED] = { remove('d1') }
+    on[Phase.SWEPT] = { throw new MigrationListener.Abort('killed') }
+    migrator().bootstrap(Document)
+    on.clear()
+    assert !titles(V2).containsKey('d1')
+    def ours = engine.getMappings(V2)._meta.elastic_protos
+    def progress = ours.pending.progress + [done: ours.pending.progress.done - ['sweep']]
+    engine.putMappings(V2, [_meta: [elastic_protos: ours + [pending: ours.pending + [progress: progress]]]])
+
+    when: 'the application writes d1 again through the alias, and the sweep is replayed'
+    put('d1', 'written again')
+    def outcome = migrator(listen: false).bootstrap(Document).outcomes()[0]
+
+    then: 'the conditional delete finds a newer document (409) and leaves it'
+    outcome.ok()
+    titles(V2).d1 == 'written again'
+    outcome.reconcile().superseded() == 1L
+  }
+
+  def "a resumed CREATE_MISSING reconcile does not create again what it created before"() {
+    given: 'the snapshot is lost; a CREATE_MISSING run creates n1 and dies'
+    on[Phase.CAUGHT_UP] = { put('n1', 'late') }
+    on[Phase.FROZEN] = { throw new MigrationListener.Abort('killed') }
+    migrator().bootstrap(Document)
+    engine.expirePits()
+    on.clear()
+    on[Phase.RECONCILED] = { throw new MigrationListener.Abort('killed') }
+    def options = ZD.withDegradedReconcile(DegradedReconcile.CREATE_MISSING)
+    migrator(options: options).bootstrap(Document)
+    on.clear()
+    assert titles(V2).n1 == 'late'
+    assert engine.delete('documents', 'n1')
+
+    when:
+    def outcome = migrator(listen: false, options: options).bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    !titles(V2).containsKey('n1')
+  }
+
+  def "progress in the marker reads back, and an rc.3 marker has none"() {
+    given:
+    def progress = new Reconciler.Progress()
+    progress.done << 'hot'
+    progress.pass = 'cold'
+    progress.seqNo = 7
+    progress.ids << 'a'
+    progress.hotMissing = 2
+
+    expect:
+    Reconciler.Progress.from(progress.toMap()).toMap() == [done: ['hot'], pass: 'cold', seq_no: 7, ids: ['a'], hot_missing: 2]
+    Reconciler.Progress.from(null).toMap() == null
+    Reconciler.Progress.from([pass: 'hot']).toMap() == null
+  }
+
   // ------------------------------------------------------------------ blocking parity
 
   def "BLOCKING keeps the blocking procedure and its operations"() {
@@ -1132,6 +1264,35 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     @Override
     OptionalLong globalCheckpoint(String index) {
       OptionalLong.empty()
+    }
+  }
+
+  /** Fails the second bulk that creates documents in the new index while {@code fail} is set. */
+  static class FailingSecondCreateEngine extends InMemorySearchEngine {
+    boolean fail = true
+    int creates
+
+    @Override
+    com.phatjam98.elasticprotos.engine.BulkResult bulk(List<com.phatjam98.elasticprotos.engine.BulkOp> operations) {
+      if (fail && operations.any { it.type() == com.phatjam98.elasticprotos.engine.BulkOp.Type.CREATE && it.index() == V2 }
+          && ++creates == 2) {
+        throw new EngineException(EngineException.Kind.TRANSIENT, 503, 'node left')
+      }
+      super.bulk(operations)
+    }
+  }
+
+  /** Fails the first progress write of the hot pass, after its writes went in. */
+  static class FailingProgressEngine extends InMemorySearchEngine {
+    boolean failed
+
+    @Override
+    void putMappings(String index, Map<String, Object> mappings) {
+      if (!failed && mappings._meta?.elastic_protos?.pending?.progress?.pass == 'hot') {
+        failed = true
+        throw new EngineException(EngineException.Kind.TRANSIENT, 503, 'node left')
+      }
+      super.putMappings(index, mappings)
     }
   }
 

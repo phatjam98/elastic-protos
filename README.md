@@ -779,12 +779,21 @@ or `cold_count`), the reconcile is a `ReconcileStrategy.FULL_SCAN`; a lost snaps
 
 What writers and readers see:
 
-- **Writes through the alias never fail**, except a write that resolved the alias to the old index
-  before the swap and reaches it after the grace period: it gets a `BLOCKED` error
-  (`cluster_block_exception`) and can be retried against the alias. It never lands silently in an
-  index that nobody reads.
-- **Reads** see the old index until the swap, then the new index. Between the catch-up and the end
-  of the reconcile, the new index can lack writes made to the old index after the catch-up pass.
+- **Full-document writes and deletes through the alias do not fail**, except a write that
+  resolved the alias to the old index before the swap and reaches it after the grace period: it
+  gets a `BLOCKED` error (`cluster_block_exception`) and can be retried against the alias. It never
+  lands silently in an index that nobody reads. A **partial `_update`** can also fail with 409 at
+  the instant of the swap (the engine read the document in the old index and its write resolved
+  against the new one), as it can during a `BACKFILL` (`_update_by_query` rewrote the document
+  between the update's read and its write) or under any concurrent writer; the update is not
+  applied and a retry succeeds. `SearchEngine.update(index, id, partial)` retries in the engine
+  (`retry_on_conflict`, `SearchEngine.DEFAULT_UPDATE_RETRIES` = 3), and
+  `update(index, id, partial, retryOnConflict)` sets it; `ElasticProtosService` (Micronaut) writes
+  whole documents only, so it is not affected.
+- **Reads** see the old index until the swap, then the new index. Until the end of the reconcile
+  the new index can lack writes made to the old index after the catch-up pass, and until the sweep
+  it can still hold documents deleted from the old index after the first copy started (reads after
+  the swap return them, and a partial update applies to them).
 - **Last writer wins per document**: a write through the alias after the swap is never overwritten
   by the reconcile, and a document the new index held at the swap and that was deleted through the
   alias after it is not brought back. A document created in the old index after the catch-up and
@@ -793,7 +802,8 @@ What writers and readers see:
   documents first, which keeps this window to seconds.
 - **Partial updates** (`_update`) after the swap apply to the document as the new index holds it.
   If that copy is stale, field changes made to the old index between the catch-up and the swap are
-  lost for that document; full-document writes are not affected. An `_update` of a document
+  lost for that document, and a document deleted from the old index after the first copy started
+  is updated (and so kept) in the new index; full-document writes are not affected. An `_update` of a document
   created in the old index after the catch-up gets 404 from the new index until the reconcile has
   created it; an `_update` with `upsert` (or `doc_as_upsert`) creates a partial document, and the
   reconcile's `create` then gets 409 and keeps it, losing the fields the old index had.
@@ -814,9 +824,27 @@ the reconcile, after the swap (`FAILED`, resumable once the script is fixed).
 | Interrupted | Next `plan` | Next `apply` |
 |---|---|---|
 | Before the swap (marker on the new index, alias on the old one) | `REINDEX`, `resume.swapped() == false` | Reuses the new index and starts again from the copy; external versioning makes it idempotent |
-| After the swap (marker on the index the alias points at) | `REINDEX` with `resume` (`from`, `pitId`, `phase`, `swapped`), even when the hash is current | Freezes the old index if needed, reconciles and sweeps. Conditional writes make this idempotent; `_reindex` never runs again, since external versioning compares version numbers and the new index takes live writes |
+| After the swap (marker on the index the alias points at) | `REINDEX` with `resume` (`from`, `pitId`, `phase`, `swapped`), even when the hash is current | Freezes the old index if needed, reconciles and sweeps, continuing from the progress the marker records (below); `_reindex` never runs again, since external versioning compares version numbers and the new index takes live writes |
 | After the swap, point in time expired | as above | Writes nothing by default (`degradedReconcile = REPORT`): counts the documents missing from the new index, those that differ (`staleSkipped`) and those only in the new index, reports them as a warning and ends `INCOMPLETE` (not ok), with the marker left at `phase: reconciling`. The operator then applies again with `DegradedReconcile.CREATE_MISSING`, which creates the missing documents and finishes, **bringing back every document deleted through the alias since the swap**, or removes the marker by hand |
 | While finishing (`phase: finishing`) | as above | Removes the marker |
+
+**Resuming the reconcile without replaying it.** Conditional writes and deletes are safe to repeat
+(409 when the document changed), but the `create` of a document the snapshot lacks is not: a
+document the earlier run created, and the application then deleted through the alias, is still
+missing from the snapshot and would be created again. So the reconcile records its progress in the
+marker (`pending.progress`): every pass (hot, cold, the sweep, and a `CREATE_MISSING` degraded
+reconcile) reads the frozen old index ordered by `_seq_no`, and after every page that wrote
+something the cursor (the last sequence number and the ids at it) is written into the marker;
+completed passes are listed in `done`. A resumed run skips the completed passes and continues the
+current one after the cursor. Residual window: the one page (at most 1,000 documents) whose writes
+went in but whose cursor write did not, because the run died between the two, is replayed; a
+document of that page that the earlier run created and that was deleted through the alias between
+that page and the resume is created again. No exact test tells "never created" from "created, then
+deleted" (the delete's tombstone lives only for `index.gc_deletes`, 60 s by default), and dropping
+the document instead would lose an acknowledged write to the old index, so the library prefers
+re-creating it, as it does for the documented create-after-catch-up case below. A marker of
+1.0.0-rc.3 or earlier has no progress and replays the whole reconcile, as before. The sweep's
+conditional deletes keep a document the application wrote again after the first sweep.
 
 `IndexMigrator.Builder.listener(MigrationListener)` is told about every phase, for metrics and
 logs. Exceptions from the listener are logged and ignored, except `MigrationListener.Abort`, which
@@ -1668,8 +1696,12 @@ before 3.3); `pager(...)` always adapts.
 ## Limitations
 
 - During a zero-downtime reindex, reads through the alias between the swap and the end of the
-  reconcile can miss writes made to the old index after the catch-up pass; a partial `_update`
-  in that window applies to the possibly stale copy and can drop those field changes (see
+  reconcile can miss writes made to the old index after the catch-up pass, and until the sweep can
+  return documents deleted from the old index after the first copy started; a partial `_update`
+  in that window applies to the possibly stale copy and can drop those field changes or keep such
+  a deleted document, and a partial `_update` at the instant of the swap or during a `BACKFILL` can
+  fail with 409 (retried by `SearchEngine.update`). A resumed reconcile replays at most the one page
+  whose progress was not recorded, re-creating a document of it deleted in between (see
   [Zero-downtime reindex](#zero-downtime-reindex)). The window lasts as long as reading the
   documents above the lowest shard checkpoint (the changed documents on evenly loaded shards, up to
   most of the index on skewed ones), plus a sweep of the whole new index when documents were

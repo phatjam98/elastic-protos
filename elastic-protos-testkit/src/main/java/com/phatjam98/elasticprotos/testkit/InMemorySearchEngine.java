@@ -100,11 +100,13 @@ import java.util.regex.Pattern;
  * ctx._id = params.<name>};
  * {@link #search} supports only the queries {@code match_all}, {@code term} and {@code terms} on
  * one field (dotted paths walk into objects and arrays), {@code ids}, a top-level {@code range}
- * on {@code _seq_no} with {@code gt}, {@code gte}, {@code lt} and {@code lte}, and {@code bool}
- * with {@code filter}, {@code must}, {@code must_not} and {@code should} (with {@code
- * minimum_should_match}, default 1 when there is no filter or must clause, else 0) over those, plus
- * {@code from}, {@code size}, {@code track_total_hits}, {@code pit} and {@code search_after}. Hits
- * always come in insertion order; when the body has a {@code sort}, whatever it says, each hit's
+ * on {@code _seq_no} with {@code gt}, {@code gte}, {@code lt} and {@code lte} (also inside
+ * {@code bool} in searches), and {@code bool} with {@code filter}, {@code must}, {@code
+ * must_not} and {@code should} (with {@code minimum_should_match}, default 1 when there is no
+ * filter or must clause, else 0) over those, plus {@code from}, {@code size}, {@code
+ * track_total_hits}, {@code pit} and {@code search_after}. Hits come in insertion order, or by
+ * sequence number when the sort starts with {@code _seq_no}; when the body has a {@code sort},
+ * whatever else it says, each hit's
  * only sort value is its position among the matches, and {@code search_after} resumes after that
  * position, which is enough for point-in-time paging. A {@code highlight} in the body is
  * accepted and ignored: hits never carry highlights. Any other query fails with {@code
@@ -133,6 +135,8 @@ public class InMemorySearchEngine implements SearchEngine {
 
   /** The engine never fails over, so every write has primary term 1. */
   private static final Long PRIMARY_TERM = 1L;
+  /** The sequence number of the document a query is matched against, for range on _seq_no. */
+  private static final ThreadLocal<Long> CURRENT_SEQ_NO = new ThreadLocal<>();
   private static final Pattern ASSIGN =
       Pattern.compile("ctx\\._source\\.([A-Za-z0-9_]+)\\s*=\\s*params\\.([A-Za-z0-9_]+)\\s*;?");
   private static final Pattern REMOVE =
@@ -786,25 +790,36 @@ public class InMemorySearchEngine implements SearchEngine {
     boolean withVersion = Boolean.TRUE.equals(body.get("version"));
     boolean withSeqNo = Boolean.TRUE.equals(body.get("seq_no_primary_term"));
     List<Hit> matches = new ArrayList<>();
+    Map<Hit, Long> seqNoOf = new java.util.IdentityHashMap<>();
     for (String name : names) {
       IndexState state = snapshot != null ? snapshot.get(name) : indices.get(name);
       if (state == null) {
         continue;
       }
-      java.util.function.LongPredicate seqNoRange = seqNoRange(query);
       for (Map.Entry<String, Map<String, Object>> doc : state.docs.entrySet()) {
-        boolean hit = seqNoRange == null
-            ? matches(query, doc.getKey(), doc.getValue())
-            : seqNoRange.test(state.seqNos.getOrDefault(doc.getKey(), -1L));
+        CURRENT_SEQ_NO.set(state.seqNos.getOrDefault(doc.getKey(), -1L));
+        boolean hit;
+        try {
+          hit = matches(query, doc.getKey(), doc.getValue());
+        } finally {
+          CURRENT_SEQ_NO.remove();
+        }
         if (hit) {
           String id = doc.getKey();
-          matches.add(new Hit(name, id, 1.0, Json.sortedCopy(doc.getValue()), List.of(),
+          Hit found = new Hit(name, id, 1.0, Json.sortedCopy(doc.getValue()), List.of(),
               withVersion ? state.versions.get(id) : null,
               withSeqNo ? state.seqNos.get(id) : null,
               withSeqNo ? PRIMARY_TERM : null,
-              Map.of()));
+              Map.of());
+          matches.add(found);
+          seqNoOf.put(found, state.seqNos.getOrDefault(id, -1L));
         }
       }
+    }
+    List<Object> order = list(body.get("sort"));
+    if (!order.isEmpty() && map(order.get(0)).containsKey("_seq_no")) {
+      // a stable sort keeps insertion order among equal sequence numbers
+      matches.sort(java.util.Comparator.comparingLong(seqNoOf::get));
     }
     if (body.containsKey("sort")) {
       for (int i = 0; i < matches.size(); i++) {
@@ -1165,6 +1180,14 @@ public class InMemorySearchEngine implements SearchEngine {
     if (query.containsKey("ids")) {
       return list(map(query.get("ids")).get("values")).stream()
           .anyMatch(value -> String.valueOf(value).equals(id));
+    }
+    if (query.containsKey("range")) {
+      java.util.function.LongPredicate range = seqNoRange(query);
+      Long seqNo = CURRENT_SEQ_NO.get();
+      if (range == null || map(query.get("range")).size() != 1 || seqNo == null) {
+        throw unsupported(query);
+      }
+      return range.test(seqNo);
     }
     boolean terms = query.containsKey("terms");
     Map<String, Object> term = map(query.get(terms ? "terms" : "term"));
