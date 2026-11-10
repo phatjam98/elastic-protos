@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 
 /**
@@ -105,6 +106,27 @@ public interface SearchEngine extends AutoCloseable {
    */
   default long seqNoCheckpoint(String index) {
     return -1;
+  }
+
+  /**
+   * Returns the global checkpoint of an index: the lowest {@code seq_no.global_checkpoint} over the
+   * primaries of all its shards, from the index stats.
+   *
+   * <p>Implementations promise more than {@link #seqNoCheckpoint}: on every shard, every operation
+   * with a sequence number at or below the returned value was processed by every in-sync copy
+   * before this call returned (so a refresh after the call makes its effect visible to every
+   * search), and no operation started later gets a sequence number at or below it, even after a
+   * primary fails over. The value may be -1 (a shard without operations). An implementation that
+   * cannot promise this, or that misses a shard (an unassigned primary), returns empty.
+   *
+   * <p>The zero-downtime reindex uses it to read only the documents written after the copy
+   * started instead of every document; the default returns empty, which keeps the full scan.
+   *
+   * @param index a concrete index
+   * @return the global checkpoint, or empty when unknown
+   */
+  default OptionalLong globalCheckpoint(String index) {
+    return OptionalLong.empty();
   }
 
   /**

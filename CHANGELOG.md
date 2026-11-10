@@ -20,6 +20,29 @@ requires Java 17. It is not API-compatible with the pre-1.0 `com.phatjam98.elast
 packages, and the private geobuf dependency is gone. The `1.0.0-rc.1`, `1.0.0-rc.2` and
 `1.0.0-rc.3` pre-releases precede it.
 
+### Since 1.0.0-rc.3
+
+#### Changed
+
+- The zero-downtime reconcile reads only the documents of the old index written after its global
+  checkpoint, and sweeps the new index only when document counts show that documents were deleted
+  from the old index during the copy (`ReconcileStrategy.SEQ_NO_RANGE`;
+  [ADR 0007 addendum](docs/adr/0007-zero-downtime-reindex.md)), so the stale-read window after the
+  swap is O(changed documents) instead of O(N). A full scan remains for migration scripts, reused
+  leftover indices, rollbacks, OpenSearch segment replication, engines without a global checkpoint
+  and markers written by rc.3 or earlier, which still resume. The checkpoint in the marker is now
+  the global checkpoint where the engine reports one.
+
+#### Added
+
+- `SearchEngine.globalCheckpoint` (default empty), implemented by both adapters from
+  `_stats?level=shards`.
+- `ReconcileStats.strategy()` (`ReconcileStrategy`: `SEQ_NO_RANGE`, `FULL_SCAN`, `DEGRADED`) and
+  `swept()`; the four-argument constructor remains and means a full scan that swept.
+- `MigrationOptions.fullReconcile` (default false) forces the full scan.
+- Testkit: `InMemorySearchEngine.globalCheckpoint`, `globalCheckpoints(boolean)` and
+  `globalCheckpointLag(long)`.
+
 ### Since 1.0.0-rc.2
 
 #### Added

@@ -65,7 +65,8 @@ class IndexMigratorRollbackSpec extends Specification {
     outcome.status() == MigrationResult.Status.APPLIED
     outcome.index() == V1
     outcome.retainedIndices() == [V2]
-    outcome.reconcile() != null
+    outcome.reconcile().strategy() == ReconcileStrategy.FULL_SCAN
+    outcome.reconcile().swept()
     titles(V1) == [d0: 'after the reindex', d2: 'Title 2', d3: 'Title 3', n1: 'new']
     engine.indices() == [(V1): ['documents'] as Set, (V2): [] as Set]
     !engine.isWriteBlocked(V1)

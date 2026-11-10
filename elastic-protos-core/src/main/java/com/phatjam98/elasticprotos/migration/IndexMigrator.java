@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
@@ -41,7 +42,8 @@ import org.slf4j.LoggerFactory;
  * <ol>
  *   <li>the new index is created (or a leftover reused) and marked {@code
  *       _meta.elastic_protos.pending = {action: reindex, from, phase: copying, checkpoint}}, the
- *       checkpoint being the old index's {@link SearchEngine#seqNoCheckpoint};
+ *       checkpoint being the old index's {@link SearchEngine#globalCheckpoint} (or, when the
+ *       engine reports none, {@link SearchEngine#seqNoCheckpoint});
  *   <li>a {@code _reindex} pass with external versioning copies the old index, and
  *   <li>a second, identical pass catches up with the writes made during the first, and a
  *       migration script is probed for {@code _id} changes;
@@ -53,8 +55,13 @@ import org.slf4j.LoggerFactory;
  *   <li>every document of the frozen old index that the snapshot lacks is created in the new
  *       index, and every one that differs is overwritten on the snapshot's sequence number and
  *       primary term, so a write through the alias after the swap always wins (409); documents
- *       written after the checkpoint go first and are compared regardless of version;
- *   <li>documents of the snapshot that the old index no longer has are deleted the same way;
+ *       written after the checkpoint go first and are compared regardless of version. When the
+ *       checkpoint is a global checkpoint taken before the copy into an index this run created,
+ *       without a script ({@link ReconcileStrategy#SEQ_NO_RANGE}), only those documents are read:
+ *       the others reached the snapshot unchanged;
+ *   <li>documents of the snapshot that the old index no longer has are deleted the same way; with
+ *       {@link ReconcileStrategy#SEQ_NO_RANGE} this sweep runs only when the document counts of
+ *       the snapshot and the old index show that there are any;
  *   <li>the marker is removed and the old index retained write-blocked, or deleted with {@link
  *       MigrationOptions#deleteOldAfter()}.
  * </ol>
@@ -136,6 +143,8 @@ public final class IndexMigrator {
   private static final String PHASE_SWAPPING = "swapping";
   private static final String PHASE_RECONCILING = "reconciling";
   private static final String PHASE_FINISHING = "finishing";
+  /** The marker key telling that the reconcile may read only the documents above the checkpoint. */
+  private static final String SEQ_NO_RANGE = "seq_no_range";
 
   private final SearchEngine engine;
   private final ProtoMapper mapper;
@@ -838,7 +847,7 @@ public final class IndexMigrator {
     engine.setWriteBlock(previous, false);
     Snapshot snapshot;
     try {
-      snapshot = copyAndSnapshot(alias, next, previous, meta, true, null, null);
+      snapshot = copyAndSnapshot(alias, next, previous, meta, true, false, null, null);
     } catch (Interrupted e) {
       throw e;
     } catch (RuntimeException e) {
@@ -867,7 +876,7 @@ public final class IndexMigrator {
     }
     phase(alias, Phase.SWAPPED);
     return afterSwap(plan, new Move(alias, next, previous, meta, pit.id(), null, true, null,
-        false, snapshot.checkpoint()));
+        false, snapshot.checkpoint(), false));
   }
 
   private static MigrationException rollbackAborted(String alias, String next, Exception e) {
@@ -1131,7 +1140,8 @@ public final class IndexMigrator {
     final boolean createdNext = prepareTarget(target, current, true);
     Snapshot snapshot;
     try {
-      snapshot = copyAndSnapshot(alias, current, next, meta, false, staging, target);
+      snapshot = copyAndSnapshot(alias, current, next, meta, false, createdNext, staging,
+          target);
     } catch (Interrupted e) {
       throw e;
     } catch (RuntimeException e) {
@@ -1161,23 +1171,37 @@ public final class IndexMigrator {
     }
     phase(alias, Phase.SWAPPED);
     return afterSwap(item, new Move(alias, current, next, meta, snapshot.pit().id(), staging,
-        false, null, options.deleteOldAfter(), snapshot.checkpoint()));
+        false, null, options.deleteOldAfter(), snapshot.checkpoint(), snapshot.seqNoRange()));
   }
 
-  /** The point in time over the new index, and the checkpoint of the old index. */
-  private record Snapshot(Pit pit, long checkpoint) {}
+  /**
+   * The point in time over the new index, the checkpoint of the old index, and whether the
+   * reconcile may read only the documents above it ({@link ReconcileStrategy#SEQ_NO_RANGE}).
+   */
+  private record Snapshot(Pit pit, long checkpoint, boolean seqNoRange) {}
 
   /**
    * Records the sequence number checkpoint of {@code from} in the marker on {@code to}, copies
    * {@code from} into it twice with external versioning (copy, then catch-up), probes the migration
    * script, and opens the point in time over {@code to} that serves as the snapshot.
    *
+   * <p>The checkpoint is the global checkpoint of {@code from} when the engine reports one, and
+   * otherwise {@link SearchEngine#seqNoCheckpoint}. With a global checkpoint, a new index this run
+   * created, no script, no rollback and no segment replication, every document of {@code from}
+   * at or below the checkpoint is visible to the first copy (the refresh before it follows the
+   * checkpoint), so it reaches the snapshot unchanged; the marker records that as {@code
+   * seq_no_range}, which lets the reconcile skip those documents.
+   *
+   * @param fresh whether this run created {@code to}, so that only these copies wrote it
    * @param target the target definition, for the staging index of the probe; null without script
    */
   private Snapshot copyAndSnapshot(String alias, String from, String to, Map<String, Object> meta,
-      boolean rollback, Reconciler.Staging staging, IndexDefinition target) {
-    long checkpoint = engine.seqNoCheckpoint(from);
-    writePending(to, meta, pending(from, PHASE_COPYING, null, rollback, checkpoint));
+      boolean rollback, boolean fresh, Reconciler.Staging staging, IndexDefinition target) {
+    OptionalLong global = engine.globalCheckpoint(from);
+    long checkpoint = global.isPresent() ? global.getAsLong() : engine.seqNoCheckpoint(from);
+    boolean seqNoRange = global.isPresent() && fresh && !rollback && staging == null
+        && !segmentReplication(from);
+    writePending(to, meta, pending(from, PHASE_COPYING, null, rollback, checkpoint, seqNoRange));
     phase(alias, Phase.PREPARED);
     ReindexRequest copy = ReindexRequest.of(from, to)
         .withVersionType(ReindexRequest.VersionType.EXTERNAL)
@@ -1209,13 +1233,24 @@ public final class IndexMigrator {
     engine.refresh(to);
     Pit pit = engine.openPit(List.of(to), pitKeepAlive());
     try {
-      writePending(to, meta, pending(from, PHASE_SWAPPING, pit.id(), rollback, checkpoint));
+      writePending(to, meta,
+          pending(from, PHASE_SWAPPING, pit.id(), rollback, checkpoint, seqNoRange));
       phase(alias, Phase.SNAPSHOT);
     } catch (RuntimeException e) {
       closeQuietly(alias, pit);
       throw e;
     }
-    return new Snapshot(pit, checkpoint);
+    return new Snapshot(pit, checkpoint, seqNoRange);
+  }
+
+  /**
+   * Returns whether an index uses segment replication (OpenSearch {@code index.replication.type:
+   * SEGMENT}), whose replicas can serve searches from older segments after a refresh.
+   */
+  private boolean segmentReplication(String index) {
+    Object type = DiffClassifier.flattenSettings(engine.getSettings(index))
+        .get("replication.type");
+    return type != null && "SEGMENT".equalsIgnoreCase(type.toString());
   }
 
   /** Creates the staging index of a migration script afresh, with the mappings of {@code to}. */
@@ -1251,7 +1286,7 @@ public final class IndexMigrator {
   /** The state of a reindex or rollback after its alias swap. */
   private record Move(String alias, String from, String to, Map<String, Object> meta,
       String pitId, Reconciler.Staging staging, boolean rollback, String phase,
-      boolean deleteOld, long checkpoint) {}
+      boolean deleteOld, long checkpoint, boolean seqNoRange) {}
 
   /** Continues a zero-downtime reindex or rollback whose alias swap is done. */
   private Outcome resumeAfterSwap(IndexPlan item) {
@@ -1267,10 +1302,13 @@ public final class IndexMigrator {
       staging = staging(item.target(), to, recordedHash(engine.getMappings(from)),
           recordedHash(mappings));
     }
-    Object checkpoint = pendingOf(mappings).get("checkpoint");
+    Map<String, Object> pending = pendingOf(mappings);
+    Object checkpoint = pending.get("checkpoint");
+    // a marker written by 1.0.0-rc.3 or earlier has no seq_no_range: full scan
     return afterSwap(item, new Move(alias, from, to, metaOf(mappings), resume.pitId(), staging,
         resume.rollback(), resume.phase(), !resume.rollback() && options.deleteOldAfter(),
-        checkpoint instanceof Number ? ((Number) checkpoint).longValue() : -1));
+        checkpoint instanceof Number ? ((Number) checkpoint).longValue() : -1,
+        checkpoint instanceof Number && Boolean.TRUE.equals(pending.get(SEQ_NO_RANGE))));
   }
 
   /**
@@ -1305,7 +1343,8 @@ public final class IndexMigrator {
               counts.warnings, counts.stats());
         }
         writePending(to, move.meta(),
-            pending(from, PHASE_FINISHING, pitId, move.rollback(), move.checkpoint()));
+            pending(from, PHASE_FINISHING, pitId, move.rollback(), move.checkpoint(),
+                move.seqNoRange()));
       }
       if (pitId != null) {
         closeQuietly(alias, new Pit(pitId, pitKeepAlive()));
@@ -1360,7 +1399,8 @@ public final class IndexMigrator {
     }
     engine.refresh(from);
     writePending(move.to(), move.meta(),
-        pending(from, PHASE_RECONCILING, move.pitId(), move.rollback(), move.checkpoint()));
+        pending(from, PHASE_RECONCILING, move.pitId(), move.rollback(), move.checkpoint(),
+            move.seqNoRange()));
     phase(move.alias(), Phase.FROZEN);
   }
 
@@ -1380,12 +1420,18 @@ public final class IndexMigrator {
     boolean lost = move.pitId() == null;
     if (!lost) {
       try {
-        LOG.info("{}: reconciling {} into {}", alias, move.from(), move.to());
-        reconciler.reconcile(move.from(), move.to(), move.pitId(), move.checkpoint(),
-            move.staging(), move.rollback(), counts);
-        phase(alias, Phase.RECONCILED);
-        reconciler.sweep(move.from(), move.to(), move.pitId(), counts);
-        phase(alias, Phase.SWEPT);
+        String fullScan = fullScanReason(move);
+        if (fullScan == null) {
+          reconcileRange(reconciler, move, counts);
+        } else {
+          LOG.info("{}: reconciling {} into {} with a full scan: {}", alias, move.from(),
+              move.to(), fullScan);
+          reconciler.reconcile(move.from(), move.to(), move.pitId(), move.checkpoint(),
+              move.staging(), move.rollback(), counts);
+          phase(alias, Phase.RECONCILED);
+          reconciler.sweep(move.from(), move.to(), move.pitId(), counts);
+          phase(alias, Phase.SWEPT);
+        }
       } catch (Reconciler.SnapshotLost e) {
         LOG.warn("{}: {}; reconciling without it", alias, e.getMessage());
         lost = true;
@@ -1402,6 +1448,59 @@ public final class IndexMigrator {
     }
     LOG.info("{}: reconciled {} -> {}: {}", alias, move.from(), move.to(), counts.stats());
     return true;
+  }
+
+  /** Returns why the reconcile has to scan every document, or null when a range does. */
+  private String fullScanReason(Move move) {
+    if (options.fullReconcile()) {
+      return "fullReconcile is set";
+    }
+    if (move.rollback()) {
+      return "a rollback compares every document";
+    }
+    if (move.staging() != null) {
+      return "a migration script applies";
+    }
+    if (!move.seqNoRange()) {
+      return "the marker does not allow a sequence number range (no global checkpoint, a reused"
+          + " index, a migration script, segment replication, or a marker of an earlier version)";
+    }
+    return null;
+  }
+
+  /**
+   * Reconciles by sequence number range ({@link ReconcileStrategy#SEQ_NO_RANGE}): only the
+   * documents of the old index above the checkpoint are read; every other document reached the
+   * snapshot unchanged. The snapshot is swept only when the document counts show that it holds
+   * documents the old index no longer has. Counts that do not add up mean that a premise failed,
+   * and the cold pass and the sweep run after all.
+   */
+  private void reconcileRange(Reconciler reconciler, Move move, Reconciler.Counts counts) {
+    String alias = move.alias();
+    LOG.info("{}: reconciling {} into {}: documents above sequence number {}", alias,
+        move.from(), move.to(), move.checkpoint());
+    counts.strategy = ReconcileStrategy.SEQ_NO_RANGE;
+    long missing = reconciler.reconcileHot(move.from(), move.to(), move.pitId(),
+        move.checkpoint(), null, counts);
+    phase(alias, Phase.RECONCILED);
+    OptionalLong ghosts = reconciler.ghosts(move.from(), move.pitId(), missing);
+    if (ghosts.isPresent() && ghosts.getAsLong() == 0) {
+      LOG.info("{}: the snapshot holds no document deleted from {}; nothing to sweep", alias,
+          move.from());
+    } else {
+      if (ghosts.isPresent() && ghosts.getAsLong() < 0) {
+        String warning = "the document counts of " + move.from() + " and of the snapshot of "
+            + move.to() + " do not add up (" + ghosts.getAsLong() + " ghosts), so every document"
+            + " was compared after all";
+        LOG.warn("{}: {}", alias, warning);
+        counts.warnings.add(warning);
+        counts.strategy = ReconcileStrategy.FULL_SCAN;
+        reconciler.reconcileCold(move.from(), move.to(), move.pitId(), move.checkpoint(), null,
+            false, counts);
+      }
+      reconciler.sweep(move.from(), move.to(), move.pitId(), counts);
+    }
+    phase(alias, Phase.SWEPT);
   }
 
   /**
@@ -1429,12 +1528,15 @@ public final class IndexMigrator {
   }
 
   private static Map<String, Object> pending(String from, String phase, String pitId,
-      boolean rollback, long checkpoint) {
+      boolean rollback, long checkpoint, boolean seqNoRange) {
     Map<String, Object> pending = new LinkedHashMap<>();
     pending.put("action", ACTION_REINDEX);
     pending.put("from", from);
     pending.put("phase", phase);
     pending.put("checkpoint", checkpoint);
+    if (seqNoRange) {
+      pending.put(SEQ_NO_RANGE, true);
+    }
     if (pitId != null) {
       pending.put("pit", pitId);
     }

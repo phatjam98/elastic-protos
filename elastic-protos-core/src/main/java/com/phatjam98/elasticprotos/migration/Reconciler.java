@@ -16,6 +16,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.function.Consumer;
 
@@ -35,6 +36,10 @@ import java.util.function.Consumer;
  *
  * <p>Sweep: every document of the snapshot that the old index no longer has was deleted there after
  * the copy, and is deleted from the new index on the snapshot's sequence number.
+ *
+ * <p>With a sound checkpoint ({@link ReconcileStrategy#SEQ_NO_RANGE}) the cold pass is left out,
+ * and {@link #ghosts} counts the documents the sweep would delete from the document counts alone,
+ * so that the sweep runs only when there are any.
  *
  * <p>The old index is scanned without sources; sources are fetched only for the documents that
  * are written.
@@ -90,10 +95,12 @@ final class Reconciler {
     long ghostsDeleted;
     long staleSkipped;
     long missing;
+    ReconcileStrategy strategy = ReconcileStrategy.FULL_SCAN;
+    boolean swept;
     final List<String> warnings = new ArrayList<>();
 
     ReconcileStats stats() {
-      return new ReconcileStats(copied, superseded, ghostsDeleted, staleSkipped);
+      return new ReconcileStats(copied, superseded, ghostsDeleted, staleSkipped, strategy, swept);
     }
   }
 
@@ -112,6 +119,21 @@ final class Reconciler {
    */
   void reconcile(String from, String to, String snapshotPit, long checkpoint, Staging staging,
       boolean compareSources, Counts counts) {
+    reconcileHot(from, to, snapshotPit, checkpoint, staging, counts);
+    if (checkpoint >= 0) {
+      reconcileCold(from, to, snapshotPit, checkpoint, staging, compareSources, counts);
+    }
+  }
+
+  /**
+   * The hot pass: copies the documents of {@code from} written after the checkpoint (every
+   * document when it is negative) that the snapshot lacks or holds differently.
+   *
+   * @return how many of those documents the snapshot lacks
+   * @throws SnapshotLost when the snapshot's point in time is gone
+   */
+  long reconcileHot(String from, String to, String snapshotPit, long checkpoint, Staging staging,
+      Counts counts) {
     // without a script, a hot document is compared by version and source; with one, the copy's
     // source differs by design, so every hot document is written
     boolean bySource = staging == null;
@@ -122,20 +144,32 @@ final class Reconciler {
     if (checkpoint >= 0) {
       hot.put("query", Map.of("range", Map.of("_seq_no", Map.of("gt", checkpoint))));
     }
+    long[] absent = {0};
     scan(from, hot, page -> {
       Map<String, Hit> snapshot = snapshot(snapshotPit, ids(page), bySource);
       List<String> changed = new ArrayList<>();
       for (Hit hit : page) {
         Hit seen = snapshot.get(hit.id());
+        if (seen == null) {
+          absent[0]++;
+        }
         if (!bySource || seen == null || differs(hit, seen, false) || differs(hit, seen, true)) {
           changed.add(hit.id());
         }
       }
       write(from, to, changed, snapshot, staging, counts);
     });
-    if (checkpoint < 0) {
-      return;
-    }
+    return absent[0];
+  }
+
+  /**
+   * The cold pass: compares every document of {@code from} at or below the checkpoint with the
+   * snapshot, by version or, with {@code compareSources}, by source, and copies those that differ.
+   *
+   * @throws SnapshotLost when the snapshot's point in time is gone
+   */
+  void reconcileCold(String from, String to, String snapshotPit, long checkpoint, Staging staging,
+      boolean compareSources, Counts counts) {
     Map<String, Object> cold = new LinkedHashMap<>();
     cold.put("_source", compareSources);
     cold.put("version", true);
@@ -191,6 +225,31 @@ final class Reconciler {
   }
 
   /**
+   * Counts the documents of the snapshot that the frozen old index no longer has, without reading
+   * them: the snapshot's count, minus the old index's count, plus the hot documents the snapshot
+   * lacks. This holds when every document of {@code from} at or below the checkpoint is in the
+   * snapshot (the new index was created by the run that copied into it, with no script, after the
+   * global checkpoint was taken), because the snapshot then holds every document of {@code from}
+   * except those hot ones, and the ghosts besides.
+   *
+   * @param hotMissing what {@link #reconcileHot} returned
+   * @return the number of ghosts, or empty when a count is not exact
+   * @throws SnapshotLost when the snapshot's point in time is gone
+   */
+  OptionalLong ghosts(String from, String snapshotPit, long hotMissing) {
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("pit", pit(snapshotPit));
+    body.put("size", 0);
+    body.put("track_total_hits", true);
+    SearchResult snapshot = searchPit(body);
+    SearchResult old = engine.search(List.of(from), Map.of("size", 0, "track_total_hits", true));
+    if (!snapshot.totalExact() || !old.totalExact()) {
+      return OptionalLong.empty();
+    }
+    return OptionalLong.of(snapshot.total() - old.total() + hotMissing);
+  }
+
+  /**
    * Deletes from {@code to} the documents of the snapshot that {@code from} no longer has.
    *
    * @throws SnapshotLost when the snapshot's point in time is gone
@@ -209,6 +268,7 @@ final class Reconciler {
       }
       apply(deletes, counts, true);
     });
+    counts.swept = true;
   }
 
   /**
@@ -220,6 +280,7 @@ final class Reconciler {
    */
   void degraded(String from, String to, Staging staging, boolean compareSources,
       boolean createMissing, Counts counts) {
+    counts.strategy = ReconcileStrategy.DEGRADED;
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("version", true);
     body.put("_source", compareSources);

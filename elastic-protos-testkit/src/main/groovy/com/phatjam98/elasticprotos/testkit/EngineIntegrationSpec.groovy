@@ -39,6 +39,7 @@ import com.phatjam98.elasticprotos.migration.MigrationPlan
 import com.phatjam98.elasticprotos.migration.MigrationResult
 import com.phatjam98.elasticprotos.migration.MigrationScriptProvider
 import com.phatjam98.elasticprotos.migration.ReconcileStats
+import com.phatjam98.elasticprotos.migration.ReconcileStrategy
 import com.phatjam98.elasticprotos.migration.RollbackMode
 import com.phatjam98.elasticprotos.migration.StaticSettingsPolicy
 import com.phatjam98.elasticprotos.migration.RemovedFieldPolicy
@@ -986,7 +987,7 @@ abstract class EngineIntegrationSpec extends Specification {
     result.outcomes()[0].retainedIndices() == [v1.name()]
     result.outcomes()[0].sourceCount() == 6L
     result.outcomes()[0].destCount() == 6L
-    result.outcomes()[0].reconcile() == new ReconcileStats(0, 0, 0, 0)
+    result.outcomes()[0].reconcile() == new ReconcileStats(0, 0, 0, 0, ReconcileStrategy.SEQ_NO_RANGE, false)
     engine.getAliases(v1.alias()).keySet() == [v2.name()] as Set
     engine.getMappings(v2.name())._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version', 'static_settings'] as Set
     ids(engine.search([v1.alias()], [query: [term: ['body.keyword':
@@ -1174,6 +1175,75 @@ abstract class EngineIntegrationSpec extends Specification {
     then:
     written != null
     count(alias) == 12
+  }
+
+  def "on a multi-shard index the reconcile reads only the sequence number range, and sweeps only after deletes"() {
+    given: 'a three-shard documents alias under -sq with the sample set and thirty more documents'
+    IndexNamingStrategy sqNaming = IndexNamingStrategy.prefixed(prefix + '-sq')
+    def shards = { MappingOverrides.Builder b -> b.setting('number_of_shards', 3).build() }
+    def plain = ProtoMapper.builder().naming(sqNaming).overrides(shards(MappingOverrides.builder())).build()
+    def titleKeyword = ProtoMapper.builder().naming(sqNaming).overrides(shards(MappingOverrides.builder()
+        .forField(Document.descriptor, 'title') { it.setType(EsType.KEYWORD) })).build()
+    def bodyKeyword = ProtoMapper.builder().naming(sqNaming).overrides(shards(MappingOverrides.builder()
+        .forField(Document.descriptor, 'title') { it.setType(EsType.KEYWORD) }
+        .forField(Document.descriptor, 'body') { it.setKeywordSubfield(Bool3.TRUE) })).build()
+    IndexDefinition v1 = plain.map(Document)
+    IndexDefinition v2 = titleKeyword.map(Document)
+    IndexDefinition v3 = bodyKeyword.map(Document)
+    String alias = v1.alias()
+    indexSampleDocuments(plain)
+    30.times { write(alias, "sq-${it}", 'before') }
+    engine.refresh(alias)
+    Map<String, String> expected = titles(v1.name())
+    Map<Phase, Closure> on = [:]
+    def migrator = { ProtoMapper with ->
+      IndexMigrator.builder().engine(engine).mapper(with).options(FAST.withBackfill(false))
+          .listener({ a, phase -> on[phase]?.call() } as MigrationListener).build()
+    }
+
+    when: 'updates (one document three times), creates, and a create-then-delete after the catch-up, more writes after the swap'
+    on[Phase.COPIED] = { write(alias, 'sq-0', 'copy window') }
+    on[Phase.CAUGHT_UP] = {
+      write(alias, 'sq-1', 'a'); write(alias, 'sq-1', 'b'); write(alias, 'sq-1', 'c')
+      write(alias, 'sq-new-1', 'created'); write(alias, 'sq-tmp', 'temp'); engine.delete(alias, 'sq-tmp')
+    }
+    on[Phase.SWAPPED] = { write(alias, 'sq-2', 'after swap'); engine.delete(alias, 'sq-3'); write(alias, 'sq-new-2', 'after swap') }
+    def first = migrator(titleKeyword).bootstrap(Document).outcomes()[0]
+    expected += ['sq-0': 'copy window', 'sq-1': 'c', 'sq-new-1': 'created', 'sq-2': 'after swap', 'sq-new-2': 'after swap']
+    expected.remove('sq-3')
+
+    then: 'the old index has three shards, the state is exact, and no sweep was needed'
+    first.ok()
+    first.index() == v2.name()
+    engine.getSettings(v1.name()).index.number_of_shards == '3'
+    titles(v2.name()) == expected
+    first.reconcile() == new ReconcileStats(2, 0, 0, 0, ReconcileStrategy.SEQ_NO_RANGE, false)
+
+    when: 'the next reindex sees deletes in the old index after the copy and after the catch-up'
+    on.clear()
+    on[Phase.COPIED] = { engine.delete(alias, 'sq-4') }
+    on[Phase.CAUGHT_UP] = { engine.delete(alias, 'sq-5'); write(alias, 'sq-6', 'late') }
+    on[Phase.SWAPPED] = { write(alias, 'sq-5', 'reborn after swap'); engine.delete(alias, 'sq-7') }
+    def second = migrator(bodyKeyword).bootstrap(Document).outcomes()[0]
+    expected += ['sq-5': 'reborn after swap', 'sq-6': 'late']
+    expected.remove('sq-4')
+    expected.remove('sq-7')
+
+    then: 'the sweep ran: sq-4 is gone, sq-5, written again through the alias after the swap, is kept'
+    second.ok()
+    second.index() == v3.name()
+    titles(v3.name()) == expected
+    second.reconcile() == new ReconcileStats(1, 1, 1, 0, ReconcileStrategy.SEQ_NO_RANGE, true)
+    engine.getMappings(v3.name())._meta.elastic_protos.pending == null
+
+    when: 'the same reindex with fullReconcile scans everything and reaches the same state'
+    def third = IndexMigrator.builder().engine(engine).mapper(plain).options(FAST.withFullReconcile(true)).build()
+        .bootstrap(Document).outcomes()[0]
+
+    then:
+    third.ok()
+    third.reconcile() == new ReconcileStats(0, 0, 0, 0, ReconcileStrategy.FULL_SCAN, true)
+    titles(third.index()) == expected
   }
 
   // ------------------------------------------------------------------ settings

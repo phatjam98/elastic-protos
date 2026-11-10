@@ -123,6 +123,38 @@ class JsonRestEngineSpec extends Specification {
     engine.seqNoCheckpoint('docs') == -1
   }
 
+  def "globalCheckpoint is the lowest primary global_checkpoint, once every primary reported"() {
+    given:
+    def copy = { boolean primary, Object gcp -> [routing: [primary: primary], seq_no: [max_seq_no: 99, global_checkpoint: gcp]] }
+    http.enqueue(200, [indices: [docs: [shards: ['0': [copy(true, 7), copy(false, 2)], '1': [copy(true, 4)]]]]])
+        .enqueue(200, [docs: [settings: [index: [number_of_shards: '2']]]])
+    http.enqueue(200, [indices: [docs: [shards: ['0': [copy(true, -1)]]]]])
+        .enqueue(200, [docs: [settings: [index: [number_of_shards: '1']]]])
+    http.enqueue(200, [indices: [docs: [shards: ['0': [copy(true, 7)]]]]])
+        .enqueue(200, [docs: [settings: [index: [number_of_shards: '2']]]])
+    http.enqueue(200, [indices: [docs: [shards: ['0': [copy(true, null)]]]]])
+        .enqueue(200, [docs: [settings: [index: [number_of_shards: '1']]]])
+    http.enqueue(200, [indices: [docs: [shards: ['0': [copy(false, 3)]]]]])
+        .enqueue(200, [docs: [settings: [index: [number_of_shards: '1']]]])
+    http.enqueue(200, [indices: [docs: [shards: ['0': [copy(true, 3)]]]]])
+        .enqueue(200, [docs: [settings: [index: [number_of_shards: 'many']]]])
+    http.enqueue(200, [indices: [docs: [shards: ['0': [copy(true, 3)]]]]])
+        .enqueue(200, [docs: [settings: [index: [:]]]])
+
+    expect: 'replicas are ignored; an empty shard is -1'
+    engine.globalCheckpoint('docs') == OptionalLong.of(4)
+    http.requests[0].path == '/docs/_stats'
+    http.requests[0].params == [level: 'shards']
+    engine.globalCheckpoint('docs') == OptionalLong.of(-1)
+
+    and: 'a missing primary, a missing value, no primary or an unreadable shard count is unknown'
+    engine.globalCheckpoint('docs') == OptionalLong.empty()
+    engine.globalCheckpoint('docs') == OptionalLong.empty()
+    engine.globalCheckpoint('docs') == OptionalLong.empty()
+    engine.globalCheckpoint('docs') == OptionalLong.empty()
+    engine.globalCheckpoint('docs') == OptionalLong.empty()
+  }
+
   def "flattened fields are spelled flat_object on OpenSearch and read back as flattened"() {
     given:
     def mappings = [_meta: [type: 'flattened'], properties: [meta: [type: 'flattened'], doc: [properties: [inner: [type: 'flattened'], type: [type: 'keyword']]]]]

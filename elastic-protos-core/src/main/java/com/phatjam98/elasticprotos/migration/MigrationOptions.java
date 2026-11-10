@@ -53,6 +53,10 @@ import java.util.TreeSet;
  *       reindexed; default true
  *   <li>{@code degradedReconcile}: what a zero-downtime reindex does after the swap when the
  *       snapshot of the new index is lost; default {@link DegradedReconcile#REPORT}
+ *   <li>{@code fullReconcile}: whether a zero-downtime reindex always compares every document of
+ *       the old index and sweeps every document of the new one after the swap, instead of reading
+ *       only the documents written after its global checkpoint ({@link
+ *       ReconcileStrategy#SEQ_NO_RANGE}) where that is sound; default false
  *   <li>{@code lock}: whether {@link IndexMigrator#apply(MigrationPlan)} and {@code rollback} take
  *       a per-alias lock in the lock index ({@link
  *       com.phatjam98.elasticprotos.mapping.IndexNamingStrategy#lockIndex()}) and re-plan the item
@@ -99,6 +103,7 @@ public final class MigrationOptions {
   private final StaticSettingsPolicy staticSettings;
   private final Set<String> extraDynamicSettings;
   private final DegradedReconcile degradedReconcile;
+  private final boolean fullReconcile;
 
   private MigrationOptions(Builder builder) {
     Objects.requireNonNull(builder.failure, "failure");
@@ -143,6 +148,7 @@ public final class MigrationOptions {
     this.swapGrace = builder.swapGrace;
     this.backfill = builder.backfill;
     this.degradedReconcile = builder.degradedReconcile;
+    this.fullReconcile = builder.fullReconcile;
     this.lock = builder.lock;
     this.lockWait = builder.lockWait;
     this.lockTtl = builder.lockTtl;
@@ -239,6 +245,14 @@ public final class MigrationOptions {
     return degradedReconcile;
   }
 
+  /**
+   * Returns whether a zero-downtime reindex always reconciles with a full scan ({@link
+   * ReconcileStrategy#FULL_SCAN}).
+   */
+  public boolean fullReconcile() {
+    return fullReconcile;
+  }
+
   /** Returns whether apply and rollback take a per-alias lock. */
   public boolean lock() {
     return lock;
@@ -329,6 +343,11 @@ public final class MigrationOptions {
     return toBuilder().degradedReconcile(value).build();
   }
 
+  /** Returns a copy that always reconciles with a full scan, or where that is not needed. */
+  public MigrationOptions withFullReconcile(boolean value) {
+    return toBuilder().fullReconcile(value).build();
+  }
+
   /** Returns a copy that takes, or does not take, the per-alias lock. */
   public MigrationOptions withLock(boolean value) {
     return toBuilder().lock(value).build();
@@ -370,6 +389,7 @@ public final class MigrationOptions {
         && swapGrace.equals(that.swapGrace)
         && backfill == that.backfill
         && degradedReconcile == that.degradedReconcile
+        && fullReconcile == that.fullReconcile
         && lock == that.lock
         && lockWait.equals(that.lockWait)
         && lockTtl.equals(that.lockTtl)
@@ -381,7 +401,8 @@ public final class MigrationOptions {
   public int hashCode() {
     return Objects.hash(failure, allowReindex, deleteOldAfter, removedFields, defaultShards,
         replicas, reindexTimeout, dryRun, clearStaleWriteBlock, reindexMode, swapGrace, backfill,
-        degradedReconcile, lock, lockWait, lockTtl, staticSettings, extraDynamicSettings);
+        degradedReconcile, fullReconcile, lock, lockWait, lockTtl, staticSettings,
+        extraDynamicSettings);
   }
 
   @Override
@@ -399,6 +420,7 @@ public final class MigrationOptions {
         + ", swapGrace=" + swapGrace
         + ", backfill=" + backfill
         + ", degradedReconcile=" + degradedReconcile
+        + ", fullReconcile=" + fullReconcile
         + ", lock=" + lock
         + ", lockWait=" + lockWait
         + ", lockTtl=" + lockTtl
@@ -427,6 +449,7 @@ public final class MigrationOptions {
     private StaticSettingsPolicy staticSettings = StaticSettingsPolicy.WARN;
     private Set<String> extraDynamicSettings = Set.of();
     private DegradedReconcile degradedReconcile = DegradedReconcile.REPORT;
+    private boolean fullReconcile = false;
 
     private Builder() {}
 
@@ -444,6 +467,7 @@ public final class MigrationOptions {
       this.swapGrace = options.swapGrace;
       this.backfill = options.backfill;
       this.degradedReconcile = options.degradedReconcile;
+      this.fullReconcile = options.fullReconcile;
       this.lock = options.lock;
       this.lockWait = options.lockWait;
       this.lockTtl = options.lockTtl;
@@ -529,6 +553,15 @@ public final class MigrationOptions {
     /** Sets what a reindex does when the snapshot of the new index is lost; default REPORT. */
     public Builder degradedReconcile(DegradedReconcile value) {
       this.degradedReconcile = value;
+      return this;
+    }
+
+    /**
+     * Sets whether a zero-downtime reindex always reconciles with a full scan instead of a
+     * sequence number range where that is sound; default false.
+     */
+    public Builder fullReconcile(boolean value) {
+      this.fullReconcile = value;
       return this;
     }
 

@@ -28,6 +28,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
@@ -147,6 +148,8 @@ public class InMemorySearchEngine implements SearchEngine {
   private boolean rejectTypeChanges = true;
   private long generatedIds;
   private long seqNo = -1;
+  private boolean globalCheckpoints = true;
+  private long globalCheckpointLag;
   private Consumer<ReindexRequest> duringReindex = request -> {};
   private Runnable afterAliasUpdate = () -> {};
   private Consumer<UpdateByQueryRequest> duringUpdateByQuery = request -> {};
@@ -251,6 +254,34 @@ public class InMemorySearchEngine implements SearchEngine {
     record("seqNoCheckpoint", index);
     concrete(index);
     return seqNo;
+  }
+
+  /**
+   * Returns the global sequence number counter less the {@link #globalCheckpointLag}, or empty
+   * after {@link #globalCheckpoints(boolean) globalCheckpoints(false)}. Every operation is
+   * processed at once, so every document written at or below it is visible.
+   */
+  @Override
+  public OptionalLong globalCheckpoint(String index) {
+    record("globalCheckpoint", index);
+    concrete(index);
+    return globalCheckpoints ? OptionalLong.of(seqNo - globalCheckpointLag) : OptionalLong.empty();
+  }
+
+  /** Sets whether {@link #globalCheckpoint} reports a checkpoint (default) or none. */
+  public InMemorySearchEngine globalCheckpoints(boolean value) {
+    this.globalCheckpoints = value;
+    return this;
+  }
+
+  /**
+   * Lowers what {@link #globalCheckpoint} reports by {@code lag} sequence numbers, the way the
+   * lowest checkpoint over several shards lies below documents of the other shards: documents just
+   * below the counter then count as written after it, which is safe.
+   */
+  public InMemorySearchEngine globalCheckpointLag(long lag) {
+    this.globalCheckpointLag = lag;
+    return this;
   }
 
   /** Returns every concrete index with its aliases, sorted by name. */

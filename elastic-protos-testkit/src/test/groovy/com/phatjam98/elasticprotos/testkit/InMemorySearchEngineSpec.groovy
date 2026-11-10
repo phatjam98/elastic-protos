@@ -529,6 +529,19 @@ class InMemorySearchEngineSpec extends Specification {
     hit.primaryTerm() == 1L
   }
 
+  def "the global checkpoint is the sequence number counter, lowered by a lag, or unknown"() {
+    given:
+    engine.createIndex('a-v1', [:], MAPPINGS, [] as Set)
+    3.times { engine.index('a-v1', "${it}", [title: 'x'], IndexOptions.defaults()) }
+
+    expect:
+    engine.globalCheckpoint('a-v1') == OptionalLong.of(2)
+    engine.seqNoCheckpoint('a-v1') == 2L
+    engine.globalCheckpointLag(2).globalCheckpoint('a-v1') == OptionalLong.of(0)
+    engine.globalCheckpoints(false).globalCheckpoint('a-v1') == OptionalLong.empty()
+    engine.log().contains('globalCheckpoint a-v1')
+  }
+
   def "a conditional index or delete succeeds only on the current sequence number and primary term"() {
     given:
     engine.createIndex('a-v1', [:], MAPPINGS, ['a'] as Set)

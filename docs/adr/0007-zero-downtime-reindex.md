@@ -90,3 +90,55 @@ operator asks it to create missing documents, which would bring back deletes mad
 - `IndexPlan` gains `resume`, `MigrationResult.Outcome` gains `reconcile`, `rollback` returns an
   `Outcome`, and `IndexMigrator.Builder.listener` reports phases (an exception from the listener
   simulates a crash in tests).
+
+## Addendum (2026-11-10): reconcile by sequence number range
+
+The cold pass of step 7 and the sweep of step 8 each read every document, so the stale-read window
+after the swap grew with the index, not with the writes made during the copy. They are now skipped
+where that is provably sound (`ReconcileStrategy.SEQ_NO_RANGE`, recorded in `ReconcileStats`).
+
+- **Checkpoint.** The prepare step records the global checkpoint of the old index (the lowest
+  `seq_no.global_checkpoint` over its primaries, `SearchEngine.globalCheckpoint`) instead of the
+  lowest `max_seq_no` (still the fallback for an engine without it). Every operation at or below a
+  shard's global checkpoint has been processed by every in-sync copy, and no later operation gets a
+  sequence number at or below it, even after a primary fails over (the new primary holds every
+  operation up to the global checkpoint and continues above its own `max_seq_no`). `max_seq_no`
+  promises neither: a number can be taken before its operation is in Lucene, and above the global
+  checkpoint a failover can roll operations back and hand their numbers to new writes. The
+  checkpoint is the minimum over the shards, so for the other shards it is a lower bound and the
+  hot pass reads a superset.
+- **Skipping the cold pass.** The copy refreshes the old index after the checkpoint is read, so a
+  document at or below it is visible to the first copy and is copied with its version. When the
+  run created the new index itself (no reused leftover), no script runs, and it is not a rollback,
+  nothing else writes the new index before the snapshot, so every such document is in the snapshot
+  unchanged. The hot pass (`range` on `_seq_no` above the checkpoint) is then the whole reconcile.
+  The marker records this as `pending.seq_no_range: true`; a marker without it (written by
+  1.0.0-rc.3 or earlier, or by a run that did not qualify) resumes with the full scan, as does
+  `MigrationOptions.fullReconcile`. OpenSearch segment replication is excluded, because a replica
+  can serve a search from older segments after a refresh.
+- **Skipping the sweep.** A delete leaves nothing a range query can find, so the sweep is decided
+  by counting. With S the snapshot, A the frozen old index and H its documents above the
+  checkpoint, every document of A outside H is in S (above), so `|S \ A| = |S| - |A| + |H \ S|`,
+  where `|H \ S|` falls out of the hot pass. Both counts are exact (`track_total_hits`) on a point
+  in time and on a write-blocked, refreshed index. Zero ghosts skips the sweep; a positive count
+  runs it; a negative one can only come from a broken premise and runs the cold pass and the sweep,
+  with a warning.
+
+Rejected:
+
+- **Per-shard sequence number accounting** (per shard, `max_seq_no - checkpoint` equal to the
+  number of live documents above the checkpoint proves that no operation in between was a delete).
+  It is sound, since every other consumer of a sequence number only makes the numbers differ, but
+  it would run the sweep far too often. Observed on ES 8.19.23 and 9.5.5 and OpenSearch 2.19.7 and
+  3.9.0: a no-op `_update`, a script `noop`, a create or `if_seq_no` conflict (409), a mapping
+  failure (alone or in a bulk), a refresh and a flush consume no sequence number; a full-document
+  write of an unchanged document, an `_update` with `detect_noop: false`, and a delete of a missing
+  id (`result: not_found`) each consume one. Any document written twice after the checkpoint, the
+  norm on a busy index, would force the sweep. It also needs per-shard counts
+  (`preference=_shards:<n>`) and per-shard checkpoints in the marker. Counting ghosts directly needs
+  neither and only fires on an actual ghost.
+- **A per-shard hot pass** (`preference=_shards:<n>`, sorted on `_seq_no`, against per-shard
+  checkpoints): exact rather than a superset on multi-shard indices, but more requests and a wider
+  SPI for a saving that is small on evenly routed indices.
+- **Counting deletes** with `indexing.delete_total` from `_stats`: a per-copy counter that resets
+  when a shard copy restarts or relocates, so a difference of zero proves nothing.

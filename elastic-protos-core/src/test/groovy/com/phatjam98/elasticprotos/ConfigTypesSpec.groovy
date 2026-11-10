@@ -341,7 +341,7 @@ class ConfigTypesSpec extends Specification {
         .removedFields(RemovedFieldPolicy.REINDEX).defaultShards(3).replicas(ReplicaPolicy.fixed(2))
         .reindexTimeout(Duration.ofSeconds(90)).dryRun(true).clearStaleWriteBlock(false)
         .reindexMode(ReindexMode.BLOCKING).swapGrace(Duration.ZERO).backfill(false)
-        .degradedReconcile(DegradedReconcile.CREATE_MISSING)
+        .degradedReconcile(DegradedReconcile.CREATE_MISSING).fullReconcile(true)
         .lock(false).lockWait(Duration.ZERO).lockTtl(Duration.ofSeconds(30))
         .staticSettings(StaticSettingsPolicy.REINDEX).extraDynamicSettings(['codec'] as Set).build()
     def copied = MigrationOptions.standard()
@@ -350,7 +350,7 @@ class ConfigTypesSpec extends Specification {
         .withReplicas(ReplicaPolicy.fixed(2)).withReindexTimeout(Duration.ofSeconds(90))
         .withDryRun(true).withClearStaleWriteBlock(false)
         .withReindexMode(ReindexMode.BLOCKING).withSwapGrace(Duration.ZERO).withBackfill(false)
-        .withDegradedReconcile(DegradedReconcile.CREATE_MISSING)
+        .withDegradedReconcile(DegradedReconcile.CREATE_MISSING).withFullReconcile(true)
         .withLock(false).withLockWait(Duration.ZERO).withLockTtl(Duration.ofSeconds(30))
         .withStaticSettings(StaticSettingsPolicy.REINDEX).withExtraDynamicSettings(['codec'] as Set)
 
@@ -364,7 +364,8 @@ class ConfigTypesSpec extends Specification {
     built.toString() == 'MigrationOptions[failure=CONTINUE, allowReindex=false, deleteOldAfter=true,' +
         ' removedFields=REINDEX, defaultShards=3, replicas=ReplicaPolicy[mode=FIXED, count=2],' +
         ' reindexTimeout=PT1M30S, dryRun=true, clearStaleWriteBlock=false, reindexMode=BLOCKING,' +
-        ' swapGrace=PT0S, backfill=false, degradedReconcile=CREATE_MISSING, lock=false, lockWait=PT0S,' +
+        ' swapGrace=PT0S, backfill=false, degradedReconcile=CREATE_MISSING, fullReconcile=true, lock=false,' +
+        ' lockWait=PT0S,' +
         ' lockTtl=PT30S, staticSettings=REINDEX, extraDynamicSettings=[codec]]'
     MigrationOptions.standard().staticSettings() == StaticSettingsPolicy.WARN
     MigrationOptions.standard().extraDynamicSettings().isEmpty()
@@ -372,6 +373,7 @@ class ConfigTypesSpec extends Specification {
     MigrationOptions.standard().lockWait() == Duration.ofMinutes(10)
     MigrationOptions.standard().lockTtl() == Duration.ofMinutes(2)
     MigrationOptions.standard().degradedReconcile() == DegradedReconcile.REPORT
+    !MigrationOptions.standard().fullReconcile()
     MigrationOptions.standard().reindexMode() == ReindexMode.ZERO_DOWNTIME
     MigrationOptions.standard().swapGrace() == Duration.ofSeconds(5)
     MigrationOptions.standard().backfill()
@@ -398,6 +400,7 @@ class ConfigTypesSpec extends Specification {
     'swapGrace'            | { it.withSwapGrace(Duration.ofSeconds(1)) }
     'backfill'             | { it.withBackfill(false) }
     'degradedReconcile'    | { it.withDegradedReconcile(DegradedReconcile.CREATE_MISSING) }
+    'fullReconcile'        | { it.withFullReconcile(true) }
     'lock'                 | { it.withLock(false) }
     'lockWait'             | { it.withLockWait(Duration.ZERO) }
     'lockTtl'              | { it.withLockTtl(Duration.ofMinutes(1)) }

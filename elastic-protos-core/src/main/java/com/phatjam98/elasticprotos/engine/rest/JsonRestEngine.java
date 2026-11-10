@@ -27,6 +27,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
@@ -415,6 +416,45 @@ public final class JsonRestEngine implements SearchEngine {
       }
     }
     return checkpoint == Long.MAX_VALUE ? -1 : checkpoint;
+  }
+
+  /**
+   * Reads {@code GET /<index>/_stats?level=shards} and returns the lowest {@code
+   * seq_no.global_checkpoint} over the primaries. The primary's global checkpoint is the
+   * authoritative one (replicas learn it later). Empty when a primary is missing from the stats,
+   * compared with {@code index.number_of_shards}, or reports no checkpoint.
+   */
+  @Override
+  public OptionalLong globalCheckpoint(String index) {
+    Map<String, Object> response = object(require(
+        getRequest("/" + index + "/_stats", Map.of("level", "shards"))));
+    Map<String, Object> shards = map(map(map(response.get("indices")).get(index)).get("shards"));
+    Object declared = map(map(getSettings(index)).get("index")).get("number_of_shards");
+    long expected;
+    try {
+      expected = declared == null ? -1 : Long.parseLong(declared.toString());
+    } catch (NumberFormatException e) {
+      return OptionalLong.empty();
+    }
+    long checkpoint = Long.MAX_VALUE;
+    long primaries = 0;
+    for (Object copies : shards.values()) {
+      for (Map<String, Object> copy : list(copies)) {
+        if (!Boolean.TRUE.equals(map(copy.get("routing")).get("primary"))) {
+          continue;
+        }
+        Object global = map(copy.get("seq_no")).get("global_checkpoint");
+        if (!(global instanceof Number)) {
+          return OptionalLong.empty();
+        }
+        primaries++;
+        checkpoint = Math.min(checkpoint, ((Number) global).longValue());
+      }
+    }
+    if (primaries == 0 || primaries != expected) {
+      return OptionalLong.empty();
+    }
+    return OptionalLong.of(checkpoint);
   }
 
   @Override
