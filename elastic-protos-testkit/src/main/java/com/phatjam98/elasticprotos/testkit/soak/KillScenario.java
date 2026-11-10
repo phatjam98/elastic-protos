@@ -190,8 +190,12 @@ final class KillScenario {
     AtomicLong freedAt = new AtomicLong(-1);
     AtomicLong takenAt = new AtomicLong(-1);
     AtomicReference<String> taker = new AtomicReference<>();
+    // stopped by a flag: an interrupt during the HTTP call can surface as a RuntimeException and
+    // be swallowed with the interrupt status, which would keep the poller (and the join) alive
+    java.util.concurrent.atomic.AtomicBoolean polling =
+        new java.util.concurrent.atomic.AtomicBoolean(true);
     Thread poller = new Thread(() -> {
-      while (!Thread.currentThread().isInterrupted()) {
+      while (polling.get()) {
         try {
           Optional<Hit> lock = Cluster.lock(engine, prefix, alias);
           String now = lock.map(h -> String.valueOf(h.source().get("holder"))).orElse(null);
@@ -237,8 +241,8 @@ final class KillScenario {
     long resumeStarted = System.currentTimeMillis();
     MigrationResult result = migrator.apply(plan);
     long resumeMs = System.currentTimeMillis() - resumeStarted;
-    poller.interrupt();
-    poller.join();
+    polling.set(false);
+    poller.join(10_000);
     MigrationResult.Outcome outcome = result.outcomes().get(0);
     out.println("  resume " + item.action() + " -> " + outcome.status() + " in " + resumeMs
         + " ms");
