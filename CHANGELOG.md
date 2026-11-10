@@ -17,8 +17,8 @@ query DSL, including full-text search, nested queries, sorting, point-in-time pa
 and highlighting, into search requests. It ships adapters for Elasticsearch 8.x/9.x and OpenSearch
 2.x/3.x on the official low-level REST clients, an optional Micronaut 4 module and a BOM, and
 requires Java 17. It is not API-compatible with the pre-1.0 `com.phatjam98.elasticsearch.*`
-packages, and the private geobuf dependency is gone. The `1.0.0-rc.1` and `1.0.0-rc.2`
-pre-releases precede it.
+packages, and the private geobuf dependency is gone. The `1.0.0-rc.1`, `1.0.0-rc.2` and
+`1.0.0-rc.3` pre-releases precede it.
 
 ### Since 1.0.0-rc.2
 

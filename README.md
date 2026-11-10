@@ -107,7 +107,10 @@ All modules share one version (lockstep). Import the BOM, then add the core and 
 | `com.phatjam98:elastic-protos-opensearch` | Adapter for OpenSearch 2.x and 3.x |
 | `com.phatjam98:elastic-protos-micronaut` | Optional Micronaut 4 integration |
 
-`1.0.0-rc.3` is the current pre-release: the coordinates and option names are final, and `1.0.0` follows once the release candidate has been exercised. See [Maven Central](https://central.sonatype.com/artifact/com.phatjam98/elastic-protos-core) for the latest version.
+`1.0.0-rc.3` is the current pre-release. The Maven coordinates and the proto option names will not
+change before `1.0.0`, which follows once the release candidate has been exercised. See
+[Maven Central](https://central.sonatype.com/artifact/com.phatjam98/elastic-protos-core) for the
+latest version.
 
 ### Gradle
 
