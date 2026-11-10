@@ -11,7 +11,8 @@ final class Summary {
 
   static void printLive(PrintStream out, Map<String, Object> report) {
     out.println("-- live " + report.get("mode") + ": migration " + report.get("migrationMs")
-        + " ms, outcome " + Cluster.map(report.get("outcome")).get("status"));
+        + " ms, outcome " + Cluster.map(report.get("outcome")).get("status")
+        + reconcile(report.get("outcome")));
     printLoad(out, report);
   }
 
@@ -19,11 +20,19 @@ final class Summary {
     Map<String, Object> lock = Cluster.map(report.get("lock"));
     out.println("-- kill at " + report.get("killAt") + ": resume "
         + Cluster.map(report.get("resumePlan")).get("action") + " -> "
-        + Cluster.map(report.get("resumeOutcome")).get("status") + " in " + report.get("resumeMs")
+        + Cluster.map(report.get("resumeOutcome")).get("status")
+        + reconcile(report.get("resumeOutcome")) + " in " + report.get("resumeMs")
         + " ms; lock taken over " + lock.get("takenOverAfterKillMs") + " ms after the kill"
         + " (bound " + lock.get("takeoverBoundMs") + " ms), left to expire: "
         + lock.get("staleLockLeftToExpire"));
     printLoad(out, report);
+  }
+
+  /** Returns the reconcile strategy and whether it swept, when the outcome reports them. */
+  private static String reconcile(Object outcome) {
+    Map<String, Object> reconcile = Cluster.map(Cluster.map(outcome).get("reconcile"));
+    return reconcile.get("strategy") == null ? ""
+        : " (" + reconcile.get("strategy") + ", swept " + reconcile.get("swept") + ")";
   }
 
   private static void printLoad(PrintStream out, Map<String, Object> report) {

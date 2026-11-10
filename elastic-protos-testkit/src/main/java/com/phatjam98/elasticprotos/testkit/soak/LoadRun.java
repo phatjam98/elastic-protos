@@ -75,8 +75,15 @@ final class LoadRun {
     return new Timeline(oldIndex, preparedAt < 0 ? Long.MAX_VALUE : preparedAt,
         copiedAt < 0 ? Long.MAX_VALUE : copiedAt, caughtUpAt < 0 ? Long.MAX_VALUE : caughtUpAt,
         snapshotAt < 0 ? swappedAt : snapshotAt, swappedAt,
-        bound < 0 ? Long.MAX_VALUE : bound, sweptAt < 0 ? Long.MAX_VALUE : sweptAt, true);
+        bound < 0 ? Long.MAX_VALUE : bound, sweptAt < 0 ? Long.MAX_VALUE : sweptAt, true)
+        .withReplayResidual(replayResidual);
   }
+
+  /**
+   * The ids a resumed reconcile may create a second time as the documented replay residual; set by
+   * the kill scenario from the marker at the kill, none otherwise.
+   */
+  java.util.function.Predicate<String> replayResidual = id -> false;
 
   /**
    * Compares the alias with the log after the writers stopped and summarises writes, failures,

@@ -414,6 +414,54 @@ class LogComparisonSpec extends Specification {
         plainBefore)) == 'VIOLATION'
   }
 
+  def 'a second creation is the replay residual only when the marker puts the id in it'() {
+    given: 'created late, created by the killed reconcile (the delete found it), created again'
+    def created = [id: 'x', t: 'late']
+    def entries = [onOld(OpType.CREATE, created, 2500),
+                   onNew(OpType.DELETE, null, 4000, true)]
+    def accepting = ZD.withReplayResidual({ it == 'x' } as java.util.function.Predicate)
+
+    expect:
+    compare([x: entries], [x: created], accepting).anomalies()[Anomaly.RESURRECTED_BY_RESUME_REPLAY] == 1
+    compare([x: entries], [x: created]).violations()[Violation.EXTRA] == 1
+
+    and: 'the residual does not stretch past the reconcile bound'
+    def late = [onOld(OpType.CREATE, created, 2500), onNew(OpType.DELETE, null, 6500, true)]
+    compare([x: late], [x: created], accepting).violations()[Violation.EXTRA] == 1
+
+    and: 'nor to a document the old index created before the catch-up'
+    def early = [onOld(OpType.CREATE, created, 1500), onNew(OpType.DELETE, null, 4000, true)]
+    compare([x: early], [x: created], accepting).violations()[Violation.EXTRA] == 1
+
+    and: 'reads and observations of it are classified the same way'
+    TransientChecks.read('x', Mode.ZERO_DOWNTIME, accepting, 2950, 8000, 8010, entries, created) ==
+        'RESURRECTED_BY_RESUME_REPLAY'
+    TransientChecks.read('x', Mode.ZERO_DOWNTIME, ZD, 2950, 8000, 8010, entries, created) ==
+        'VIOLATION'
+    TransientChecks.observation(Mode.ZERO_DOWNTIME, accepting, 2950,
+        new Writers.Observation('x', 'createFoundExisting', 'P', 8995, 9000, entries)) ==
+        'RESURRECTED_BY_RESUME_REPLAY'
+  }
+
+  def 'the replay residual is decided from the marker at the kill: #why'() {
+    expect:
+    ReplayResidual.decide(marker, records, 'x', seqNo, { long base -> rank as long } as java.util.function.LongUnaryOperator)
+        .residual == residual
+
+    where:
+    why                                        | records | marker                                    | seqNo | rank | residual
+    'after the hot cursor, within four pages'  | true    | [checkpoint: 10, progress: [done: [], cursors: [hot: [seq_no: 100, ids: ['a']]]]] | 150 | 50 | true
+    'at the cursor, not among its ids'         | true    | [checkpoint: 10, progress: [done: [], cursors: [hot: [seq_no: 100, ids: ['a']]]]] | 100 | 1 | true
+    'at the cursor and among its ids'          | true    | [checkpoint: 10, progress: [done: [], cursors: [hot: [seq_no: 100, ids: ['x']]]]] | 100 | 1 | false
+    'before the cursor'                        | true    | [checkpoint: 10, progress: [done: [], cursors: [hot: [seq_no: 100, ids: []]]]] | 99 | 0 | false
+    'more than four pages after the cursor'    | true    | [checkpoint: 10, progress: [done: [], cursors: [hot: [seq_no: 100, ids: []]]]] | 9000 | 4001 | false
+    'no record yet, within four pages'         | true    | [checkpoint: 10]                          | 50    | 40   | true
+    'the hot pass recorded done'               | true    | [checkpoint: 10, progress: [done: ['hot'], cursors: [:]]] | 150 | 1 | false
+    'a library that records no progress'       | false   | [checkpoint: 10]                          | 50    | 40   | false
+    'not in the old index'                     | true    | [checkpoint: 10]                          | null  | 0    | false
+    'no marker at the kill'                    | true    | [:]                                       | 50    | 0    | false
+  }
+
   static Writers.Observation observed(String kind, long at, List<Entry> before) {
     new Writers.Observation('x', kind, 'P', at - 5, at, before)
   }

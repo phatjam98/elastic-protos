@@ -41,6 +41,25 @@ public final class TransientChecks {
    */
   public static String read(Mode mode, Timeline timeline, long swapNotBefore, long started,
       long at, List<Entry> history, Map<String, Object> actual) {
+    return read(null, mode, timeline, swapNotBefore, started, at, history, actual);
+  }
+
+  /**
+   * Classifies a stale read of a known id, which lets a documented replay residual of a resumed
+   * reconcile explain it ({@link LogComparison.Anomaly#RESURRECTED_BY_RESUME_REPLAY}).
+   *
+   * @param id the document id
+   * @param mode the migration mode
+   * @param timeline the migration timeline
+   * @param swapNotBefore as for the other overload
+   * @param started when the read was sent
+   * @param at when it returned
+   * @param history the acknowledged writes of the id when it was read
+   * @param actual what the read returned, or null
+   * @return the documented class, or {@link #VIOLATION}
+   */
+  public static String read(String id, Mode mode, Timeline timeline, long swapNotBefore,
+      long started, long at, List<Entry> history, Map<String, Object> actual) {
     if (mode != Mode.ZERO_DOWNTIME || swapNotBefore < 0 || at < swapNotBefore) {
       return VIOLATION;
     }
@@ -51,7 +70,7 @@ public final class TransientChecks {
     if (started < timeline.reconcileBound()) {
       return "RECONCILE_WINDOW";
     }
-    Anomaly anomaly = LogComparison.explain(history, actual, timeline);
+    Anomaly anomaly = LogComparison.explain(id, history, actual, timeline);
     return anomaly == null ? VIOLATION : anomaly.name();
   }
 
@@ -79,7 +98,8 @@ public final class TransientChecks {
         && LogComparison.ghostPossible(observation.before(), timeline)) {
       return "GHOST_BEFORE_SWEEP";
     }
-    return LogComparison.resurrectedShape(observation.before(), timeline)
-        ? Anomaly.RESURRECTED_AFTER_DELETE.name() : VIOLATION;
+    Anomaly shape = LogComparison.resurrectionShape(observation.id(), observation.before(),
+        timeline);
+    return shape == null ? VIOLATION : shape.name();
   }
 }

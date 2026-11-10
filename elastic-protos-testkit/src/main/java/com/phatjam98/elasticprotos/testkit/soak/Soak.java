@@ -150,12 +150,32 @@ public final class Soak {
       reconcile.put("superseded", outcome.reconcile().superseded());
       reconcile.put("ghostsDeleted", outcome.reconcile().ghostsDeleted());
       reconcile.put("staleSkipped", outcome.reconcile().staleSkipped());
+      // later libraries add the strategy and whether the sweep ran; read them from the string
+      // form so the harness compiles against libraries with and without those components
+      String text = String.valueOf(outcome.reconcile());
+      reconcile.put("strategy", component(text, "strategy"));
+      String swept = component(text, "swept");
+      reconcile.put("swept", swept == null ? null : Boolean.valueOf(swept));
+      reconcile.put("text", text);
       map.put("reconcile", reconcile);
     }
     map.put("warnings", outcome.warnings());
     map.put("error", outcome.error() == null ? null : String.valueOf(outcome.error()));
     map.put("reason", outcome.plan().reason());
     return map;
+  }
+
+  /**
+   * Returns a component of a record's string form ({@code Name[a=1, b=X]}), or null.
+   *
+   * @param text the string form
+   * @param name the component name
+   * @return its value, or null when the record has no such component
+   */
+  static String component(String text, String name) {
+    java.util.regex.Matcher matcher = java.util.regex.Pattern
+        .compile("[\\[ ]" + name + "=([^,\\]]*)").matcher(text);
+    return matcher.find() ? matcher.group(1) : null;
   }
 
   /** Sleeps, restoring the interrupt flag. */

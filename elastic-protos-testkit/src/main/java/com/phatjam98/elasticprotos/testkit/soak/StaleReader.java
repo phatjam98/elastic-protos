@@ -152,7 +152,8 @@ public final class StaleReader {
     Map<String, List<Object>> samples = new TreeMap<>();
     long violations = 0;
     for (StaleRead read : stale) {
-      String kind = TransientChecks.read(mode, timeline, swapNotBefore, read.started(),
+      String kind = TransientChecks.read(read.id(), mode, timeline, swapNotBefore,
+          read.started(),
           read.at(), read.history(), read.actual());
       byClass.merge(kind, 1L, Long::sum);
       if (TransientChecks.VIOLATION.equals(kind)) {

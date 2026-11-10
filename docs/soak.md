@@ -148,7 +148,9 @@ run:
   `DIFFERING`), `documentedAnomalies`, and up to ten `samples` of each with the expected and actual
   document and the id's history (operation, old or new index, time from the swap and from the
   catch-up).
-- `outcome` / `resumeOutcome`: the migration outcome, including the reconcile statistics;
+- `outcome` / `resumeOutcome`: the migration outcome, including the reconcile statistics (and, where
+  the library reports them, the reconcile `strategy` and whether it `swept`, read from the statistics'
+  string form so the harness compiles against libraries with and without them);
   `midPhaseKill`: where a mid-phase kill landed.
 - `checks`: failed end-state checks.
 
@@ -173,6 +175,7 @@ Documented behaviour, counted apart:
 | `STALE_PARTIAL_UPDATE` | zero downtime | the first write of an id after the swap is a partial update sent before the reconcile bound, and the document equals that update applied to an earlier state, every write in between having gone to the old index after the catch-up |
 | `STALE_PARTIAL_UPDATE_ON_GHOST` | zero downtime | the same, where the stale copy is the one the first copy read (its base acknowledged before the copy start): the document was deleted from the old index during the copy and absent when the catch-up read it |
 | `RESURRECTED_AFTER_DELETE` | zero downtime | the old index created the document after the catch-up; every write of the new index was sent before the reconcile bound, the first found nothing there, none found it while the log held it deleted, and the last deleted it; the alias holds the old index's version |
+| `RESURRECTED_BY_RESUME_REPLAY` | zero downtime, kill | the same, except that the killed run's reconcile had already created the document once (a write of the new index found it), and the resume created it again: documented only for a library that records reconcile progress (its `ReconcileStats` carry a `strategy`), when the marker at the kill had not recorded the hot pass as done, the document's `_seq_no` in the frozen old index sorts after the recorded hot cursor (or no cursor was recorded yet), and at most 4,000 old-index documents lie between that position and the document; `replayResidualEvidence` in the report holds every decision |
 | `RECONCILE_WINDOW` (reads, observations) | zero downtime | stale reads, and writes that found the new index stale, sent between the swap and the reconcile bound |
 | `GHOST_BEFORE_SWEEP` (reads, observations) | zero downtime | a document deleted from the old index after a copy pass read it (a version acknowledged before the last `CAUGHT_UP`), read or found in the new index before the sweep |
 | `BLOCKING_WRITE_BLOCK` | blocking | a write sent before the swap and blocked by the write block |

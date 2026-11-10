@@ -51,7 +51,15 @@ public final class LogComparison {
      * removes them), so the new index still held its copy-time version at the swap.
      */
     STALE_PARTIAL_UPDATE_ON_GHOST,
-    RESURRECTED_AFTER_DELETE
+    RESURRECTED_AFTER_DELETE,
+    /**
+     * The documented residual of a resumed reconcile (ADR 0007, second addendum): the shape of
+     * {@link #RESURRECTED_AFTER_DELETE}, except that an earlier, killed reconcile had already
+     * created the document once, and the resume created it again because its position lay in the
+     * pages processed after the last progress record. Only recognised when {@link
+     * Timeline#replayResidual()} accepts the id, which the kill scenario decides from the marker.
+     */
+    RESURRECTED_BY_RESUME_REPLAY
   }
 
   /** How a document differs when it is not explained by a documented anomaly. */
@@ -80,9 +88,26 @@ public final class LogComparison {
    * @param sweptAt the first {@code SWEPT}: ghosts (documents deleted from the old index during
    *     the copy) are gone from the new index after it; {@link Long#MAX_VALUE} when none
    * @param zeroDowntime whether the documented anomalies of the zero-downtime reindex apply
+   * @param replayResidual accepts the ids that a resumed reconcile may create a second time
+   *     (pages the killed run processed after its last progress record); none by default
    */
   public record Timeline(String oldIndex, long preparedAt, long copiedAt, long caughtUpAt,
-      long snapshotAt, long swappedAt, long reconcileBound, long sweptAt, boolean zeroDowntime) {
+      long snapshotAt, long swappedAt, long reconcileBound, long sweptAt, boolean zeroDowntime,
+      java.util.function.Predicate<String> replayResidual) {
+
+    /** A timeline that accepts no replay residual. */
+    public Timeline(String oldIndex, long preparedAt, long copiedAt, long caughtUpAt,
+        long snapshotAt, long swappedAt, long reconcileBound, long sweptAt,
+        boolean zeroDowntime) {
+      this(oldIndex, preparedAt, copiedAt, caughtUpAt, snapshotAt, swappedAt, reconcileBound,
+          sweptAt, zeroDowntime, id -> false);
+    }
+
+    /** Returns a copy accepting these ids as the replay residual of a resumed reconcile. */
+    public Timeline withReplayResidual(java.util.function.Predicate<String> ids) {
+      return new Timeline(oldIndex, preparedAt, copiedAt, caughtUpAt, snapshotAt, swappedAt,
+          reconcileBound, sweptAt, zeroDowntime, ids);
+    }
 
     /** A timeline without documented anomalies (blocking reindex, backfill, no migration). */
     public static Timeline strict(String oldIndex) {
@@ -209,7 +234,7 @@ public final class LogComparison {
         continue;
       }
       differing.add(id);
-      Anomaly anomaly = timeline.zeroDowntime() ? explain(entries, found, timeline) : null;
+      Anomaly anomaly = timeline.zeroDowntime() ? explain(id, entries, found, timeline) : null;
       String kind;
       if (anomaly != null) {
         anomalies.merge(anomaly, 1L, Long::sum);
@@ -237,6 +262,16 @@ public final class LogComparison {
    */
   public static Anomaly explain(List<Entry> entries, Map<String, Object> actual,
       Timeline timeline) {
+    return explain(null, entries, actual, timeline);
+  }
+
+  /**
+   * Returns the documented anomaly that explains why {@code actual} differs from the replay of
+   * {@code entries}, or null; with the id, the replay residual of a resumed reconcile is
+   * considered too.
+   */
+  public static Anomaly explain(String id, List<Entry> entries, Map<String, Object> actual,
+      Timeline timeline) {
     if (actual == null) {
       return null;
     }
@@ -245,6 +280,10 @@ public final class LogComparison {
     }
     if (resurrected(entries, actual, timeline)) {
       return Anomaly.RESURRECTED_AFTER_DELETE;
+    }
+    if (id != null && resurrectedTwice(entries, actual, timeline)
+        && timeline.replayResidual().test(id)) {
+      return Anomaly.RESURRECTED_BY_RESUME_REPLAY;
     }
     return staleUpdate(entries, actual, timeline);
   }
@@ -303,8 +342,17 @@ public final class LogComparison {
    * version again.
    */
   public static boolean resurrectedShape(List<Entry> entries, Timeline timeline) {
+    return resurrectionShape(null, entries, timeline) == Anomaly.RESURRECTED_AFTER_DELETE;
+  }
+
+  /**
+   * Returns the resurrection class the log of an id it holds as deleted has the shape of: {@link
+   * Anomaly#RESURRECTED_AFTER_DELETE}, {@link Anomaly#RESURRECTED_BY_RESUME_REPLAY} (with the id
+   * accepted by the timeline's replay residual), or null.
+   */
+  public static Anomaly resurrectionShape(String id, List<Entry> entries, Timeline timeline) {
     if (!timeline.zeroDowntime()) {
-      return false;
+      return null;
     }
     List<Entry> onOld = new ArrayList<>();
     for (Entry entry : entries) {
@@ -314,7 +362,76 @@ public final class LogComparison {
       onOld.add(entry);
     }
     Map<String, Object> last = OpLog.replay(onOld);
-    return last != null && resurrected(entries, last, timeline);
+    if (last == null) {
+      return null;
+    }
+    if (resurrected(entries, last, timeline)) {
+      return Anomaly.RESURRECTED_AFTER_DELETE;
+    }
+    return id != null && resurrectedTwice(entries, last, timeline)
+        && timeline.replayResidual().test(id) ? Anomaly.RESURRECTED_BY_RESUME_REPLAY : null;
+  }
+
+  /**
+   * The shape of a second creation: as {@link #resurrected}, except that the new index held the
+   * document before the last delete through the alias (its first write there found it, or a later
+   * one found it while the log held it deleted), so an earlier reconcile had created it already.
+   */
+  private static boolean resurrectedTwice(List<Entry> entries, Map<String, Object> actual,
+      Timeline timeline) {
+    int n = entries.size();
+    if (n < 2) {
+      return false;
+    }
+    Entry last = entries.get(n - 1);
+    if (last.type() != OpType.DELETE || !onNew(last, timeline)) {
+      return false;
+    }
+    int first = 0;
+    while (first < n && !onNew(entries.get(first), timeline)) {
+      first++;
+    }
+    for (int i = first; i < n; i++) {
+      if (!onNew(entries.get(i), timeline)
+          || entries.get(i).startedAt() >= timeline.reconcileBound()) {
+        return false;
+      }
+    }
+    List<Entry> onOld = entries.subList(0, first);
+    if (!same(OpLog.replay(onOld), actual) || !createdLateOnOld(onOld, timeline)) {
+      return false;
+    }
+    boolean createdBefore = entries.get(first).found()
+        && entries.get(first).type() != OpType.UPDATE;
+    Map<String, Object> logState = OpLog.replay(entries.subList(0, first + 1));
+    for (int i = first + 1; i < n && !createdBefore; i++) {
+      Entry entry = entries.get(i);
+      createdBefore = logState == null && entry.found();
+      logState = OpLog.replay(logState, List.of(entry));
+    }
+    return createdBefore;
+  }
+
+  /** Whether the old index last created the document after the catch-up began. */
+  private static boolean createdLateOnOld(List<Entry> onOld, Timeline timeline) {
+    Map<String, Object> state = null;
+    int creation = -1;
+    for (int i = 0; i < onOld.size(); i++) {
+      Map<String, Object> next = OpLog.replay(state, List.of(onOld.get(i)));
+      if (state == null && next != null) {
+        creation = i;
+      }
+      state = next;
+    }
+    if (creation < 0) {
+      return false;
+    }
+    for (int i = creation; i < onOld.size(); i++) {
+      if (!lateOnOld(onOld.get(i), timeline)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /** Whether a write was acknowledged by the old index and sent after the catch-up began. */
@@ -374,24 +491,7 @@ public final class LogComparison {
       }
       logState = OpLog.replay(logState, List.of(entry));
     }
-    Map<String, Object> state = null;
-    int creation = -1;
-    for (int i = 0; i < onOld.size(); i++) {
-      Map<String, Object> next = OpLog.replay(state, List.of(onOld.get(i)));
-      if (state == null && next != null) {
-        creation = i;
-      }
-      state = next;
-    }
-    if (creation < 0) {
-      return false;
-    }
-    for (int i = creation; i < onOld.size(); i++) {
-      if (!lateOnOld(onOld.get(i), timeline)) {
-        return false;
-      }
-    }
-    return true;
+    return createdLateOnOld(onOld, timeline);
   }
 
   /**

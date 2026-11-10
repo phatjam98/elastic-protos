@@ -179,8 +179,10 @@ final class KillScenario {
     Map<String, Object> afterKill = new LinkedHashMap<>();
     afterKill.put("aliasHolders", Cluster.holders(engine, alias));
     afterKill.put("indices", Cluster.indices(engine, prefix).keySet());
+    Map<String, Object> markerAtKill = Map.of();
     for (String index : Cluster.holders(engine, alias)) {
-      afterKill.put("pendingOnHolder", Cluster.pending(engine, index));
+      markerAtKill = Cluster.pending(engine, index);
+      afterKill.put("pendingOnHolder", markerAtKill);
     }
     afterKill.put("lockHolder", childHolder);
     afterKill.put("lockExpiresAt", expiresAt);
@@ -300,7 +302,13 @@ final class KillScenario {
     checks.addAll(LiveScenario.endState(engine, migrator, holder, oldIndex, version, backfill));
     report.put("indices", Cluster.indices(engine, prefix).keySet());
 
+    // the documented replay residual of a resumed reconcile, decided from the marker at the kill
+    List<Object> residualEvidence = new ArrayList<>();
+    String reconcileText = String.valueOf(outcome.reconcile());
+    load.replayResidual = new ReplayResidual(engine, oldIndex, markerAtKill,
+        reconcileText.contains("strategy="), residualEvidence);
     Map<String, Object> verified = load.verify(mode, origin);
+    report.put("replayResidualEvidence", residualEvidence);
     report.put("checks", checks);
     report.putAll(verified);
     long violations = (Long) verified.get("violations") + checks.size();
