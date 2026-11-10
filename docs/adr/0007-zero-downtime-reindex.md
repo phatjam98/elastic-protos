@@ -79,12 +79,14 @@ operator asks it to create missing documents, which would bring back deletes mad
 
 ## Consequences
 
-- Writes through the alias never fail during a reindex, except a straggler that resolved the alias
-  before the swap and arrives after the grace period: it gets a retryable `BLOCKED` error rather
-  than landing in an index nobody reads.
+- Full-document writes and deletes through the alias never fail during a reindex, except a
+  straggler that resolved the alias before the swap and arrives after the grace period: it gets a
+  retryable `BLOCKED` error rather than landing in an index nobody reads. *(Qualified in the second
+  addendum: a partial `_update` can fail with 409 at the swap.)*
 - Reads after the swap can miss writes made to the old index after the catch-up pass until the
-  reconcile reaches them; a partial `_update` in that window applies to the stale copy. Last writer
-  wins per document.
+  reconcile reaches them, and return documents deleted from the old index after the first copy
+  started until the sweep; a partial `_update` in that window applies to the stale copy. Last
+  writer wins per document.
 - A reindex costs two copy passes, a PIT and a scan of the old index; document counts of the two
   indices may legitimately differ afterwards, so a difference is a warning, not a failure.
 - `IndexPlan` gains `resume`, `MigrationResult.Outcome` gains `reconcile`, `rollback` returns an
@@ -174,3 +176,51 @@ Rejected:
   SPI (search request parameters). It is the fix for skewed and empty shards, left for later.
 - **Counting deletes** with `indexing.delete_total` from `_stats`: a per-copy counter that resets
   when a shard copy restarts or relocates, so a difference of zero proves nothing.
+
+## Addendum (2026-11-10): resuming the reconcile without replaying its creates
+
+A soak test found that a resumed reconcile brought back a document deleted through the alias (on
+1.0.0-rc.3 as well): the first run's reconcile created a document the snapshot lacked (written to
+the old index after the catch-up), the run died after the reconcile but before the marker moved
+on, the application deleted the document through the alias, and the resume replayed the whole
+reconcile, whose `create` found no document and wrote it again. "Conditional writes make it
+idempotent" holds for the conditional index and delete (409 once the document changed), not for
+`create`, which a tombstone in the new index does not stop.
+
+Decision: the reconcile records its progress in the marker (`pending.progress`) and a resume never
+repeats a recorded write.
+
+- Every pass that writes (hot, cold, a `CREATE_MISSING` degraded reconcile) reads the frozen old
+  index sorted by `_seq_no`, then by shard (`_shard_doc`, or `_id` where that is missing). The
+  frozen index takes no writes, and the order rests on sequence numbers, not on Lucene document
+  ids that a merge can change, so a new point in time sees the same order. After every page that
+  wrote, the cursor is recorded: the last sequence number and the ids at it already processed
+  (sequence numbers are per shard, so at most one document per shard shares it). A resumed pass
+  queries `_seq_no >= cursor` without those ids. Completed passes, including the sweep, go into
+  `done`; the count of hot documents the snapshot lacks is kept too, so the range strategy's ghost
+  count is the same after a resume.
+- Residual: the run can die after a page's writes and before its cursor write. That page (at most
+  1,000 documents) is replayed, and a document it created that was deleted through the alias in
+  between is created again. No exact discriminator exists between "never created" and "created,
+  then deleted": the delete's tombstone (and its version) lives only for `index.gc_deletes` (60 s by
+  default), a realtime GET of a deleted document returns nothing, and an external-version write
+  that a tombstone would stop would also overwrite a newer write through the alias once the
+  tombstone is gone. Writing the cursor before the page (write-ahead) would turn the residual into
+  dropping documents written to the old index, an acknowledged write lost; re-creating a document
+  is the error the design already accepts for a document created after the catch-up and deleted
+  through the alias before the reconcile reached it, so the library keeps that bias and makes the
+  window one page.
+- Conditional writes and the sweep's conditional deletes are replay-safe: a document the sweep
+  deleted and the application wrote again before the resume has another sequence number, so the
+  replayed delete gets 409 and the document stays.
+- The same machinery serves the range and full-scan strategies, the degraded `CREATE_MISSING` path
+  and the `REVERSE_DELTA` rollback. A marker of 1.0.0-rc.3 or earlier has no progress and replays
+  the whole reconcile, as rc.3 did.
+
+The soak also found that a partial `_update` through the alias can fail with 409 at the instant of
+the swap (the engine read the document in the old index and the write resolved against the new
+one) and during a `BACKFILL` (the update by query rewrote the document between the update's read
+and its write). The write is not applied and a retry succeeds, so the guarantee is qualified to
+full-document writes and deletes, and `SearchEngine.update` now retries in the engine
+(`retry_on_conflict`, default 3; a new overload sets it): the merge carries no condition of the
+caller's, so applying it to the newest version is what was asked for.

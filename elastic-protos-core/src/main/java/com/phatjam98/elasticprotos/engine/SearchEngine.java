@@ -160,8 +160,39 @@ public interface SearchEngine extends AutoCloseable {
     }
   }
 
-  /** Merges a partial document into an existing document. */
+  /** The {@code retry_on_conflict} of {@link #update(String, String, Map)}. */
+  int DEFAULT_UPDATE_RETRIES = 3;
+
+  /**
+   * Merges a partial document into an existing document, retrying on a version conflict up to
+   * {@link #DEFAULT_UPDATE_RETRIES} times.
+   *
+   * <p>The engine reads the document and writes the merge conditionally on what it read; a write
+   * between the two (another writer, an {@code _update_by_query} of a backfill, or the alias swap
+   * of a zero-downtime reindex, after which the write resolves against the new index) fails it
+   * with 409. The merge carries no condition of the caller's, so applying it again to the newest
+   * version is what was asked for; implementations retry in the engine ({@code
+   * retry_on_conflict}).
+   */
   IndexResult update(String index, String id, Map<String, Object> partial);
+
+  /**
+   * Merges a partial document into an existing document, retrying on a version conflict up to
+   * {@code retryOnConflict} times ({@code retry_on_conflict}); 0 fails at the first conflict.
+   *
+   * <p>The default ignores {@code retryOnConflict} and calls {@link #update(String, String,
+   * Map)}.
+   *
+   * @param index the index or alias
+   * @param id the document id
+   * @param partial the fields to merge
+   * @param retryOnConflict how many times to retry after a version conflict, 0 or more
+   * @return what happened
+   */
+  default IndexResult update(String index, String id, Map<String, Object> partial,
+      int retryOnConflict) {
+    return update(index, id, partial);
+  }
 
   /**
    * Reads one document by id through the realtime document API ({@code GET /{index}/_doc/{id}}),

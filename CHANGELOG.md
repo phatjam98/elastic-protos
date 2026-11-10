@@ -40,6 +40,18 @@ packages, and the private geobuf dependency is gone. The `1.0.0-rc.1`, `1.0.0-rc
   answer) instead of reading it as complete; on the snapshot that counts as a lost snapshot.
 - `ReconcileStats` equality now includes `strategy` and `swept`: a comparison with
   `new ReconcileStats(c, s, g, k)` matches only a full scan that swept.
+- `SearchEngine.update` (`JsonRestEngine`) now sends `retry_on_conflict=3`: a partial update that
+  raced another write (an alias swap, a backfill's update by query) is applied to the newest
+  version instead of failing with 409. The new `update(index, id, partial, retryOnConflict)` sets
+  it; 0 restores the old behaviour.
+
+#### Fixed
+
+- A resumed zero-downtime reconcile no longer brings back a document the interrupted run created
+  and the application then deleted through the alias (also in 1.0.0-rc.3): the reconcile records
+  its progress in the marker (`pending.progress`) and a resume continues after the last recorded
+  page, replaying at most one page. Markers written by rc.3 still resume, replaying the whole
+  reconcile as before.
 
 #### Added
 
