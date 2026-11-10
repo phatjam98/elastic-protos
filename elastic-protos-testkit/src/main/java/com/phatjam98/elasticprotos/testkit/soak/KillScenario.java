@@ -277,7 +277,19 @@ final class KillScenario {
       long bound = expires - killedAt + ttl / 3 + 3000;
       lock.put("takeoverBoundMs", bound);
       if (item.action() != Action.NO_OP) {
-        if (takenAt.get() < 0) {
+        // a resume with little left to do can take and release the lock between two polls; it
+        // reports phases only while it holds the lock, so its first phase bounds the takeover
+        long firstResumed = load.clock.events().stream()
+            .filter(e -> "resume".equals(e.source())).mapToLong(PhaseClock.Event::at).min()
+            .orElse(-1);
+        if (takenAt.get() < 0 && firstResumed >= 0) {
+          lock.put("takenOverAtLatestAfterKillMs", firstResumed - killedAt);
+          if (firstResumed - killedAt > bound) {
+            checks.add("the resume reported its first phase " + (firstResumed - killedAt)
+                + " ms after the kill, later than the documented takeover bound of " + bound
+                + " ms");
+          }
+        } else if (takenAt.get() < 0) {
           checks.add("the resumed migration never showed up as the lock holder");
         } else if (takenAt.get() - killedAt > bound) {
           checks.add("the lock was taken over " + (takenAt.get() - killedAt) + " ms after the"

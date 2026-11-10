@@ -28,9 +28,9 @@ import java.util.TreeSet;
  *       been acknowledged by the old index and sent after the catch-up pass started. The update
  *       applied to the stale copy and the reconcile kept it (409).
  *   <li>{@link Anomaly#STALE_PARTIAL_UPDATE_ON_GHOST}: the same, where the stale copy is the one
- *       the first copy took (the base write acknowledged before the first {@code PREPARED}),
- *       because the document was deleted from the old index before the catch-up read it (deletes
- *       reach the new index only at the sweep). Not in the README yet; named apart.
+ *       the first copy took (the base acknowledged before the catch-up began, the writes after it
+ *       sent after the first {@code PREPARED}), because the document was deleted from the old
+ *       index before the catch-up read it (deletes reach the new index only at the sweep).
  *   <li>{@link Anomaly#RESURRECTED_AFTER_DELETE}: the old index last created the document after
  *       the catch-up began, every write of the new index was sent before the reconcile bound and
  *       the first of them found nothing there, the last is a delete, and the alias holds the old
@@ -535,9 +535,11 @@ public final class LogComparison {
           beforeCatchUp.add(entry);
         }
       }
-      // and the base is what the first copy read: acknowledged before it started
+      // and the base is a version the first copy could read: its scroll opens only after the
+      // PREPARED report (the migrator refreshes and counts first), so the observable bound is the
+      // catch-up start; a version acknowledged after COPIED was read by no copy
       if (OpLog.replay(beforeCatchUp) == null && i >= 0
-          && entries.get(i).ackedAt() < timeline.preparedAt()) {
+          && entries.get(i).ackedAt() < timeline.copiedAt()) {
         return Anomaly.STALE_PARTIAL_UPDATE_ON_GHOST;
       }
     }

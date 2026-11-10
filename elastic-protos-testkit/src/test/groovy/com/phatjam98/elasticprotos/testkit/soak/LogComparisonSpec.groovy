@@ -331,16 +331,22 @@ class LogComparisonSpec extends Specification {
     compare([x: entries], [x: created]).violations()[Violation.EXTRA] == 1
   }
 
-  def 'M2: a ghost base the first copy cannot have read is a violation'() {
-    given: 'the base write was acknowledged after the copy started'
+  def 'M2: a ghost base may be a version acknowledged after PREPARED was reported'() {
+    given: 'the first copy scroll opens after the PREPARED report (refresh, count), so it read the'
+    // version written 6 ms after PREPARED (s-0002298, OS 3.9.0, kill at SWEPT)
     def entries = [seed([id: 'x', t: 'seed', n: 0]),
-                   onOld(OpType.INDEX, [id: 'x', t: 'copy', n: 9], 1200, true),
-                   onOld(OpType.DELETE, null, 1500, true),
+                   onOld(OpType.DELETE, null, 1000, true),
+                   onOld(OpType.CREATE, [id: 'x', t: 'copy', n: 9], 1006),
+                   onOld(OpType.DELETE, null, 1032, true),
                    onOld(OpType.CREATE, [id: 'x', t: 'again', n: 1], 2500),
                    onNew(OpType.UPDATE, [n: 2], 3100)]
 
     expect:
-    compare([x: entries], [x: [id: 'x', t: 'copy', n: 2]]).violations()[Violation.DIFFERING] == 1
+    compare([x: entries], [x: [id: 'x', t: 'copy', n: 2]])
+        .anomalies()[Anomaly.STALE_PARTIAL_UPDATE_ON_GHOST] == 1
+
+    and: 'a base no copy pass held is still a violation'
+    compare([x: entries], [x: [id: 'x', t: 'other', n: 2]]).violations()[Violation.DIFFERING] == 1
   }
 
   def 'stale reads are classified by window, ghost and anomaly'() {
