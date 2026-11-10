@@ -1363,6 +1363,64 @@ abstract class EngineIntegrationSpec extends Specification {
     once.result() == 'updated'
   }
 
+  def "a reconcile that fails in the middle of a pass on a three-shard index resumes after its recorded cursor"() {
+    given: 'a three-shard alias under -mp; 4100 documents written after the catch-up, so the hot pass has five pages'
+    IndexNamingStrategy mpNaming = IndexNamingStrategy.prefixed(prefix + '-mp')
+    def shards = { MappingOverrides.Builder b -> b.setting('number_of_shards', 3).build() }
+    def plain = ProtoMapper.builder().naming(mpNaming).overrides(shards(MappingOverrides.builder())).build()
+    def titleKeyword = ProtoMapper.builder().naming(mpNaming).overrides(shards(MappingOverrides.builder()
+        .forField(Document.descriptor, 'title') { it.setType(EsType.KEYWORD) })).build()
+    String alias = plain.map(Document).alias()
+    String next = titleKeyword.map(Document).name()
+    indexSampleDocuments(plain)
+    def late = {
+      (0..<4100).collate(1000).each { chunk ->
+        assert !engine.bulk(chunk.collect { BulkOp.index(alias, "mp-${it}".toString(),
+            codec.toDocument(SampleData.documents()[0].toBuilder().setId("mp-${it}").setTitle('late').build())) }).errors()
+      }
+    }
+    and: 'the fifth bulk of creates into the new index fails, after the cursor of page four was recorded'
+    def failing = failingOnCreateBulk(engine, next, 5)
+    def first = IndexMigrator.builder().engine(failing).mapper(titleKeyword).options(FAST.withLock(false))
+        .listener({ a, phase -> if (phase == Phase.CAUGHT_UP) { late() } } as MigrationListener).build()
+        .bootstrap(Document).outcomes()[0]
+
+    expect:
+    first.status() == MigrationResult.Status.FAILED
+    engine.getMappings(next)._meta.elastic_protos.pending.progress.cursors.hot != null
+
+    when: 'the application deletes a document of an earlier page, and a fresh run resumes'
+    engine.refresh(next)
+    String deleted = engine.search([next], [query: [match_all: [:]], size: 100]).hits()*.id().find { it.startsWith('mp-') }
+    assert engine.delete(alias, deleted, IndexOptions.refreshed())
+    def outcome = IndexMigrator.builder().engine(engine).mapper(titleKeyword).options(FAST).build()
+        .bootstrap(Document).outcomes()[0]
+    engine.refresh(next)
+
+    then: 'the recorded pages are not replayed, and no document after the cursor is skipped'
+    outcome.ok()
+    !engine.get(alias, deleted).isPresent()
+    count(next) == SampleData.documents().size() + 4099
+    engine.getMappings(next)._meta.elastic_protos.pending == null
+  }
+
+  /** Wraps an engine so that its {@code failAt}-th bulk with creates into {@code index} fails. */
+  static SearchEngine failingOnCreateBulk(SearchEngine delegate, String index, int failAt) {
+    int[] creates = [0]
+    (SearchEngine) java.lang.reflect.Proxy.newProxyInstance(SearchEngine.classLoader, [SearchEngine] as Class[],
+        { proxy, java.lang.reflect.Method method, Object[] args ->
+          if (method.name == 'bulk' && (args[0] as List<BulkOp>).any { it.type() == BulkOp.Type.CREATE && it.index() == index }
+              && ++creates[0] == failAt) {
+            throw new EngineException(EngineException.Kind.TRANSIENT, 503, 'injected failure')
+          }
+          try {
+            method.invoke(delegate, args)
+          } catch (java.lang.reflect.InvocationTargetException e) {
+            throw e.cause
+          }
+        } as java.lang.reflect.InvocationHandler)
+  }
+
   /** Runs a write, retrying it while it fails with the write block of an old index after a swap. */
   static void retryBlocked(Closure write) {
     for (int attempt = 0; ; attempt++) {
@@ -1391,10 +1449,20 @@ abstract class EngineIntegrationSpec extends Specification {
 
     then: 'a 200 with an exact-looking total of the other shards only'
     result.shardsFailed() == 1
+    result.shardFailures() == ['script_exception']
     result.partial()
     result.totalExact()
     result.total() < 12
     !engine.search([index], [size: 0, track_total_hits: true]).partial()
+
+    when: 'a point in time whose readers are gone (closed) is searched'
+    def pit = engine.openPit([index], java.time.Duration.ofMinutes(1))
+    engine.closePit(pit)
+    engine.search([], [pit: [id: pit.id(), keep_alive: '1m'], size: 0])
+
+    then: 'a 404 (search_context_missing_exception on every shard), which the reconcile treats as a lost snapshot'
+    def gone = thrown(EngineException)
+    gone.kind == EngineException.Kind.NOT_FOUND
 
     cleanup:
     engine.deleteIndex(index)

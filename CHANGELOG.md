@@ -63,9 +63,10 @@ packages, and the private geobuf dependency is gone. The `1.0.0-rc.1`, `1.0.0-rc
 
 - A resumed zero-downtime reconcile no longer brings back a document the interrupted run created
   and the application then deleted through the alias (also in 1.0.0-rc.3): the reconcile records
-  its progress in the marker (`pending.progress`) and a resume continues after the last recorded
-  page, replaying at most one page. Markers written by rc.3 still resume, replaying the whole
-  reconcile as before.
+  its progress in the marker (`pending.progress`, one cursor per pass, recorded every four
+  writing pages or five seconds) and a resume continues after it, replaying at most those pages.
+  A transient partial answer from the snapshot fails the item instead of taking the degraded path.
+  Markers written by rc.3 still resume, replaying the whole reconcile as before.
 
 #### Added
 
@@ -79,8 +80,10 @@ packages, and the private geobuf dependency is gone. The `1.0.0-rc.1`, `1.0.0-rc
 - `ReconcileStats.strategy()` (`ReconcileStrategy`: `SEQ_NO_RANGE`, `FULL_SCAN`, `DEGRADED`) and
   `swept()`; the four-argument constructor remains and means a full scan that swept.
 - `MigrationOptions.fullReconcile` (default false) forces the full scan.
-- `SearchResult.shardsFailed()` and `partial()`, from `_shards.failed` (the six-argument
-  constructor remains and means no failed shard).
+- `SearchResult.shardsFailed()`, `shardFailures()` (the `reason.type` of each) and `partial()`, from
+  `_shards` (the six-argument constructor remains and means no failed shard).
+- Testkit: `InMemorySearchEngine.shardedSeqNos(boolean)` numbers the writes of each shard of a
+  multi-shard index on its own, as the engines do.
 - Testkit: `InMemorySearchEngine` `_seq_no` ranges with `gte`, `lt` and `lte`, `globalCheckpoint`, `globalCheckpoints(boolean)` and
   `globalCheckpointLag(long)`.
 

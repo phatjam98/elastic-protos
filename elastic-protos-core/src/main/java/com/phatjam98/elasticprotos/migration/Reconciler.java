@@ -56,6 +56,8 @@ final class Reconciler {
   private final Runnable guard;
   private final Progress progress;
   private final Consumer<Progress> save;
+  private final int savePages;
+  private final Duration saveInterval;
 
   /**
    * Creates a reconciler that keeps no progress, for the probe.
@@ -76,6 +78,17 @@ final class Reconciler {
    */
   Reconciler(SearchEngine engine, Duration keepAlive, Duration timeout, Runnable guard,
       Progress progress, Consumer<Progress> save) {
+    this(engine, keepAlive, timeout, guard, progress, save, SAVE_PAGES, SAVE_INTERVAL);
+  }
+
+  /**
+   * Creates a reconciler that records its progress at another cadence, for tests.
+   *
+   * @param savePages record the cursor once this many pages wrote since the last record
+   * @param saveInterval record the cursor after a page once this long passed since the last record
+   */
+  Reconciler(SearchEngine engine, Duration keepAlive, Duration timeout, Runnable guard,
+      Progress progress, Consumer<Progress> save, int savePages, Duration saveInterval) {
     this.guard = guard;
     this.engine = engine;
     this.keepAlive = keepAlive;
@@ -83,7 +96,20 @@ final class Reconciler {
     this.sort = List.of(Map.of(engine.info().supportsShardDoc() ? "_shard_doc" : "_id", "asc"));
     this.progress = progress;
     this.save = save;
+    this.savePages = savePages;
+    this.saveInterval = saveInterval;
   }
+
+  /**
+   * How many pages that wrote may go unrecorded: each record of the cursor is a mapping update, a
+   * cluster-state publication, so recording after every page loads the master on large reconciles,
+   * while every unrecorded page is replayed after a crash. Four pages (4,000 documents) keep the
+   * mapping updates to one per 4,000 written documents at most.
+   */
+  static final int SAVE_PAGES = 4;
+
+  /** How long the cursor may go unrecorded while pages are read, written or not. */
+  static final Duration SAVE_INTERVAL = Duration.ofSeconds(5);
 
   /**
    * How far the reconcile got, kept in the marker ({@code pending.progress}) so that a resumed run
@@ -93,17 +119,23 @@ final class Reconciler {
    * creates are not.
    *
    * <p>A pass reads the frozen old index ordered by {@code _seq_no} (then by shard), so its order
-   * does not depend on the point in time or on merges. After every page that wrote, the cursor is
-   * recorded: the last sequence number and the ids at it already processed (sequence numbers are
-   * per shard, so a few documents of other shards can share it). A resumed pass reads from that
-   * sequence number on, without those ids. Completed passes are listed in {@code done}.
+   * does not depend on the point in time or on merges. Each pass has its own cursor: the last
+   * sequence number processed and the ids at it (sequence numbers are per shard, so several
+   * documents can share one). A resumed pass reads from that sequence number on, without those
+   * ids; a cursor of one pass is never touched by another (a resumed degraded pass keeps its
+   * cursor while the run first tries the snapshot). Completed passes are listed in {@code done}.
+   * {@code hot_missing} counts the hot documents the snapshot lacks, up to the hot cursor.
    */
   static final class Progress {
     final Set<String> done = new java.util.TreeSet<>();
-    String pass;
-    Long seqNo;
-    final List<String> ids = new ArrayList<>();
+    final Map<String, Cursor> cursors = new java.util.TreeMap<>();
     long hotMissing;
+
+    /** Where a pass got to: the last sequence number, and the ids at it already processed. */
+    static final class Cursor {
+      long seqNo;
+      final Set<String> ids = new java.util.TreeSet<>();
+    }
 
     /** Reads the progress a marker records, or an empty one (markers of 1.0.0-rc.3). */
     static Progress from(Object value) {
@@ -114,12 +146,17 @@ final class Reconciler {
       if (map.get("done") instanceof List<?> done) {
         done.forEach(pass -> progress.done.add(String.valueOf(pass)));
       }
-      if (map.get("pass") != null && map.get("seq_no") instanceof Number seqNo) {
-        progress.pass = String.valueOf(map.get("pass"));
-        progress.seqNo = seqNo.longValue();
-        if (map.get("ids") instanceof List<?> ids) {
-          ids.forEach(id -> progress.ids.add(String.valueOf(id)));
-        }
+      if (map.get("cursors") instanceof Map<?, ?> cursors) {
+        cursors.forEach((pass, raw) -> {
+          if (raw instanceof Map<?, ?> fields && fields.get("seq_no") instanceof Number seqNo) {
+            Cursor cursor = new Cursor();
+            cursor.seqNo = seqNo.longValue();
+            if (fields.get("ids") instanceof List<?> ids) {
+              ids.forEach(id -> cursor.ids.add(String.valueOf(id)));
+            }
+            progress.cursors.put(String.valueOf(pass), cursor);
+          }
+        });
       }
       if (map.get("hot_missing") instanceof Number missing) {
         progress.hotMissing = missing.longValue();
@@ -129,16 +166,19 @@ final class Reconciler {
 
     /** Returns the marker form; null when nothing happened yet. */
     Map<String, Object> toMap() {
-      if (done.isEmpty() && pass == null && hotMissing == 0) {
+      if (done.isEmpty() && cursors.isEmpty() && hotMissing == 0) {
         return null;
       }
       Map<String, Object> map = new LinkedHashMap<>();
       map.put("done", new ArrayList<>(done));
-      if (pass != null) {
-        map.put("pass", pass);
-        map.put("seq_no", seqNo);
-        map.put("ids", new ArrayList<>(ids));
-      }
+      Map<String, Object> marks = new java.util.TreeMap<>();
+      cursors.forEach((pass, cursor) -> {
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("seq_no", cursor.seqNo);
+        fields.put("ids", new ArrayList<>(cursor.ids));
+        marks.put(pass, fields);
+      });
+      map.put("cursors", marks);
       map.put("hot_missing", hotMissing);
       return map;
     }
@@ -149,11 +189,12 @@ final class Reconciler {
 
     void finish(String name) {
       done.add(name);
-      pass = null;
-      seqNo = null;
-      ids.clear();
+      cursors.remove(name);
     }
   }
+
+  /** The shard failure of a point in time whose reader is gone on that shard. */
+  static final String CONTEXT_MISSING = "search_context_missing_exception";
 
   static final String HOT = "hot";
   static final String COLD = "cold";
@@ -590,10 +631,10 @@ final class Reconciler {
   }
 
   /**
-   * Runs a pass over the frozen old index in {@code _seq_no} order, resuming after the recorded
-   * cursor when the progress is in this pass and skipping it when it is done; records the cursor
-   * after every page that wrote and the pass as done at its end. A null {@code pass} keeps no
-   * progress.
+   * Runs a pass over the frozen old index in {@code _seq_no} order, resuming after its recorded
+   * cursor and skipping it when it is done; records the cursor after a page that wrote once
+   * {@link #savePages} pages wrote since the last record or {@link #saveInterval} passed, and the
+   * pass as done at its end. A null {@code pass} keeps no progress.
    *
    * @param pages handles a page and returns whether it wrote anything
    */
@@ -604,26 +645,29 @@ final class Reconciler {
     }
     Map<String, Object> request = new LinkedHashMap<>(body);
     request.put("seq_no_primary_term", true);
-    if (pass != null && pass.equals(progress.pass) && progress.seqNo != null) {
+    Progress.Cursor resumeAt = pass == null ? null : progress.cursors.get(pass);
+    if (resumeAt != null) {
       List<Object> filter = new ArrayList<>();
       if (body.get("query") != null) {
         filter.add(body.get("query"));
       }
-      filter.add(Map.of("range", Map.of("_seq_no", Map.of("gte", progress.seqNo))));
+      // gte, not gt: other shards' documents can share the cursor's sequence number
+      filter.add(Map.of("range", Map.of("_seq_no", Map.of("gte", resumeAt.seqNo))));
       Map<String, Object> bool = new LinkedHashMap<>();
       bool.put("filter", filter);
-      if (!progress.ids.isEmpty()) {
-        bool.put("must_not", List.of(idsQuery(new ArrayList<>(progress.ids))));
+      if (!resumeAt.ids.isEmpty()) {
+        bool.put("must_not", List.of(idsQuery(new ArrayList<>(resumeAt.ids))));
       }
       request.put("query", Map.of("bool", bool));
-    } else if (pass != null) {
-      progress.pass = pass;
-      progress.seqNo = null;
-      progress.ids.clear();
+    } else if (HOT.equals(pass)) {
+      // the hot pass starts over: its count of missing documents starts over with it
+      progress.hotMissing = 0;
     }
     List<Object> order = new ArrayList<>();
     order.add(Map.of("_seq_no", "asc"));
     order.addAll(sort);
+    int[] unsaved = {0};
+    long[] savedAt = {System.nanoTime()};
     Pit pit = engine.openPit(List.of(index), keepAlive);
     try {
       scanPit(pit.id(), request, false, order, page -> {
@@ -631,18 +675,29 @@ final class Reconciler {
         if (pass == null) {
           return;
         }
+        Progress.Cursor cursor = progress.cursors.computeIfAbsent(pass, key -> {
+          Progress.Cursor fresh = new Progress.Cursor();
+          fresh.seqNo = Long.MIN_VALUE;
+          return fresh;
+        });
         long last = seqNo(page.get(page.size() - 1));
-        if (progress.seqNo == null || last != progress.seqNo) {
-          progress.ids.clear();
+        if (last != cursor.seqNo) {
+          cursor.ids.clear();
         }
-        progress.seqNo = last;
+        cursor.seqNo = last;
         for (Hit hit : page) {
           if (seqNo(hit) == last) {
-            progress.ids.add(hit.id());
+            cursor.ids.add(hit.id());
           }
         }
         if (wrote) {
+          unsaved[0]++;
+        }
+        boolean due = System.nanoTime() - savedAt[0] >= saveInterval.toNanos();
+        if (unsaved[0] >= savePages || due) {
           save.accept(progress);
+          unsaved[0] = 0;
+          savedAt[0] = System.nanoTime();
         }
       });
     } finally {
@@ -706,13 +761,20 @@ final class Reconciler {
   private SearchResult searchPit(Map<String, Object> body) {
     try {
       SearchResult result = engine.search(List.of(), body);
-      if (result.partial()) {
-        // a shard of the snapshot lost its reader (its node restarted, say): the snapshot is no
-        // longer whole, so it is treated as lost, never as a partial answer
-        throw new SnapshotLost("the point in time over the new index answered from only part of"
-            + " its shards (" + result.shardsFailed() + " failed)");
+      if (!result.partial()) {
+        return result;
       }
-      return result;
+      // only a reader that is gone (its node restarted, say) loses the snapshot; any other shard
+      // failure (a full search queue, a relocating shard) is transient: the run fails and the next
+      // one tries the same snapshot again, never the degraded path that cannot tell deletes apart
+      if (!result.shardFailures().isEmpty() && result.shardFailures().stream()
+          .allMatch(CONTEXT_MISSING::equals)) {
+        throw new SnapshotLost("the point in time over the new index lost its reader on "
+            + result.shardsFailed() + " shards (" + CONTEXT_MISSING + ")");
+      }
+      throw new MigrationException("a search of the snapshot failed on " + result.shardsFailed()
+          + " shards " + result.shardFailures() + "; the migration does not act on partial"
+          + " results, and the next run tries the snapshot again");
     } catch (EngineException e) {
       if (e.getKind() == EngineException.Kind.NOT_FOUND) {
         throw new SnapshotLost(e);

@@ -993,19 +993,23 @@ class JsonRestEngineSpec extends Specification {
 
   def "a search some shards failed reports them, with the other shards' results"() {
     given: 'the engines answer 200 with _shards.failed and an exact-looking total'
-    http.enqueue(200, [took: 1, _shards: [total: 3, successful: 2, failed: 1],
+    http.enqueue(200, [took: 1, _shards: [total: 3, successful: 2, failed: 1,
+                                          failures: [[shard: 0, reason: [type: 'search_context_missing_exception']]]],
                        hits: [total: [value: 4, relation: 'eq'], hits: []]])
     http.enqueue(200, [took: 1, _shards: [total: 3, successful: 3, failed: 0], hits: [total: [value: 4, relation: 'eq'], hits: []]])
 
     expect:
     with(engine.search(['a'], [size: 0])) {
       shardsFailed() == 1
+      shardFailures() == ['search_context_missing_exception']
       partial()
       total() == 4L
       totalExact()
     }
     !engine.search(['a'], [size: 0]).partial()
     new SearchResult(0, true, [], null, [:], 0).shardsFailed() == 0
+    new SearchResult(0, true, [], null, [:], 0, 2).shardFailures().isEmpty()
+    new SearchResult(0, true, [], null, [:], 0, 1, null).shardFailures().isEmpty()
   }
 
   def "null sort values, as returned for a missing sort field, are kept"() {

@@ -190,29 +190,52 @@ idempotent" holds for the conditional index and delete (409 once the document ch
 Decision: the reconcile records its progress in the marker (`pending.progress`) and a resume never
 repeats a recorded write.
 
-- Every pass that writes (hot, cold, a `CREATE_MISSING` degraded reconcile) reads the frozen old
-  index sorted by `_seq_no`, then by shard (`_shard_doc`, or `_id` where that is missing). The
+- Every pass that creates (hot, cold, a `CREATE_MISSING` degraded reconcile) reads the frozen
+  old index sorted by `_seq_no`, then by shard (`_shard_doc`, or `_id` where that is missing). The
   frozen index takes no writes, and the order rests on sequence numbers, not on Lucene document
-  ids that a merge can change, so a new point in time sees the same order. After every page that
-  wrote, the cursor is recorded: the last sequence number and the ids at it already processed
-  (sequence numbers are per shard, so at most one document per shard shares it). A resumed pass
-  queries `_seq_no >= cursor` without those ids. Completed passes, including the sweep, go into
+  ids that a merge can change, so a new point in time sees the same order. Each pass has its own
+  cursor: the last sequence number processed and the ids at it (sequence numbers are per shard, so
+  a few documents share one; more on an index made by `_shrink`). A resumed pass queries
+  `_seq_no >= cursor` (not `>`, which would skip the rest of a group cut by a page) without those
+  ids. Per-pass cursors matter (second review): a resumed degraded pass first tries the snapshot,
+  and a single cursor slot let the hot attempt wipe the degraded cursor, so the whole degraded
+  pass was replayed.
+- The cursor is recorded once four pages that wrote went unrecorded or five seconds passed, and at
+  the end of every pass: each record is a cluster-state publication, so one per page loaded the
+  master on large reconciles (second review). The residual below grows from one page to what was
+  processed since the last record. Completed passes, including the sweep, go into
   `done`; the count of hot documents the snapshot lacks is kept too, so the range strategy's ghost
   count is the same after a resume.
-- Residual: the run can die after a page's writes and before its cursor write. That page (at most
-  1,000 documents) is replayed, and a document it created that was deleted through the alias in
-  between is created again. No exact discriminator exists between "never created" and "created,
+- Residual: the run can die after pages' writes and before their cursor record. Those pages (at
+  most four that wrote, 4,000 documents, and at most five seconds of pages) are replayed, and a
+  document they created that was deleted through the alias in between is created again. No exact discriminator exists between "never created" and "created,
   then deleted": the delete's tombstone (and its version) lives only for `index.gc_deletes` (60 s by
   default), a realtime GET of a deleted document returns nothing, and an external-version write
   that a tombstone would stop would also overwrite a newer write through the alias once the
   tombstone is gone. Writing the cursor before the page (write-ahead) would turn the residual into
   dropping documents written to the old index, an acknowledged write lost; re-creating a document
   is the error the design already accepts for a document created after the catch-up and deleted
-  through the alias before the reconcile reached it, so the library keeps that bias and makes the
-  window one page.
+  through the alias before the reconcile reached it, so the library keeps that bias and keeps the
+  window to a few pages.
 - Conditional writes and the sweep's conditional deletes are replay-safe: a document the sweep
   deleted and the application wrote again before the resume has another sequence number, so the
-  replayed delete gets 409 and the document stays.
+  replayed delete gets 409 and the document stays. The sweep pages the snapshot, keeps no cursor
+  and is replayed whole after a crash during it.
+- A partial answer from the snapshot (second review) is a lost snapshot only when every failed
+  shard reports `search_context_missing_exception`. On all four engines a closed point in time is
+  a 404 `search_phase_execution_exception` whose failed shards are all
+  `search_context_missing_exception`; a script failure on one shard is a 200 with
+  `script_exception` in `_shards.failures`; on Elasticsearch a point in time over a deleted index is
+  a 200 with `no_shard_available_action_exception` (OpenSearch: 404 `index_not_found_exception`).
+  Any other shard failure (a rejected search, a relocating shard) is transient: the item fails and
+  the next run uses the same snapshot, instead of the degraded path, whose `CREATE_MISSING` would
+  bring back deletes made through the alias. `SearchResult.shardFailures` carries the reasons.
+- The post-finish document counts are informational: a failure there (the marker is already gone)
+  is a warning and `deleteOldAfter` still runs.
+- The `first.total() >= cold_count` gate can turn the range off when deletes between the count and
+  the first pass's scroll outnumber the hot documents; that only costs speed (a full scan) and is
+  kept, since dropping it would remove the only check that the scroll saw every document at or
+  below the checkpoint.
 - The same machinery serves the range and full-scan strategies, the degraded `CREATE_MISSING` path
   and the `REVERSE_DELTA` rollback. A marker of 1.0.0-rc.3 or earlier has no progress and replays
   the whole reconcile, as rc.3 did.
