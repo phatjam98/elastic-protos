@@ -51,12 +51,29 @@ class FilterCompositeAggregationSpec extends Specification {
          aggs: [total: [sum: [field: 'size_bytes']]]]
   }
 
-  def "an empty condition matches everything, and the fluent and proto forms agree"() {
+  def "a condition without predicates matches everything, but a filter needs a condition"() {
     expect:
     aggs(document, Aggs.filter('all', SearchCondition.defaultInstance)).all == [filter: [match_all: [:]]]
+    error(document, Aggs.filter('none')).contains("Filter aggregation 'none' needs a condition")
+    error(document, Aggs.filter('none', Criteria.builder())).contains("Filter aggregation 'none' needs a condition")
+    error(document, Aggs.filters('k', Aggs.keyed('a'))).contains("Filters aggregation 'k' filter 'a' needs a condition")
     Aggs.filter('f', Criteria.where('type').equalTo('A')).build() ==
         Aggregation.newBuilder().setName('f').setFilter(FilterAggregation.newBuilder()
-            .setCondition(Criteria.where('type').equalTo('A').asCondition())).build()
+            .addAllCondition(Criteria.where('type').equalTo('A').conditions())).build()
+  }
+
+  def "OR branches are all kept: one condition per branch, compiled like the query's"() {
+    when:
+    def filter = aggs(document, Aggs.filter('f', Criteria.where('type').equalTo('FILING').or().where('type').equalTo('ORDER'))).f
+    def keyed = aggs(document, Aggs.filters('k', Aggs.keyed('either', Criteria.where('type').equalTo('FILING')
+        .or().where('tags').equalTo('urgent')))).k
+
+    then:
+    filter == [filter: [bool: [minimum_should_match: 1, should: [[bool: [filter: [[term: [type: 'FILING']]]]],
+                                                                 [bool: [filter: [[term: [type: 'ORDER']]]]]]]]]
+    keyed.filters.filters.either.bool.should.size() == 2
+    aggs(document, Aggs.filter('g', Criteria.where('type').equalTo('A').end().fullText('x'))).g.filter.bool.keySet() ==
+        ['filter', 'must'] as Set
   }
 
   def "a filter over nested objects enters the nested path and tests its fields without a nested query"() {
@@ -91,8 +108,26 @@ class FilterCompositeAggregationSpec extends Specification {
         .contains("Field 'firm_id' is outside nested path 'parties', which filter aggregation 'f' runs in")
     error(library, Aggs.sub(Aggs.terms('staff', 'staff.name'), Aggs.filter('f', Criteria.where('shelves.label').equalTo('x'))))
         .contains("Field 'shelves.label' is outside nested path 'staff'")
-    error(document, Aggs.sub(Aggs.terms('roles', 'parties.role'), Aggs.filter('f', Criteria.builder().condition().fullText('x'))))
-        .contains("outside nested path 'parties'")
+  }
+
+  def "FULL_TEXT without fields in a nested context searches the full-text fields inside it"() {
+    expect:
+    aggs(document, Aggs.filter('ft', 'parties', Criteria.builder().condition().fullText('acme'))).ft__nested.aggs.ft.filter ==
+        [bool: [must: [[multi_match: [fields: ['parties.name'], query: 'acme', type: 'best_fields']]]]]
+    aggs(firm, Aggs.filter('ft', 'offices', Criteria.builder().condition().fullText('reno'))).ft__nested.aggs.ft.filter ==
+        [bool: [must: [[multi_match: [fields: ['offices.name'], query: 'reno', type: 'best_fields']]]]]
+  }
+
+  def "EXISTS on a nested path the context has entered is always true, and its negation never"() {
+    expect:
+    aggs(library, Aggs.filter('f', 'shelves', Criteria.where('shelves').exists())).f__nested.aggs.f.filter ==
+        [bool: [filter: [[match_all: [:]]]]]
+    aggs(library, Aggs.filter('f', 'shelves', Criteria.where('shelves').not().exists())).f__nested.aggs.f.filter ==
+        [bool: [must_not: [[match_all: [:]]]]]
+    aggs(library, Aggs.filter('f', 'shelves', Criteria.where('shelves').isNull())).f__nested.aggs.f.filter ==
+        [bool: [filter: [[bool: [must_not: [match_all: [:]]]]]]]
+    aggs(library, Aggs.filter('f', 'shelves', Criteria.where('shelves.books').exists())).f__nested.aggs.f.filter ==
+        [bool: [filter: [[nested: [path: 'shelves.books', query: [match_all: [:]]]]]]]
   }
 
   def "a filter takes no field or a nested path"() {
@@ -105,14 +140,23 @@ class FilterCompositeAggregationSpec extends Specification {
         .contains("inside nested path 'children.k.items' of a typed map")
   }
 
-  def "lenient mode skips unknown fields of the condition, and a filter on an unknown nested path"() {
+  def "lenient mode skips a whole filter or filters aggregation whose condition names an unknown field"() {
     when:
     def compiled = compile(lenient, document, Aggs.filter('f', Criteria.where('nope').equalTo('x').and('type').equalTo('A')),
-        Aggs.filter('g', Criteria.where('type').equalTo('A')).setField('nope2'))
+        Aggs.filter('g', Criteria.where('type').equalTo('A')).setField('nope2'),
+        Aggs.filters('k', Aggs.keyed('a', Criteria.where('type').equalTo('A')), Aggs.keyed('b', Criteria.builder().condition().fullText('x') {
+          it.addFields(com.phatjam98.elasticprotos.proto.FieldBoost.newBuilder().setField('nope3'))
+        })).tap { filtersBuilder.setOtherBucketKey('rest') },
+        Aggs.filter('ok', Criteria.where('type').equalTo('A')))
 
     then:
-    compiled.body().aggs == [f: [filter: [bool: [filter: [[term: [type: 'A']]]]]]]
-    compiled.warnings() == ["Skipped EQUALS on unknown field 'nope'", "Skipped filter aggregation 'g' on unknown field 'nope2'"]
+    compiled.body().aggs == [ok: [filter: [bool: [filter: [[term: [type: 'A']]]]]]]
+    compiled.warnings() == ["Skipped EQUALS on unknown field 'nope'",
+                            "Skipped filter aggregation 'f': its condition names an unknown field",
+                            "Skipped filter aggregation 'g' on unknown field 'nope2'",
+                            "Skipped FULL_TEXT on unknown field 'nope3'",
+                            "Skipped FULL_TEXT: none of its fields are mapped",
+                            "Skipped filters aggregation 'k': its condition names an unknown field"]
   }
 
   def "conditions are typed and checked as in queries"() {
@@ -148,7 +192,7 @@ class FilterCompositeAggregationSpec extends Specification {
     where:
     aggregation                                                                                              || reason
     Aggs.filters('f')                                                                                        || "Filters aggregation 'f' needs at least one filter"
-    Aggs.filters('f', KeyedFilter.newBuilder().setCondition(SearchCondition.defaultInstance).build())        || 'has a filter without a key'
+    Aggs.filters('f', KeyedFilter.newBuilder().addCondition(SearchCondition.defaultInstance).build())        || 'has a filter without a key'
     Aggs.filters('f', Aggs.keyed('a', SearchCondition.defaultInstance), Aggs.keyed('a', SearchCondition.defaultInstance)) || "uses the key 'a' twice"
     Aggs.filters('f', Aggs.keyed('a', SearchCondition.defaultInstance)).tap { filtersBuilder.setOtherBucketKey('a') } || "other_bucket_key 'a', which is also the key of a filter"
   }
@@ -214,6 +258,10 @@ class FilterCompositeAggregationSpec extends Specification {
     Aggs.composite('c')                                                                                 || "Composite aggregation 'c' needs at least one source"
     Aggs.composite('c', CompositeSource.newBuilder().setField('type').setTerms(com.phatjam98.elasticprotos.proto.CompositeTermsSource.defaultInstance)) || 'has a source without a name'
     Aggs.composite('c', Aggs.termsSource('a', 'type'), Aggs.termsSource('a', 'tags'))                   || "uses the source name 'a' twice"
+    Aggs.composite('c', Aggs.termsSource('a.b', 'type'))                                                || "Source name 'a.b' of composite aggregation 'c' must not contain '.'"
+    Aggs.composite('c', Aggs.termsSource('a__b', 'type'))                                               || "Source name 'a__b' of composite aggregation 'c' must not contain '__'"
+    Aggs.composite('c', Aggs.termsSource('a[0]', 'type'))                                               || "must not contain '['"
+    Aggs.composite('c', Aggs.termsSource('a_', 'type'))                                                 || "Source name 'a_' of composite aggregation 'c' must not end with '_'"
     Aggs.composite('c', CompositeSource.newBuilder().setName('a').setField('type'))                     || "The source 'a' of composite aggregation 'c' sets no kind"
     Aggs.composite('c', Aggs.termsSource('a', ''))                                                      || "The source 'a' of composite aggregation 'c' needs a field"
     Aggs.composite('c', Aggs.termsSource('a', 'body'))                                                  || "Terms source 'a' of composite aggregation 'c' needs exact values"
@@ -300,7 +348,8 @@ class FilterCompositeAggregationSpec extends Specification {
     Aggs.dateHistogramSource('a', 'f', '1h').build().dateHistogram.fixedInterval == '1h'
     Aggs.histogramSource('a', 'f', 2.5).build().histogram.interval == 2.5d
     Aggs.composite('c', Aggs.termsSource('a', 'f')).build().composite.sourcesCount == 1
-    Aggs.keyed('k', Criteria.where('type').equalTo('A')).condition.fieldConditionCount == 1
+    Aggs.keyed('k', Criteria.where('type').equalTo('A')).conditionList*.fieldConditionCount == [1]
+    Aggs.filter('f', Criteria.where('a').exists().or().where('b').exists().end()).filter.conditionCount == 2
     Aggs.filter('f', 'parties', Criteria.where('parties.role').equalTo('A')).field == 'parties'
   }
 }

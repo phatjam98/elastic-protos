@@ -603,7 +603,8 @@ abstract class EngineIntegrationSpec extends Specification {
         Aggs.sub(Aggs.filter('plaintiffs', 'parties', Criteria.where('parties.role').equalTo('PLAINTIFF')),
             Aggs.terms('names', 'parties.name'), Aggs.cardinality('docs', 'id')),
         Aggs.sub(Aggs.terms('roles', 'parties.role'),
-            Aggs.filter('with_email', Criteria.where('parties.email').startsWith('legal@')))))
+            Aggs.filter('with_email', Criteria.where('parties.email').startsWith('legal@'))),
+        Aggs.filter('filings_or_orders', Criteria.where('type').equalTo('FILING').or().where('type').equalTo('ORDER'))))
 
     then: 'keyed buckets come sorted by key; a document falls into every bucket it matches'
     aggs.buckets('kinds')*.key() == ['acme', 'filings', 'rest']
@@ -618,6 +619,9 @@ abstract class EngineIntegrationSpec extends Specification {
     aggs.bucket('plaintiffs').docCount() == 3L
     aggs.bucket('plaintiffs').sub().buckets('names')*.key() == ['Acme Corp', 'Initech LLC', 'Jane Doe']
     aggs.bucket('plaintiffs').sub().metric('docs').asLong() == 3L
+
+    and: 'OR branches of a filter are all kept'
+    aggs.bucket('filings_or_orders').docCount() == 4L
 
     and: 'under a nested bucket the condition tests the same party'
     aggs.buckets('roles').collectEntries { [(it.key()): it.sub().bucket('with_email').docCount()] } ==

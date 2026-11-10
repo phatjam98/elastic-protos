@@ -140,23 +140,11 @@ public final class QueryCompiler {
   private Map<String, Object> query(SearchCriteria criteria, IndexDefinition index,
       List<String> warnings) {
     Objects.requireNonNull(index, "index");
-    ConditionCompiler conditions = new ConditionCompiler(config, index, warnings);
-    List<Object> compiled = new ArrayList<>();
-    for (SearchCondition condition : criteria.getSearchConditionList()) {
-      compiled.add(conditions.compile(condition));
-    }
-    if (compiled.isEmpty()) {
+    if (criteria.getSearchConditionCount() == 0) {
       return object("match_all", new TreeMap<>());
     }
-    if (compiled.size() == 1) {
-      @SuppressWarnings("unchecked")
-      Map<String, Object> single = (Map<String, Object>) compiled.get(0);
-      return single;
-    }
-    Map<String, Object> bool = new TreeMap<>();
-    bool.put("should", compiled);
-    bool.put("minimum_should_match", 1);
-    return object("bool", bool);
+    return new ConditionCompiler(config, index, warnings)
+        .compileAny(criteria.getSearchConditionList());
   }
 
   private boolean paging(SearchCriteria criteria, List<Object> sort, Map<String, Object> body,

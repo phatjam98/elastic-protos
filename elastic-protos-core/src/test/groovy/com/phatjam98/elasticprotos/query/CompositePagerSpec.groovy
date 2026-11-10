@@ -60,8 +60,10 @@ class CompositePagerSpec extends Specification {
     !pager.hasNext()
     pager.afterKey() == Optional.of([firm: 'firm-3', month: '2024-06', relevance: 0.75d])
 
-    and: 'only the composite, no hits, no highlight, the query kept, and the after key of the previous page'
+    and: 'only the composite, no hits, no hit count, no highlight, the query kept, and the after key of the previous page'
     bodies.every { it.size == 0 && !it.containsKey('highlight') && it.aggs.keySet() == ['pairs'] as Set }
+    bodies.every { it.track_total_hits == false }
+    pager.warnings().isEmpty()
     bodies.every { it.query == [bool: [filter: [[terms: [type: ['FILING', 'MOTION', 'ORDER', 'NOTICE']]]]]] }
     bodies*.aggs*.pairs*.composite*.after == [null, [firm: 'firm-2', month: '2024-03', relevance: null],
                                               [firm: 'firm-3', month: '2024-06', relevance: 0.75d]]
@@ -133,6 +135,47 @@ class CompositePagerSpec extends Specification {
       assert args[1].aggs.pairs.composite.after == [firm: 'firm-2', month: '2024-03', relevance: null]
       result([pairs: [buckets: []]])
     }
+  }
+
+  def "an engine that returns the after key it was sent makes the pager throw instead of looping"() {
+    given:
+    SearchEngine engine = Mock()
+    def page = [pairs: [after_key: [firm: 'a', month: 'b', relevance: null],
+                        buckets: [[key: [firm: 'a', month: 'b', relevance: null], doc_count: 1]]]]
+
+    when:
+    def pager = CompositePager.open(engine, compiler, ['documents'], criteria(), document, 'pairs')
+    pager.next()
+    pager.hasNext()
+
+    then:
+    2 * engine.search(_, _) >> result(page)
+    def e = thrown(IllegalStateException)
+    e.message.startsWith("Composite aggregation 'pairs' returned the after key it was sent")
+    !pager.hasNext()
+  }
+
+  def "a composite a lenient compiler skipped fails when the pager is opened; invalid requests too"() {
+    given:
+    def lenient = QueryCompiler.of(QueryCompilerConfig.standard().withLenient(true))
+    def unknown = Criteria.builder().aggregate(Aggs.composite('c', Aggs.termsSource('a', 'nope'))).build()
+
+    when:
+    CompositePager.open(Mock(SearchEngine), lenient, ['documents'], unknown, document, 'c')
+
+    then:
+    def e = thrown(IllegalArgumentException)
+    e.message == "Composite aggregation 'c' was skipped by the lenient compiler, so there is nothing to page: [Skipped composite aggregation 'c' on unknown field 'nope']"
+
+    when:
+    CompositePager.open(Mock(SearchEngine), compiler, ['documents'], unknown, document, 'c')
+
+    then:
+    thrown(QueryCompileException)
+
+    expect: 'only the paged request is compiled: other aggregations are not checked'
+    CompositePager.open(Mock(SearchEngine), lenient, ['documents'], criteria().toBuilder()
+        .addAggregation(Aggs.terms('t', 'nope').build()).build(), document, 'pairs').warnings().isEmpty()
   }
 
   def "open refuses criteria without that composite aggregation"() {

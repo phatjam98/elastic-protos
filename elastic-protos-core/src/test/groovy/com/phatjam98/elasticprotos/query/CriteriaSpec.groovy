@@ -227,15 +227,17 @@ class CriteriaSpec extends Specification {
     built.getSearchCondition(0).getFieldCondition(0) instanceof FieldCondition
   }
 
-  def "asCondition returns one branch's predicates, for filter aggregations, without criteria-wide ones"() {
+  def "conditions returns every branch of the criteria, criteria-wide predicates included, from any branch"() {
     given:
     def criteria = Criteria.builder().fullText('merger')
-    def branch = criteria.condition().where('type').equalTo('MOTION').and('tags').not().anyOf('x')
+    def first = criteria.condition().where('type').equalTo('MOTION').and('tags').not().anyOf('x')
+    def second = first.or().where('type').equalTo('ORDER')
 
     expect:
-    branch.asCondition().fieldConditionList*.field == ['type', 'tags']
-    branch.asCondition().getFieldCondition(1).negate
-    criteria.build().getSearchCondition(0).fieldConditionCount == 3
-    Criteria.where('a').exists().asCondition() == Criteria.where('a').exists().build().getSearchCondition(0)
+    second.conditions() == criteria.build().searchConditionList
+    first.conditions() == second.conditions()
+    second.conditions()*.fieldConditionList*.collect { it.field } == [['type', 'tags', ''], ['type', '']]
+    second.conditions()[0].getFieldCondition(1).negate
+    Criteria.builder().conditions().isEmpty()
   }
 }

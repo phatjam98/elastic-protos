@@ -21,6 +21,7 @@ import com.phatjam98.elasticprotos.proto.MetricType;
 import com.phatjam98.elasticprotos.proto.PrimitiveValue;
 import com.phatjam98.elasticprotos.proto.RangeAggregation;
 import com.phatjam98.elasticprotos.proto.RangeBucket;
+import com.phatjam98.elasticprotos.proto.SearchCondition;
 import com.phatjam98.elasticprotos.proto.SortingOrder;
 import com.phatjam98.elasticprotos.proto.TermsAggregation;
 import com.phatjam98.elasticprotos.proto.TermsOrder;
@@ -85,10 +86,11 @@ final class AggregationCompiler {
    * @return the {@code aggs} object; empty when there is nothing to compute
    */
   Map<String, Object> compile(List<Aggregation> aggregations) {
+    Map<String, Object> body = level(aggregations, List.of(), 0).body();
     if (config.maxAggregationBuckets() > 0) {
-      checkBuckets(aggregations, 1L, "");
+      checkBuckets(body, 1L, "");
     }
-    return level(aggregations, List.of(), 0).body();
+    return body;
   }
 
   /** The compiled aggregations of one level and the order paths of their names. */
@@ -116,21 +118,7 @@ final class AggregationCompiler {
     if (name.isEmpty()) {
       throw new QueryCompileException("Every aggregation needs a name", null);
     }
-    if (name.contains(WRAPPER)) {
-      throw new QueryCompileException("Aggregation name '" + name + "' must not contain '"
-          + WRAPPER + "', which is reserved for the nested wrappers", null);
-    }
-    for (String forbidden : FORBIDDEN_CHARACTERS) {
-      if (name.contains(forbidden)) {
-        throw new QueryCompileException("Aggregation name '" + name + "' must not contain '"
-            + forbidden + "': the engines reject '[', ']' and '>' in names, and '.' and '>'"
-            + " break the paths that order terms by a metric", null);
-      }
-    }
-    if (name.endsWith("_")) {
-      throw new QueryCompileException("Aggregation name '" + name + "' must not end with '_',"
-          + " so that the nested wrapper suffixes can be told apart from it", null);
-    }
+    checkCharacters("Aggregation name '" + name + "'", name);
     if (RESERVED_NAMES.contains(name)) {
       throw new QueryCompileException("Aggregation name '" + name + "' is reserved: it is a key"
           + " of the engine's bucket objects (" + String.join(", ",
@@ -140,6 +128,25 @@ final class AggregationCompiler {
     if (!siblings.add(name)) {
       throw new QueryCompileException(
           "Aggregation name '" + name + "' is used twice on the same level", null);
+    }
+  }
+
+  /** The character rules of aggregation names, also applied to composite source names. */
+  private static void checkCharacters(String subject, String name) {
+    if (name.contains(WRAPPER)) {
+      throw new QueryCompileException(subject + " must not contain '" + WRAPPER
+          + "', which is reserved for the nested wrappers", null);
+    }
+    for (String forbidden : FORBIDDEN_CHARACTERS) {
+      if (name.contains(forbidden)) {
+        throw new QueryCompileException(subject + " must not contain '" + forbidden + "': the"
+            + " engines reject '[', ']' and '>' in names, and '.' and '>' break the paths that"
+            + " order terms by a metric", null);
+      }
+    }
+    if (name.endsWith("_")) {
+      throw new QueryCompileException(subject + " must not end with '_', so that the nested"
+          + " wrapper suffixes can be told apart from it", null);
     }
   }
 
@@ -298,38 +305,52 @@ final class AggregationCompiler {
 
   // ---- bucket guard --------------------------------------------------------------------------
 
-  /** Refuses aggregation paths whose requested bucket counts multiply beyond the limit. */
-  private void checkBuckets(List<Aggregation> aggregations, long product, String path) {
-    for (Aggregation aggregation : aggregations) {
+  /**
+   * Refuses aggregation paths whose requested bucket counts multiply beyond the limit, over the
+   * compiled aggregations, so that what lenient mode skipped does not count. The nested wrappers
+   * count one bucket and are left out of the reported path.
+   */
+  private void checkBuckets(Map<String, Object> aggs, long product, String path) {
+    for (Map.Entry<String, Object> entry : aggs.entrySet()) {
+      Map<String, Object> aggregation = map(entry.getValue());
+      boolean wrapper = aggregation.containsKey("nested")
+          || aggregation.containsKey("reverse_nested");
       long buckets = Math.max(1L, requestedBuckets(aggregation));
       long total = product > Long.MAX_VALUE / buckets ? Long.MAX_VALUE : product * buckets;
-      String here = path.isEmpty() ? aggregation.getName() : path + ">" + aggregation.getName();
+      String here = wrapper ? path : path.isEmpty() ? entry.getKey() : path + ">" + entry.getKey();
       if (total > config.maxAggregationBuckets()) {
         throw new QueryCompileException("Aggregations '" + here + "' ask for up to " + total
             + " buckets (the product of their sizes), more than the maximum of "
             + config.maxAggregationBuckets() + " (QueryCompilerConfig.maxAggregationBuckets);"
             + " request fewer buckets", null);
       }
-      checkBuckets(aggregation.getSubAggregationList(), total, here);
+      checkBuckets(map(aggregation.get("aggs")), total, here);
     }
   }
 
-  private static long requestedBuckets(Aggregation aggregation) {
-    switch (aggregation.getKindCase()) {
-      case TERMS:
-        return aggregation.getTerms().getSize() == 0 ? DEFAULT_BUCKETS
-            : aggregation.getTerms().getSize();
-      case COMPOSITE:
-        return aggregation.getComposite().getSize() == 0 ? DEFAULT_BUCKETS
-            : aggregation.getComposite().getSize();
-      case RANGE:
-        return aggregation.getRange().getRangesCount();
-      case FILTERS:
-        FiltersAggregation filters = aggregation.getFilters();
-        return filters.getFiltersCount() + (filters.getOtherBucketKey().isEmpty() ? 0 : 1);
-      default:
-        return 1L;
+  /** The bucket count a compiled aggregation asks for; one when it depends on the data. */
+  private static long requestedBuckets(Map<String, Object> aggregation) {
+    if (aggregation.get("terms") instanceof Map<?, ?> terms) {
+      return terms.get("size") instanceof Number size ? size.longValue() : DEFAULT_BUCKETS;
     }
+    if (aggregation.get("composite") instanceof Map<?, ?> composite) {
+      return composite.get("size") instanceof Number size ? size.longValue() : DEFAULT_BUCKETS;
+    }
+    for (String range : List.of("range", "date_range")) {
+      if (aggregation.get(range) instanceof Map<?, ?> body
+          && body.get("ranges") instanceof List<?> ranges) {
+        return ranges.size();
+      }
+    }
+    if (aggregation.get("filters") instanceof Map<?, ?> filters) {
+      return map(filters.get("filters")).size() + (filters.containsKey("other_bucket_key") ? 1 : 0);
+    }
+    return 1L;
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Map<String, Object> map(Object value) {
+    return value instanceof Map ? (Map<String, Object>) value : Map.of();
   }
 
   // ---- filter and filters --------------------------------------------------------------------
@@ -360,16 +381,33 @@ final class AggregationCompiler {
         what.substring(0, 1).toLowerCase(Locale.ROOT) + what.substring(1));
     Map<String, Object> inner;
     if (single) {
-      inner = object("filter", conditions.compile(aggregation.getFilter().getCondition()));
+      inner = object("filter", condition(what, aggregation.getFilter().getConditionList(),
+          conditions));
     } else {
-      inner = object("filters", filters(what, aggregation.getFilters(), conditions, path));
+      inner = object("filters", filters(what, aggregation.getFilters(), conditions));
+    }
+    if (conditions.skipped() > 0) {
+      // lenient: a dropped predicate would widen the bucket into a plausible but wrong count
+      warnings.add("Skipped " + what.substring(0, 1).toLowerCase(Locale.ROOT) + what.substring(1)
+          + ": its condition names an unknown field");
+      return null;
     }
     putSubs(inner, level(aggregation.getSubAggregationList(), filterContext, depth + 1).body());
     return wrap(name, context, filterContext, inner);
   }
 
+  /** Compiles the OR of conditions of a filter, or of one keyed filter. */
+  private static Map<String, Object> condition(String what, List<SearchCondition> conditions,
+      ConditionCompiler compiler) {
+    if (conditions.isEmpty()) {
+      throw new QueryCompileException(what + " needs a condition; a SearchCondition without"
+          + " field conditions matches everything", null);
+    }
+    return compiler.compileAny(conditions);
+  }
+
   private static Map<String, Object> filters(String what, FiltersAggregation filters,
-      ConditionCompiler conditions, String path) {
+      ConditionCompiler conditions) {
     if (filters.getFiltersCount() == 0) {
       throw new QueryCompileException(what + " needs at least one filter", null);
     }
@@ -382,7 +420,8 @@ final class AggregationCompiler {
         throw new QueryCompileException(what + " uses the key '" + filter.getKey() + "' twice",
             null);
       }
-      keyed.put(filter.getKey(), conditions.compile(filter.getCondition()));
+      keyed.put(filter.getKey(), condition(what + " filter '" + filter.getKey() + "'",
+          filter.getConditionList(), conditions));
     }
     Map<String, Object> body = new TreeMap<>();
     body.put("filters", keyed);
@@ -420,6 +459,8 @@ final class AggregationCompiler {
       if (source.getName().isEmpty()) {
         throw new QueryCompileException(what + " has a source without a name", source.getField());
       }
+      checkCharacters("Source name '" + source.getName() + "' of " + what.substring(0, 1)
+          .toLowerCase(Locale.ROOT) + what.substring(1), source.getName());
       if (!sourceNames.add(source.getName())) {
         throw new QueryCompileException(what + " uses the source name '" + source.getName()
             + "' twice", source.getField());

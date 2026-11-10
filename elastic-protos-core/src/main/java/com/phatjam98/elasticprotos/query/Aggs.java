@@ -21,6 +21,8 @@ import com.phatjam98.elasticprotos.proto.RangeBucket;
 import com.phatjam98.elasticprotos.proto.SearchCondition;
 import com.phatjam98.elasticprotos.proto.TermsAggregation;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -173,43 +175,57 @@ public final class Aggs {
   }
 
   /**
-   * Starts a filter aggregation: one bucket of the documents that match the condition, in the
-   * context of its parent (the root documents at the top level).
+   * Starts a filter aggregation: one bucket of the documents that match any of the conditions
+   * (each an AND of field conditions), in the context of its parent (the root documents at the top
+   * level).
    *
    * @param name the aggregation name
-   * @param condition the condition, compiled like a condition of the query
+   * @param conditions the conditions, OR-ed and compiled like the conditions of the query
    * @return the builder
    */
-  public static Aggregation.Builder filter(String name, SearchCondition condition) {
+  public static Aggregation.Builder filter(String name, SearchCondition... conditions) {
     return Aggregation.newBuilder().setName(Objects.requireNonNull(name, "name"))
-        .setFilter(FilterAggregation.newBuilder()
-            .setCondition(Objects.requireNonNull(condition, "condition")));
+        .setFilter(FilterAggregation.newBuilder().addAllCondition(list(conditions)));
   }
 
   /**
-   * Starts a filter aggregation from a criteria branch, such as {@code
-   * Criteria.where("type").equalTo("FILING")}.
+   * Starts a filter aggregation from a criteria, such as {@code
+   * Criteria.where("type").equalTo("FILING").or().where("type").equalTo("ORDER")}: every branch
+   * of the criteria the branch belongs to is OR-ed ({@link Criteria.Branch#conditions()}).
    *
    * @param name the aggregation name
-   * @param condition the branch whose predicates form the condition
+   * @param criteria any branch of the criteria whose conditions form the filter
    * @return the builder
    */
-  public static Aggregation.Builder filter(String name, Criteria.Branch condition) {
-    return filter(name, Objects.requireNonNull(condition, "condition").asCondition());
+  public static Aggregation.Builder filter(String name, Criteria.Branch criteria) {
+    return filter(name, Objects.requireNonNull(criteria, "criteria").conditions()
+        .toArray(new SearchCondition[0]));
+  }
+
+  /**
+   * Starts a filter aggregation from every branch of a criteria ({@link Criteria#conditions()}).
+   *
+   * @param name the aggregation name
+   * @param criteria the criteria whose conditions form the filter
+   * @return the builder
+   */
+  public static Aggregation.Builder filter(String name, Criteria criteria) {
+    return filter(name, Objects.requireNonNull(criteria, "criteria").conditions()
+        .toArray(new SearchCondition[0]));
   }
 
   /**
    * Starts a filter aggregation over the nested objects at a nested path: one bucket of the
-   * objects that match the condition, whose fields must be inside that path.
+   * objects that match the conditions, whose fields must be inside that path.
    *
    * @param name the aggregation name
    * @param nestedPath a field mapped as nested, such as {@code "parties"}
-   * @param condition the branch whose predicates form the condition
+   * @param criteria any branch of the criteria whose conditions form the filter
    * @return the builder
    */
   public static Aggregation.Builder filter(String name, String nestedPath,
-      Criteria.Branch condition) {
-    return filter(name, condition).setField(Objects.requireNonNull(nestedPath, "nestedPath"));
+      Criteria.Branch criteria) {
+    return filter(name, criteria).setField(Objects.requireNonNull(nestedPath, "nestedPath"));
   }
 
   /**
@@ -230,26 +246,35 @@ public final class Aggs {
   }
 
   /**
-   * Returns one named bucket of a filters aggregation.
+   * Returns one named bucket of a filters aggregation: what matches any of the conditions.
    *
    * @param key the bucket key
-   * @param condition the condition
+   * @param conditions the conditions, OR-ed
    * @return the keyed filter
    */
-  public static KeyedFilter keyed(String key, SearchCondition condition) {
+  public static KeyedFilter keyed(String key, SearchCondition... conditions) {
     return KeyedFilter.newBuilder().setKey(Objects.requireNonNull(key, "key"))
-        .setCondition(Objects.requireNonNull(condition, "condition")).build();
+        .addAllCondition(list(conditions)).build();
   }
 
   /**
-   * Returns one named bucket of a filters aggregation from a criteria branch.
+   * Returns one named bucket of a filters aggregation from every branch of a criteria.
    *
    * @param key the bucket key
-   * @param condition the branch whose predicates form the condition
+   * @param criteria any branch of the criteria whose conditions form the bucket
    * @return the keyed filter
    */
-  public static KeyedFilter keyed(String key, Criteria.Branch condition) {
-    return keyed(key, Objects.requireNonNull(condition, "condition").asCondition());
+  public static KeyedFilter keyed(String key, Criteria.Branch criteria) {
+    return keyed(key, Objects.requireNonNull(criteria, "criteria").conditions()
+        .toArray(new SearchCondition[0]));
+  }
+
+  private static List<SearchCondition> list(SearchCondition... conditions) {
+    List<SearchCondition> list = new ArrayList<>();
+    for (SearchCondition condition : conditions) {
+      list.add(Objects.requireNonNull(condition, "condition"));
+    }
+    return list;
   }
 
   /**

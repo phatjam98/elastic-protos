@@ -1185,11 +1185,16 @@ for `nested` aggregations, and such paths are mapped only once a key is used.
 
 #### Filter and filters
 
-A `filter` aggregation is one bucket of what matches a `SearchCondition`; `filters` has one keyed
-bucket per condition, plus an optional bucket (`other_bucket_key`) for what matches none. The
-conditions are compiled by the query compiler, so they are typed, use `.keyword` sub-fields,
-skip unknown fields with a warning when lenient, and wrap nested fields in `nested` queries.
-`Criteria.where(...)` branches turn into conditions (`Branch.asCondition()`):
+A `filter` aggregation is one bucket of what matches its condition; `filters` has one keyed bucket
+per condition, plus an optional bucket (`other_bucket_key`) for what matches none. A condition is
+`repeated SearchCondition`, an OR of ANDs exactly like `SearchCriteria.search_condition`, compiled
+by the query compiler: typed, through `.keyword` sub-fields, with nested fields wrapped in `nested`
+queries. At least one `SearchCondition` is required; one without field conditions matches
+everything. A `Criteria` (or any of its branches) passed to `Aggs.filter` or `Aggs.keyed`
+contributes every branch, `or()` included (`Criteria.conditions()`). In lenient mode a filter whose
+condition names an unknown field is skipped as a whole, with a warning, instead of counting more
+than asked; so is a `filters` aggregation if any of its conditions does, since a missing bucket
+would change the other bucket:
 
 ```java
 Aggs.sub(Aggs.filter("filings", Criteria.where("type").equalTo("FILING")
@@ -1205,6 +1210,9 @@ Aggs.sub(Aggs.filter("plaintiffs", "parties",                  // the plaintiff 
         Criteria.where("parties.role").equalTo("PLAINTIFF")),
     Aggs.terms("names", "parties.name"),
     Aggs.cardinality("docs", "id"));                           // ... and their documents
+
+Aggs.filter("decided", Criteria.where("type").equalTo("ORDER")
+    .or().where("tags").equalTo("closed"));                    // an OR of two conditions
 ```
 
 A filter runs in the nested context of its parent, like any aggregation: at the top level it tests
@@ -1214,8 +1222,11 @@ is wrapped in `<name>__nested` and tests the nested objects one by one. Under a 
 field (such as terms on `parties.role`), a filter already runs on the parties. In a nested context,
 fields of that context are tested directly, deeper nested fields get `nested` queries for the
 remaining levels, and fields outside the context are refused: the engines cannot test them there
-(and a `nested` query on the path already entered returns wrong counts). Sub-aggregations of a
-filter run in its context.
+(and a `nested` query on the path already entered returns wrong counts). `FULL_TEXT` without fields
+searches the full-text fields inside the context, and `EXISTS` on a nested path the context has
+entered is always true. Sub-aggregations of a filter run in its context. Testing root fields from
+inside a nested context (a `reverse_nested` filter) is not supported yet; it can be added later as
+a new field of `FilterAggregation` and `FiltersAggregation` (see ADR 0012).
 
 #### Composite and paging
 
@@ -1238,22 +1249,26 @@ SearchCriteria criteria = Criteria.builder()
 CompositePager.forEachBucket(engine, compiler, List.of(documents.alias()), criteria, documents,
     "pairs", bucket -> {
       Map<String, Object> key = bucket.compositeKey();   // {firm=firm-1, month=..., relevance=null}
-      double total = bucket.sub().metric("total").value();
+      Double total = bucket.sub().metric("total").value();   // null when no document had it
     });
 ```
 
-`CompositePager` sends only the named composite (no hits, no highlighting) with the criteria's
-conditions, passes each `after_key` on, and stops at the first page without buckets or
-`after_key`; a short page is not taken as the last one, since the engines do not promise that.
+`CompositePager` compiles the request once, when it is opened (invalid criteria, or a composite a
+lenient compiler skipped, fail there), and sends only the named composite (no hits, no hit count,
+no highlighting) with the criteria's conditions. It passes each `after_key` on and stops at the
+first page without buckets or `after_key`; a short page is not taken as the last one, since the
+engines do not promise that. An engine that returns the after key it was sent makes it throw.
 Each page is a separate search: no point in time holds the data still. `pager.afterKey()` resumes
 later (`Aggs.after(composite, key)`), and `ElasticProtosService.composite(criteria, type, name)`
-returns a pager for a message type. To page by hand, read `aggs.afterKey("pairs")` and set it with
-`Aggs.after`.
+returns a pager for a message type. To page by hand, check that the page has buckets (a page
+without them is the last), then read `aggs.afterKey("pairs")` and set it with `Aggs.after`. In
+proto3 JSON, a null (missing bucket) value of `after` is written `{}`.
 
 A composite must be a top-level aggregation (the engines accept it only there or directly under
 `nested`). When its sources are inside nested objects it is wrapped in `<name>__nested`, and all
 its sources must then share their nested path; its sub-aggregations run in that context. Its
-`size` is at most `maxTermsSize`.
+`size` is at most `maxTermsSize` (raise it to page in larger steps; the engines allow up to
+`search.max_buckets`). Source names follow the character rules of aggregation names.
 
 #### Reading the results
 
@@ -1282,8 +1297,9 @@ date terms and for date histograms (epoch millis), a `Long` `1` or `0` for boole
 `sub`, the results inside the bucket, read the same way at any depth. Filters buckets have their
 key as `key`; composite buckets have a `Map` of source name to value (`compositeKey()`; boolean
 terms are `Boolean`s, a missing bucket `null`). `bucket(name)` reads the single bucket of a filter
-(its key is null), and `afterKey(name)` the `after_key` of a composite (empty once there are no
-more pages). The adapters parse responses into key-sorted maps, so keyed buckets (filters, the
+(its key is null, and `keyString()` too), and `afterKey(name)` the `after_key` of a composite page
+with buckets (empty when the engine returned none; a page without buckets, the last one, cannot be
+told from an empty histogram and throws). The adapters parse responses into key-sorted maps, so keyed buckets (filters, the
 other bucket included) come sorted by key and composite keys by source name. `MetricValue` has
 `value()` (null when no document had the field), `valueAsString()`, `isPresent()` and `asLong()`.
 Keyed (object-shaped) buckets are read too. An unknown name throws `NoSuchElementException`

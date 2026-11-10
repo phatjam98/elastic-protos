@@ -111,6 +111,32 @@ public final class NestedPathResolver {
     this.contextOwner = contextOwner;
   }
 
+  /** Returns whether the resolver runs inside nested objects. */
+  public boolean hasContext() {
+    return !context.isEmpty();
+  }
+
+  /** Returns the innermost nested path of the context, or null without a context. */
+  public String contextPath() {
+    return context.isEmpty() ? null : context.get(context.size() - 1);
+  }
+
+  /** Returns what runs in the context, for error messages; null without a context. */
+  public String contextOwner() {
+    return contextOwner;
+  }
+
+  /** Returns whether a path is one of the nested paths the context has entered. */
+  public boolean entered(String path) {
+    return context.contains(path);
+  }
+
+  /** Returns whether a field is inside the context (always true without a context). */
+  public boolean inContext(String fieldPath) {
+    List<String> all = index.nestedAncestors(fieldPath);
+    return all.size() >= context.size() && all.subList(0, context.size()).equals(context);
+  }
+
   /**
    * Returns the nested paths enclosing a field, outermost first, without the paths of the context.
    *
@@ -121,7 +147,7 @@ public final class NestedPathResolver {
     if (context.isEmpty()) {
       return all;
     }
-    if (all.size() < context.size() || !all.subList(0, context.size()).equals(context)) {
+    if (!inContext(fieldPath)) {
       String path = context.get(context.size() - 1);
       throw new QueryCompileException("Field '" + fieldPath + "' is outside nested path '" + path
           + "', which " + contextOwner + " runs in; a condition on nested objects can only test"

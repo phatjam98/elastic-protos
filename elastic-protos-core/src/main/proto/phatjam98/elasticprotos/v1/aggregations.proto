@@ -60,12 +60,13 @@ message Aggregation {
 // A filter aggregation: a single bucket of the documents, or of the nested objects when
 // Aggregation.field names a nested path, that match the condition.
 message FilterAggregation {
-  // The condition, compiled exactly like a SearchCondition of the query: an AND of field
-  // conditions, typed and checked against the mapping, with fields inside nested objects below
-  // the aggregation's context wrapped in nested queries. Fields outside the context (such as a
-  // root field while filtering nested objects) are refused. An empty condition matches
-  // everything.
-  SearchCondition condition = 1;
+  // The condition: (condition1 OR condition2 OR ...), each an AND of field conditions, compiled
+  // exactly like SearchCriteria.search_condition: typed and checked against the mapping, with
+  // fields inside nested objects below the aggregation's context wrapped in nested queries. Fields
+  // outside the context (such as a root field while filtering nested objects) are refused. At
+  // least one is required; a SearchCondition without field conditions matches everything. In
+  // lenient mode, a filter whose condition names an unknown field is skipped as a whole.
+  repeated SearchCondition condition = 1;
 }
 
 // A filters aggregation: one bucket per named condition. A document (or nested object) falls
@@ -82,8 +83,10 @@ message FiltersAggregation {
 message KeyedFilter {
   // The bucket key in the response; required.
   string key = 1;
-  // The condition, as in FilterAggregation.condition.
-  SearchCondition condition = 2;
+  // The condition, as in FilterAggregation.condition: an OR of ANDs, at least one. In lenient
+  // mode, a filters aggregation any of whose conditions names an unknown field is skipped as a
+  // whole, since dropping one bucket would change the other bucket.
+  repeated SearchCondition condition = 2;
 }
 
 // A composite aggregation: buckets for every combination of the values of its sources, ordered
@@ -98,14 +101,16 @@ message CompositeAggregation {
   int32 size = 2;
   // The key to continue after: the after_key of the previous page, one value per source name. A
   // PrimitiveValue without a kind stands for null, the key of the missing bucket of a source with
-  // missing_bucket. Empty starts at the first page.
+  // missing_bucket; in proto3 JSON it is written {}, since JSON null is not a valid map value.
+  // Empty starts at the first page.
   map<string, PrimitiveValue> after = 3;
 }
 
 // One source of a composite aggregation; exactly one kind must be set.
 message CompositeSource {
-  // The name of the source in the bucket keys; required and unique within the aggregation, with
-  // the same character rules as aggregation names.
+  // The name of the source in the bucket keys; required and unique within the aggregation. Like
+  // an aggregation name it must not contain "__", "[", "]", ">" or "." and must not end with "_".
+  // Sources are compiled in order, but the adapters read bucket keys into maps sorted by name.
   string name = 1;
   // The dotted index path of the field, as for a terms, date_histogram or histogram aggregation.
   string field = 2;
