@@ -14,7 +14,8 @@ final class FlattenedKeys {
   private FlattenedKeys() {}
 
   /**
-   * Returns the flattened field that encloses a path.
+   * Returns the flattened field that encloses a path: a declared one, or one inside the values of
+   * a typed map, such as {@code outer.k.labels} for {@code outer.k.labels.env}.
    *
    * @param index the index
    * @param name a dotted path
@@ -22,7 +23,7 @@ final class FlattenedKeys {
    */
   static FieldInfo root(IndexDefinition index, String name) {
     for (int dot = name.lastIndexOf('.'); dot > 0; dot = name.lastIndexOf('.', dot - 1)) {
-      FieldInfo root = index.fields().get(name.substring(0, dot));
+      FieldInfo root = index.resolve(name.substring(0, dot)).orElse(null);
       if (root == null || root.kind() != FieldKind.FLATTENED) {
         continue;
       }
@@ -36,11 +37,13 @@ final class FlattenedKeys {
    *
    * @param root the flattened field, from {@link #root(IndexDefinition, String)}
    * @param name the full dotted path of the key
-   * @return a {@code FLATTENED} field description whose path is the key's path
+   * @return a {@code FLATTENED} field description whose path is the key's path; dynamic when the
+   *     flattened field lives inside the values of a typed map
    */
   static FieldInfo key(FieldInfo root, String name) {
     String key = name.substring(root.path().length() + 1);
     return new FieldInfo(name, root.protoPath() + "." + key, FieldKind.FLATTENED,
-        root.repeated(), false, root.boost(), root.field());
+        root.repeated(), false, root.boost(), root.field(),
+        root.isDynamic() ? root.pattern() + "." + key : null, true);
   }
 }

@@ -14,7 +14,8 @@ Short records of the decisions that shape elastic-protos, in the
 | [0007](0007-zero-downtime-reindex.md) | Zero-downtime reindex: copy, catch up, swap, freeze, reconcile | Accepted | 2026-11-09 |
 | [0008](0008-migration-lock-index.md) | A per-alias lock in a lock index coordinates concurrent bootstraps | Accepted | 2026-11-09 |
 | [0009](0009-aggregation-and-highlight-dsl.md) | Aggregation and highlight DSL in the proto query model | Accepted | 2026-11-09 |
-| [0010](0010-typed-maps-through-dynamic-templates.md) | Typed maps through dynamic templates | Accepted | 2026-11-09 |
+| [0010](0010-typed-maps-through-dynamic-templates.md) | Typed maps through dynamic templates | Accepted; untyped values superseded by 0011 | 2026-11-09 |
+| [0011](0011-maps-inside-typed-map-values.md) | Maps, Struct and Any inside the values of typed maps | Accepted | 2026-11-10 |
 
 ## Adding a record
 

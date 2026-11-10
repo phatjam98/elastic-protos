@@ -11,6 +11,8 @@ import com.phatjam98.elasticprotos.proto.EsType
 import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
 import com.phatjam98.elasticprotos.proto.example.InboxItem
+import com.phatjam98.elasticprotos.proto.example.InnerMaps
+import com.phatjam98.elasticprotos.proto.example.LooseValues
 import com.phatjam98.elasticprotos.proto.example.TypedMaps
 import com.phatjam98.elasticprotos.proto.test.Annotated
 import com.phatjam98.elasticprotos.proto.test.Child
@@ -64,6 +66,8 @@ class ProtoMapperSpec extends Specification {
     'document'     | Document
     'inbox_item'   | InboxItem
     'maps_typed'   | TypedMaps
+    'maps_inner'   | InnerMaps
+    'maps_loose_values' | LooseValues
   }
 
   def "scalars follow the default rules"() {
@@ -112,8 +116,8 @@ class ProtoMapperSpec extends Specification {
     props.bool_wrapper.type == 'boolean'
     props.double_wrapper.type == 'double'
     props.struct_value == [type: 'flattened']
-    props.value_value == [type: 'flattened']
-    props.list_value == [type: 'flattened']
+    props.value_value == [type: 'object', enabled: false]
+    props.list_value == [type: 'object', enabled: false]
     !props.containsKey('any_value')
     !props.containsKey('field_mask')
     !props.containsKey('empty_value')
@@ -296,13 +300,15 @@ class ProtoMapperSpec extends Specification {
     List<String> names = definition.mappings().dynamic_templates.collect { (it as Map).keySet().first() }
 
     then:
-    names == ['ep:children.*.items.quantity', 'ep:children.*.items.sku', 'ep:children.*.count',
+    names == ['ep:children.*.items.quantity', 'ep:children.*.items.sku', 'ep:bags.*.tags', 'ep:children.*.count',
               'ep:children.*.items', 'ep:children.*.label', 'ep:children.*.name', 'ep:attributes.*', 'ep:bags.*',
               'ep:children.*', 'ep:counters.*', 'ep:due.*', 'ep:levels.*', 'ep:notes.*', 'ep:places.*']
     definition.fields().keySet().every { !it.contains('*') }
-    definition.dynamicFields().keySet() == ['children.*', 'children.*.count', 'children.*.items',
-        'children.*.items.quantity', 'children.*.items.sku', 'children.*.label', 'children.*.name',
+    definition.dynamicFields().keySet() == ['attributes.*', 'bags.*', 'bags.*.tags', 'children.*', 'children.*.count',
+        'children.*.items', 'children.*.items.quantity', 'children.*.items.sku', 'children.*.label', 'children.*.name',
         'counters.*', 'due.*', 'levels.*', 'notes.*', 'places.*'] as Set
+    definition.dynamicFields()['bags.*.tags'].kind() == FieldKind.FLATTENED
+    definition.dynamicFields()['attributes.*'].kind() == FieldKind.FLATTENED
     definition.dynamicFields().values().every { it.isDynamic() && it.pattern() == it.path() }
     definition.dynamicFields()['children.*.label'].protoPath() == 'children.*.display_name'
     definition.dynamicFields()['notes.*'].kind() == FieldKind.TEXT
@@ -333,7 +339,7 @@ class ProtoMapperSpec extends Specification {
     mapper.map(Firm).typedMapValues('labels.env').isEmpty()
   }
 
-  def "typed maps warn about the fields every key adds and about untyped values"() {
+  def "typed maps warn about the fields every key adds"() {
     expect:
     mapper.map(TypedMaps).warnings() == [
         'each distinct key of counters adds 1 field(s) at index time (index.mapping.total_fields.limit)',
@@ -342,8 +348,8 @@ class ProtoMapperSpec extends Specification {
         'each distinct key of levels adds 1 field(s) at index time (index.mapping.total_fields.limit)',
         'each distinct key of places adds 1 field(s) at index time (index.mapping.total_fields.limit)',
         'each distinct key of children adds 7 field(s) at index time (index.mapping.total_fields.limit), 1 of them nested (index.mapping.nested_fields.limit, default 50)',
-        'values of bags are untyped: phatjam98.elasticprotos.example.TypedBag is or contains a map, Struct or Any',
-        'values of attributes are untyped: google.protobuf.Struct is or contains a map, Struct or Any',
+        'each distinct key of bags adds 2 field(s) at index time (index.mapping.total_fields.limit)',
+        'each distinct key of attributes adds 1 field(s) at index time (index.mapping.total_fields.limit)',
     ]
   }
 
@@ -434,7 +440,7 @@ class ProtoMapperSpec extends Specification {
     definition.dynamicFields().keySet() == ['message_map.*'] as Set
   }
 
-  def "wrapper values are single values; Struct and Any values are untyped"() {
+  def "wrapper values are single values; Struct values are flattened and Any values disabled objects"() {
     given:
     def file = FileDescriptorProto.newBuilder().setName('values.proto').setPackage('values')
         .setSyntax('proto3')
@@ -462,14 +468,19 @@ class ProtoMapperSpec extends Specification {
     Map templates = definition.mappings().dynamic_templates.collectEntries { it }
 
     then:
-    templates['ep:structs.*'] == [path_match: 'structs.*', match_mapping_type: 'object',
-                                  mapping: [type: 'object', dynamic: true]]
-    definition.warnings().contains('values of structs are untyped: google.protobuf.Struct is or contains a map, Struct or Any')
+    templates['ep:structs.*'] == [path_match: 'structs.*', mapping: [type: 'flattened']]
     templates['ep:wrapped.*'].mapping == [type: 'integer']
-    templates['ep:anys.*'] == [path_match: 'anys.*', match_mapping_type: 'object',
-                               mapping: [type: 'object', dynamic: true]]
-    definition.warnings().contains('values of anys are untyped: google.protobuf.Any is or contains a map, Struct or Any')
-    definition.dynamicFields().keySet() == ['wrapped.*'] as Set
+    templates['ep:anys.*'] == [path_match: 'anys.*', mapping: DISABLED]
+    definition.warnings().contains('anys.*: google.protobuf.Any inside the values of a typed map is mapped as a'
+        + ' disabled object (kept in _source, not indexed); the codec writes it only with CodecConfig.anyTypes'
+        + ' and leaves it out otherwise')
+    !definition.dynamicFields()['anys.*'].enabled()
+    definition.dynamicFields()['structs.*'].enabled()
+    definition.warnings().every { !it.contains('untyped') }
+    definition.dynamicFields().keySet() == ['anys.*', 'structs.*', 'wrapped.*'] as Set
+    definition.dynamicFields()['structs.*'].kind() == FieldKind.FLATTENED
+    definition.dynamicFields()['anys.*'].kind() == FieldKind.OBJECT
+    definition.ignoredPaths().isEmpty()
   }
 
   static FieldDescriptorProto mapField(String name, int number, String entryType) {
@@ -888,7 +899,7 @@ class ProtoMapperSpec extends Specification {
     then:
     def e = thrown(MappingException)
     e.path == 'string_value'
-    e.message.contains("elastic_field.name '${name}' must be non-empty and contain no '.' or whitespace")
+    e.message.contains("elastic_field.name '${name}' must be non-empty and contain no '.', '*' or whitespace")
 
     where:
     label        | name
@@ -896,6 +907,7 @@ class ProtoMapperSpec extends Specification {
     'a space'    | 'a b'
     'blank'      | ' '
     'a tab'      | 'x\ty'
+    'a wildcard' | 'c*'
   }
 
   def "a valid mapped-name override renames the field"() {

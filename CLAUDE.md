@@ -111,7 +111,14 @@ Checkstyle, JaCoCo and Javadoc.
   overrides second. Do not reintroduce field-name heuristics.
 - Default mapping rules: `string` => `keyword` (opt in to `TEXT`), singular message => `object`,
   repeated message => `nested`, `Timestamp` => `date`, `map<K,V>` => `flattened` (`type: OBJECT` opts in
-  to a typed map: dynamic object plus `dynamic_templates` from the value type, ADR 0010). Documents carry proto3 default values (`CodecConfig.includeDefaults` is true).
+  to a typed map: dynamic object plus `dynamic_templates` from the value type, ADR 0010). Inside
+  typed map values every field keeps its usual rule (inner map `flattened`, inner typed map with one
+  `*` per key level such as `outer.*.inner.*`, `Struct` `flattened`), except `Any`/`FieldMask`/`Empty`,
+  which become `enabled: false` objects there; a dynamic `Struct` there is refused (ADR 0011, which
+  also proves the template ordering unambiguous; `*` is refused in every `elastic_field.name`).
+  `Value`/`ListValue` are `enabled: false` objects everywhere (they print as scalars, which
+  `flattened` rejects); `structKind` governs `Struct` only. Conditions on disabled objects
+  (`FieldInfo.enabled()` false) throw `QueryCompileException`. Documents carry proto3 default values (`CodecConfig.includeDefaults` is true).
   Index settings, including analysis, are outside the content hash (ADR 0006).
 - Migration actions: `CREATE`, `NO_OP`, `PUT_MAPPING`, `UPDATE_SETTINGS`, `BACKFILL`, `REINDEX`, `BLOCKED`.
   Only proto-declared settings are compared; dynamic ones (`DiffClassifier.DYNAMIC_SETTINGS` /
@@ -136,4 +143,4 @@ Checkstyle, JaCoCo and Javadoc.
   `<name>__nested` / `<name>__reverse`. `RangeValue.min`/`max` are `optional` (open bounds).
 - `InMemorySearchEngine` (testkit) runs only terms, the six metrics, `nested` and `reverse_nested`
   aggregations, ignores `highlight`, and models seq_no, tombstones and PIT snapshots like the engines.
-  `EngineIntegrationSpec` has 52 feature methods.
+  `EngineIntegrationSpec` has 54 feature methods.

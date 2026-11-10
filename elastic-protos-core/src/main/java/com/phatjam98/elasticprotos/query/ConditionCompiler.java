@@ -83,6 +83,11 @@ final class ConditionCompiler {
       unknown(name, operation.name());
       return null;
     }
+    if (!field.enabled()) {
+      // the engine keeps a disabled object in _source only: even exists would never match
+      throw new QueryCompileException(operation + " cannot be used on '" + name + "': it is mapped"
+          + " as an object with enabled: false, kept in _source but not searchable", name);
+    }
     switch (operation) {
       case EQUALS:
         return equalsClause(condition, field);
@@ -155,6 +160,16 @@ final class ConditionCompiler {
 
   /** Builds the strict-mode error for a field the index does not map. */
   static QueryCompileException unknownField(IndexDefinition index, String name, String what) {
+    for (int dot = name.indexOf('.'); dot > 0; dot = name.indexOf('.', dot + 1)) {
+      FieldInfo parent = index.resolve(name.substring(0, dot)).orElse(null);
+      if (parent != null && !parent.enabled()) {
+        return new QueryCompileException(
+            "Field '" + name + "' in " + what + " is below '" + parent.path() + "', which index "
+                + index.alias() + " maps as an object with enabled: false, kept in _source but"
+                + " not searchable",
+            name);
+      }
+    }
     FieldInfo values = index.typedMapValues(name).orElse(null);
     if (values != null) {
       String map = values.path().substring(0, values.path().length() - 2);

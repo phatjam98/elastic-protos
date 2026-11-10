@@ -1,0 +1,27 @@
+{
+  "from" : 0,
+  "query" : {
+    "bool" : {
+      "filter" : [ {
+        "range" : {
+          "outer.a.parts.p.counts.c" : {
+            "gte" : 1,
+            "lte" : 10
+          }
+        }
+      }, {
+        "geo_distance" : {
+          "distance" : "25km",
+          "distance_type" : "plane",
+          "ignore_unmapped" : true,
+          "outer.a.parts.p.where" : {
+            "lat" : 36.17,
+            "lon" : -115.14
+          }
+        }
+      } ]
+    }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

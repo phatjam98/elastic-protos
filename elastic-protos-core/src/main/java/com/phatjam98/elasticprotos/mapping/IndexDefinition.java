@@ -2,6 +2,7 @@ package com.phatjam98.elasticprotos.mapping;
 
 import com.google.protobuf.Descriptors.Descriptor;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -27,7 +28,8 @@ import java.util.TreeSet;
  * @param idField path of the field whose value is the document id, or null
  * @param warnings non-fatal problems found while mapping
  * @param dynamicFields the fields below the keys of typed maps by pattern path, such as {@code
- *     counters.*} or {@code children.*.count}; see {@link #resolve(String)}
+ *     counters.*}, {@code children.*.count} or, for a typed map inside the values of another,
+ *     {@code outer.*.inner.*}; see {@link #resolve(String)}
  */
 public record IndexDefinition(
     Descriptor descriptor,
@@ -103,12 +105,14 @@ public record IndexDefinition(
   /**
    * Resolves a field path, including paths below the keys of typed maps.
    *
-   * <p>A path the mapping declares resolves to its field. Otherwise, when the path runs through a
-   * typed map {@code P} (a {@code map} mapped as {@code OBJECT} or {@code NESTED}), the segment
-   * after {@code P} is the key and the rest {@code R} resolves to the pattern {@code P.*} (no
-   * rest) or {@code P.*.R}: {@code counters.views} resolves to {@code counters.*}, and {@code
-   * children.k.count} to {@code children.*.count}. The returned field carries the concrete path
-   * and {@link FieldInfo#pattern()}.
+   * <p>A path the mapping declares resolves to its field. Otherwise the path is matched segment by
+   * segment against the patterns of {@link #dynamicFields()}: a {@code *} stands for exactly one
+   * key, which must not be empty or hold {@code *}, and every other segment must be equal. {@code
+   * counters.views} resolves to {@code counters.*}, {@code children.k.count} to {@code
+   * children.*.count}, and, for a typed map inside the values of another, {@code outer.a.inner.b}
+   * to {@code outer.*.inner.*}. Keys never contain dots, so at most one pattern matches. The
+   * returned field carries the concrete path, the proto path with every {@code *} replaced by its
+   * key, and {@link FieldInfo#pattern()}.
    *
    * @param path a dotted index path
    * @return the field, or empty when the path is not mapped
@@ -118,39 +122,52 @@ public record IndexDefinition(
     if (declared != null) {
       return Optional.of(declared);
     }
-    MapKey key = mapKey(path);
-    if (key == null) {
+    if (dynamicFields.isEmpty()) {
       return Optional.empty();
     }
-    FieldInfo pattern = dynamicFields.get(
-        key.remainder().isEmpty() ? key.map() + ".*" : key.map() + ".*." + key.remainder());
-    if (pattern == null) {
-      return Optional.empty();
+    String[] segments = path.split("\\.", -1);
+    for (FieldInfo pattern : dynamicFields.values()) {
+      String[] patternSegments = pattern.path().split("\\.", -1);
+      if (matches(patternSegments, segments, segments.length)) {
+        return Optional.of(instantiate(pattern, patternSegments, segments, path));
+      }
     }
-    String protoPath = pattern.protoPath();
-    int star = protoPath.indexOf(".*");
-    String concreteProtoPath = star < 0 ? protoPath
-        : protoPath.substring(0, star + 1) + key.key() + protoPath.substring(star + 2);
-    return Optional.of(new FieldInfo(path, concreteProtoPath, pattern.kind(), pattern.repeated(),
-        pattern.keywordSubfield(), pattern.boost(), pattern.field(), pattern.path()));
+    return Optional.empty();
   }
 
   /**
    * Returns the values of the typed map a path runs through: the {@code P.*} pattern field of the
-   * map {@code P} whose key is the segment after {@code P}.
+   * map {@code P} whose key is a segment of the path; the innermost one when typed maps are nested
+   * in the values of others.
    *
    * @param path a dotted index path such as {@code children.k.count}
    * @return the {@code P.*} field, or empty when the path is not below the key of a typed map
    */
   public Optional<FieldInfo> typedMapValues(String path) {
-    MapKey key = mapKey(path);
-    return key == null ? Optional.empty() : Optional.of(dynamicFields.get(key.map() + ".*"));
+    if (dynamicFields.isEmpty()) {
+      return Optional.empty();
+    }
+    String[] segments = path.split("\\.", -1);
+    FieldInfo innermost = null;
+    int depth = 0;
+    for (FieldInfo info : dynamicFields.values()) {
+      String[] patternSegments = info.path().split("\\.", -1);
+      if (info.path().endsWith(".*") && patternSegments.length > depth
+          && matches(patternSegments, segments, patternSegments.length)) {
+        innermost = info;
+        depth = patternSegments.length;
+      }
+    }
+    return Optional.ofNullable(innermost);
   }
 
   /**
    * Returns the nested paths that enclose a field path, outermost first. Nested fields inside the
-   * values of a typed map are instantiated with the path's key: with {@code children.*.items}
-   * nested, {@code children.k.items.sku} is enclosed by {@code children.k.items}.
+   * values of typed maps are instantiated with the path's keys: with {@code children.*.items}
+   * nested, {@code children.k.items.sku} is enclosed by {@code children.k.items}, and with {@code
+   * outer.*.inner} and {@code outer.*.inner.*} nested, {@code outer.a.inner.b.n} by {@code
+   * outer.a.inner} and {@code outer.a.inner.b}. A pattern path (one whose key is {@code *}) has no
+   * enclosing nested paths inside typed map values.
    *
    * @param path a dotted index path
    * @return the enclosing nested paths, possibly empty
@@ -162,16 +179,13 @@ public record IndexDefinition(
         ancestors.add(nested);
       }
     }
-    MapKey key = mapKey(path);
-    if (key != null) {
-      String patternPrefix = key.map() + ".*";
+    if (!dynamicFields.isEmpty()) {
+      String[] segments = path.split("\\.", -1);
       for (FieldInfo info : dynamicFields.values()) {
-        if (info.kind() == FieldKind.NESTED && info.path().startsWith(patternPrefix)) {
-          String concrete = key.map() + "." + key.key()
-              + info.path().substring(patternPrefix.length());
-          if (path.startsWith(concrete + ".")) {
-            ancestors.add(concrete);
-          }
+        String[] patternSegments = info.path().split("\\.", -1);
+        if (info.kind() == FieldKind.NESTED && patternSegments.length < segments.length
+            && matches(patternSegments, segments, patternSegments.length)) {
+          ancestors.add(String.join(".", Arrays.copyOf(segments, patternSegments.length)));
         }
       }
     }
@@ -180,33 +194,36 @@ public record IndexDefinition(
   }
 
   /**
-   * Splits a path below the key of a typed map into the map path, the key and the rest. A key with
-   * {@code *} is a pattern, not a concrete key, and is not resolved.
-   *
-   * @return the parts, or null when the path is not below a typed map, or the key is empty or holds
-   *     {@code *}
+   * Returns whether the first {@code length} segments of a path match a pattern of exactly that
+   * many segments. A {@code *} segment matches one key: not empty and without {@code *}.
    */
-  private MapKey mapKey(String path) {
-    if (dynamicFields.isEmpty()) {
-      return null;
+  private static boolean matches(String[] pattern, String[] path, int length) {
+    if (pattern.length != length || path.length < length) {
+      return false;
     }
-    for (int dot = path.lastIndexOf('.'); dot > 0; dot = path.lastIndexOf('.', dot - 1)) {
-      String map = path.substring(0, dot);
-      if (!dynamicFields.containsKey(map + ".*")) {
-        continue;
+    for (int i = 0; i < length; i++) {
+      if ("*".equals(pattern[i])) {
+        if (path[i].isEmpty() || path[i].indexOf('*') >= 0) {
+          return false;
+        }
+      } else if (!pattern[i].equals(path[i])) {
+        return false;
       }
-      String rest = path.substring(dot + 1);
-      int next = rest.indexOf('.');
-      String key = next < 0 ? rest : rest.substring(0, next);
-      String remainder = next < 0 ? "" : rest.substring(next + 1);
-      if (key.isEmpty() || key.indexOf('*') >= 0 || (next >= 0 && remainder.isEmpty())) {
-        return null;
-      }
-      return new MapKey(map, key, remainder);
     }
-    return null;
+    return true;
   }
 
-  /** A path below the key of a typed map. */
-  private record MapKey(String map, String key, String remainder) {}
+  /** Instantiates a pattern field for a concrete path: every {@code *} takes its key. */
+  private static FieldInfo instantiate(FieldInfo pattern, String[] patternSegments,
+      String[] segments, String path) {
+    String[] protoSegments = pattern.protoPath().split("\\.", -1);
+    for (int i = 0; i < patternSegments.length && i < protoSegments.length; i++) {
+      if ("*".equals(patternSegments[i])) {
+        protoSegments[i] = segments[i];
+      }
+    }
+    return new FieldInfo(path, String.join(".", protoSegments), pattern.kind(), pattern.repeated(),
+        pattern.keywordSubfield(), pattern.boost(), pattern.field(), pattern.path(),
+        pattern.enabled());
+  }
 }

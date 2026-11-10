@@ -27,6 +27,8 @@ import com.phatjam98.elasticprotos.proto.SortingCriteria
 import com.phatjam98.elasticprotos.proto.SortingOrder
 import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
+import com.phatjam98.elasticprotos.proto.example.InnerMaps
+import com.phatjam98.elasticprotos.proto.example.LooseValues
 import com.phatjam98.elasticprotos.proto.example.TypedMaps
 import com.phatjam98.elasticprotos.proto.test.Geo
 import com.phatjam98.elasticprotos.proto.test.Library
@@ -49,6 +51,8 @@ class QueryCompilerGoldenSpec extends Specification {
   @Shared IndexDefinition firm = mapper.map(Firm)
   @Shared IndexDefinition geo = mapper.map(Geo)
   @Shared IndexDefinition typedMaps = mapper.map(TypedMaps)
+  @Shared IndexDefinition innerMaps = mapper.map(InnerMaps)
+  @Shared QueryCompiler lenient = QueryCompiler.of(QueryCompilerConfig.standard().withLenient(true))
   @Shared IndexDefinition library = mapper.map(Library)
   @Shared QueryCompiler strict = QueryCompiler.withDefaults()
   @Shared QueryCompiler wildcards =
@@ -104,6 +108,69 @@ class QueryCompilerGoldenSpec extends Specification {
     'map_key_geo_distance'  | strict    | typedMaps | where(fc('places.home', GEO_DISTANCE, geoDistance()))
     'map_key_full_text'     | strict    | typedMaps | where(fullText('quarterly reports'), fc('notes.summary', TEXT_MATCHES, str('report')))
     'map_key_nested_message' | strict   | typedMaps | where(fc('children.alice.items.sku', EQUALS, str('A-1')), fc('children.alice.items.quantity', NUM_RANGE, range(1, 5)), fc('children.alice.count', EQUALS, integer(3)))
+    'inner_map_num_range'   | strict    | innerMaps | where(fc('outer.metrics.metrics.score', NUM_RANGE, range(1, 10)))
+    'inner_map_flattened_key' | strict  | innerMaps | where(fc('outer.a.labels.env', EQUALS, str('prod')))
+    'inner_map_message'     | strict    | innerMaps | where(fc('outer.a.parts.p.counts.c', NUM_RANGE, range(1, 10)), fc('outer.a.parts.p.where', GEO_DISTANCE, geoDistance()))
+    'inner_map_nested'      | strict    | innerMaps | where(fc('nested_outer.k.counts.c', EQUALS, integer(3)), fc('nested_outer.k.qty', NUM_RANGE, range(1, 5)))
+  }
+
+  def "op_inner_map_unknown_subfield names the innermost value type"() {
+    when:
+    strict.compile(where(fc('outer.a.parts.p.nope', EQUALS, str('x'))), innerMaps)
+
+    then:
+    QueryCompileException e = thrown()
+    e.field == 'outer.a.parts.p.nope'
+    e.message == "Unknown field 'outer.a.parts.p.nope' in EQUALS; the values of map 'outer.*.parts' in index " +
+        "inner_maps are phatjam98.elasticprotos.example.InnerPart, which does not map it"
+  }
+
+  def "sorts on keys of inner typed maps"() {
+    expect: 'a sort on a doubly keyed path takes unmapped_type, like any key'
+    strict.compile(sorted(SortingCriteria.newBuilder().setFieldSort(FieldSort.newBuilder()
+        .setFieldName('outer.a.metrics.m').setOrder(SortingOrder.DESC)).build()), innerMaps).body().sort ==
+        [['outer.a.metrics.m': [order: 'desc', unmapped_type: 'double']]]
+
+    when: 'a sort below the nested values of a typed map'
+    strict.compile(sorted(SortingCriteria.newBuilder().setFieldSort(FieldSort.newBuilder()
+        .setFieldName('nested_outer.k.counts.c')).build()), innerMaps)
+
+    then:
+    QueryCompileException e = thrown()
+    e.message.contains("below the nested field 'nested_outer.k' inside typed map values")
+  }
+
+  @Unroll
+  def "#operation on the disabled object '#field' is refused, strict or lenient"() {
+    when:
+    compiler.compile(where(fc(field, operation, value)), mapper.map(LooseValues))
+
+    then:
+    QueryCompileException e = thrown()
+    e.field == field
+    e.message == "${operation} cannot be used on '${field}': it is mapped as an object with enabled: false," +
+        " kept in _source but not searchable"
+
+    where:
+    compiler   | field           | operation | value
+    strict     | 'value'         | EXISTS    | FlatValue.defaultInstance
+    strict     | 'value'         | EQUALS    | nul()
+    strict     | 'items.k.list'  | EXISTS    | FlatValue.defaultInstance
+    lenient    | 'list'          | EXISTS    | FlatValue.defaultInstance
+  }
+
+  def "a path below a disabled object names it; lenient skips it like an unknown field"() {
+    when:
+    strict.compile(where(fc('value.x', EQUALS, str('y'))), mapper.map(LooseValues))
+
+    then:
+    QueryCompileException e = thrown()
+    e.message == "Field 'value.x' in EQUALS is below 'value', which index loose_values maps as an object with" +
+        " enabled: false, kept in _source but not searchable"
+
+    expect:
+    lenient.compile(where(fc('items.k.value.x', EQUALS, str('y'))), mapper.map(LooseValues)).warnings() ==
+        ["Skipped EQUALS on unknown field 'items.k.value.x'"]
   }
 
   def "op_map_key_unknown_subfield names the value type"() {

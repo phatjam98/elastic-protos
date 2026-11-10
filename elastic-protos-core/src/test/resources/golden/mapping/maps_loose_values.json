@@ -1,0 +1,86 @@
+{
+  "alias" : "loose_values",
+  "fullTextFields" : { },
+  "idField" : "id",
+  "ignoredPaths" : [ ],
+  "mappings" : {
+    "_meta" : {
+      "elastic_protos" : {
+        "hash" : "d960faac",
+        "proto" : "phatjam98.elasticprotos.example.LooseValues",
+        "schema_version" : 1
+      }
+    },
+    "dynamic" : "strict",
+    "dynamic_templates" : [ {
+      "ep:items.*.list" : {
+        "mapping" : {
+          "enabled" : false,
+          "type" : "object"
+        },
+        "path_match" : "items.*.list"
+      }
+    }, {
+      "ep:items.*.n" : {
+        "mapping" : {
+          "type" : "double"
+        },
+        "path_match" : "items.*.n"
+      }
+    }, {
+      "ep:items.*.value" : {
+        "mapping" : {
+          "enabled" : false,
+          "type" : "object"
+        },
+        "path_match" : "items.*.value"
+      }
+    }, {
+      "ep:items.*" : {
+        "mapping" : {
+          "dynamic" : true,
+          "type" : "object"
+        },
+        "match_mapping_type" : "object",
+        "path_match" : "items.*"
+      }
+    }, {
+      "ep:values.*" : {
+        "mapping" : {
+          "enabled" : false,
+          "type" : "object"
+        },
+        "path_match" : "values.*"
+      }
+    } ],
+    "properties" : {
+      "id" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "items" : {
+        "dynamic" : true,
+        "type" : "object"
+      },
+      "list" : {
+        "enabled" : false,
+        "type" : "object"
+      },
+      "struct" : {
+        "type" : "flattened"
+      },
+      "value" : {
+        "enabled" : false,
+        "type" : "object"
+      },
+      "values" : {
+        "dynamic" : true,
+        "type" : "object"
+      }
+    }
+  },
+  "name" : "loose_values-vd960faac",
+  "nestedPaths" : [ ],
+  "settings" : { },
+  "warnings" : [ "each distinct key of values adds 1 field(s) at index time (index.mapping.total_fields.limit)", "each distinct key of items adds 4 field(s) at index time (index.mapping.total_fields.limit)" ]
+}

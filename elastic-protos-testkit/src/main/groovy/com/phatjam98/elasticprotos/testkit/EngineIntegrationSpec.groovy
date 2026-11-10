@@ -10,10 +10,16 @@ import static com.phatjam98.elasticprotos.proto.SearchOperationType.TEXT_MATCHES
 import static com.phatjam98.elasticprotos.proto.SearchOperationType.TEXT_PREFIX
 import static com.phatjam98.elasticprotos.proto.SearchOperationType.TEXT_REGEX
 
+import com.google.protobuf.Any
+import com.google.protobuf.FieldMask
+import com.google.protobuf.ListValue
 import com.google.protobuf.Message
+import com.google.protobuf.StringValue
 import com.google.protobuf.Struct
 import com.google.protobuf.Timestamp
+import com.google.protobuf.TypeRegistry
 import com.google.protobuf.Value
+import com.phatjam98.elasticprotos.codec.CodecConfig
 import com.phatjam98.elasticprotos.codec.ProtoDocumentCodec
 import com.phatjam98.elasticprotos.engine.BulkOp
 import com.phatjam98.elasticprotos.engine.EngineException
@@ -68,6 +74,11 @@ import com.phatjam98.elasticprotos.proto.SortingOrder
 import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
 import com.phatjam98.elasticprotos.proto.example.InboxItem
+import com.phatjam98.elasticprotos.proto.example.InnerMaps
+import com.phatjam98.elasticprotos.proto.example.InnerPart
+import com.phatjam98.elasticprotos.proto.example.InnerValue
+import com.phatjam98.elasticprotos.proto.example.LooseItem
+import com.phatjam98.elasticprotos.proto.example.LooseValues
 import com.phatjam98.elasticprotos.proto.example.Office
 import com.phatjam98.elasticprotos.proto.example.TypedBag
 import com.phatjam98.elasticprotos.proto.example.TypedChild
@@ -710,6 +721,178 @@ abstract class EngineIntegrationSpec extends Specification {
     and: 'hits parse back into the messages'
     engine.search([typed.alias()], compiler.compile(sorted(fieldSort('counters.views', SortingOrder.ASC)), typed).body())
         .hits().collect { tmCodec.fromHit(it, TypedMaps) } == [first, second]
+  }
+
+  def "typed maps inside typed map values: inner maps are flattened or keyed twice, Struct flattened, Any kept"() {
+    given: 'its own index; outer key "metrics" and inner keys "score" and "parts" equal field names on purpose'
+    def imMapper = ProtoMapper.builder().naming(IndexNamingStrategy.prefixed(prefix + '-im')).build()
+    def imCodec = ProtoDocumentCodec.of(imMapper, CodecConfig.standard()
+        .withAnyTypes(TypeRegistry.newBuilder().add(StringValue.descriptor).build()))
+    def imMigrator = IndexMigrator.builder().engine(engine).mapper(imMapper).build()
+    IndexDefinition im = imMapper.map(InnerMaps)
+    def imIds = { SearchCriteria criteria -> docIds(criteria, im) }
+    def at = Timestamp.newBuilder().setSeconds(1_709_528_767L).build()
+    def part = { long qty, long count ->
+      InnerPart.newBuilder().setQty(qty).setAt(at).setWhere(SampleData.LAS_VEGAS).putCounts('c', count).build()
+    }
+    def first = InnerMaps.newBuilder()
+        .setId('im-1')
+        .putOuter('metrics', InnerValue.newBuilder()
+            .setScore(1d)
+            .putLabels('env', 'prod')
+            .putMetrics('score', 5d)
+            .putMetrics('parts', 1d)
+            .putParts('p', part(2L, 7L))
+            .setExtra(Struct.newBuilder().putFields('x', Value.newBuilder().setStringValue('y').build()))
+            .setPayload(Any.pack(StringValue.of('packed')))
+            .setMask(FieldMask.newBuilder().addPaths('a.b').addPaths('c'))
+            .build())
+        .putNestedOuter('n', part(3L, 4L))
+        .build()
+    def second = InnerMaps.newBuilder()
+        .setId('im-2')
+        .putOuter('metrics', InnerValue.newBuilder().setScore(2d).putLabels('env', 'dev').putMetrics('score', 50d).build())
+        .putOuter('k', InnerValue.newBuilder().putParts('score', part(9L, 1L)).build())
+        .putNestedOuter('n', part(1L, 9L))
+        .build()
+
+    when: 'bootstrapped'
+    def created = imMigrator.bootstrap(InnerMaps)
+    def stored = engine.getMappings(im.alias())
+
+    then: 'the engine stores the templates with two key wildcards as sent, so a re-plan is a no-op'
+    created.ok()
+    DiffClassifier.normalize(stored).dynamic_templates == DiffClassifier.normalize(im.mappings()).dynamic_templates
+    imMigrator.plan(InnerMaps).items()*.action() == [Action.NO_OP]
+
+    when: 'two documents are indexed'
+    def bulk = engine.bulk([first, second].collect {
+      BulkOp.index(im.alias(), imCodec.idOf(it).get(), imCodec.toDocument(it))
+    })
+    engine.refresh(im.alias())
+    def live = engine.getMappings(im.alias()).properties
+    def metrics = live.outer.properties.metrics.properties
+
+    then: 'every path took the template it was generated for, even where a key equals a field name'
+    !bulk.errors()
+    metrics.score.type == 'double'
+    metrics.labels.type == 'flattened'
+    metrics.extra.type == 'flattened'
+    metrics.metrics.properties.score.type == 'double'
+    metrics.metrics.properties.parts.type == 'double'
+    metrics.parts.properties.p.properties.qty.type == 'long'
+    metrics.parts.properties.p.properties.at.type == 'date'
+    metrics.parts.properties.p.properties.where.type == 'geo_point'
+    metrics.parts.properties.p.properties.counts.properties.c.type == 'long'
+    String.valueOf(metrics.payload.enabled) == 'false'
+    String.valueOf(metrics.mask.enabled) == 'false'
+    !metrics.payload.containsKey('properties')
+    live.outer.properties.k.properties.parts.properties.score.properties.qty.type == 'long'
+    live.nested_outer.properties.n.type == 'nested'
+    live.nested_outer.properties.n.properties.counts.properties.c.type == 'long'
+    imMigrator.plan(InnerMaps).items()*.action() == [Action.NO_OP]
+
+    and: 'doubly keyed paths are queried by the inner value type'
+    imIds(where(fc('outer.metrics.metrics.score', NUM_RANGE, range(10, 100)))) == ['im-2'] as Set
+    imIds(where(fc('outer.metrics.metrics.score', NUM_RANGE, range(1, 10)))) == ['im-1'] as Set
+    imIds(where(fc('outer.metrics.score', NUM_RANGE, range(1.5, 3)))) == ['im-2'] as Set
+    imIds(where(fc('outer.metrics.parts.p.counts.c', NUM_RANGE, range(5, 10)))) == ['im-1'] as Set
+    imIds(where(fc('outer.k.parts.score.qty', EQUALS, integer(9)))) == ['im-2'] as Set
+    imIds(where(fc('outer.metrics.parts.p.where', GEO_DISTANCE, FlatValue.newBuilder().setGeoDistanceValue(
+        GeoDistanceValue.newBuilder().setPoint(SampleData.LAS_VEGAS).setDistance('10km')).build()))) == ['im-1'] as Set
+    imIds(where(fc('outer.nobody.metrics.score', NUM_RANGE, range(0, 100)))).isEmpty()
+
+    and: 'a flattened map and a Struct inside the values answer EQUALS on a key'
+    imIds(where(fc('outer.metrics.labels.env', EQUALS, str('prod')))) == ['im-1'] as Set
+    imIds(where(fc('outer.metrics.extra.x', EQUALS, str('y')))) == ['im-1'] as Set
+
+    and: 'inside nested values, predicates hold for the same element'
+    imIds(where(fc('nested_outer.n.counts.c', EQUALS, integer(4)), fc('nested_outer.n.qty', NUM_RANGE, range(2, 5)))) ==
+        ['im-1'] as Set
+    imIds(where(fc('nested_outer.n.counts.c', EQUALS, integer(9)), fc('nested_outer.n.qty', NUM_RANGE, range(2, 5)))).isEmpty()
+
+    and: 'sorting by a doubly keyed path, and hits parse back into the messages, Any and FieldMask included'
+    orderedIds(im, sorted(fieldSort('outer.metrics.metrics.score', SortingOrder.DESC))) == ['im-2', 'im-1']
+    engine.search([im.alias()], compiler.compile(sorted(fieldSort('outer.metrics.metrics.score', SortingOrder.ASC)), im).body())
+        .hits().collect { imCodec.fromHit(it, InnerMaps) } == [first, second]
+  }
+
+  def "Value and ListValue hold scalars, arrays and objects, at the top level and inside typed map values"() {
+    given: 'its own index; Value and ListValue are disabled objects, Struct is flattened'
+    def lvMapper = ProtoMapper.builder().naming(IndexNamingStrategy.prefixed(prefix + '-lv')).build()
+    def lvCodec = ProtoDocumentCodec.of(lvMapper)
+    def lvMigrator = IndexMigrator.builder().engine(engine).mapper(lvMapper).build()
+    IndexDefinition lv = lvMapper.map(LooseValues)
+    def s = { String text -> Value.newBuilder().setStringValue(text).build() }
+    def n = { double number -> Value.newBuilder().setNumberValue(number).build() }
+    def obj = { Map<String, Value> fields -> Value.newBuilder().setStructValue(Struct.newBuilder().putAllFields(fields)).build() }
+    def list = { List<Value> values -> ListValue.newBuilder().addAllValues(values).build() }
+    def first = LooseValues.newBuilder()
+        .setId('lv-1')
+        .setValue(s('text'))
+        .setList(list([s('a'), n(1), Value.newBuilder().setBoolValue(true).build()]))
+        .setStruct(Struct.newBuilder().putFields('x', s('y')))
+        .putValues('s', s('str'))
+        .putValues('n', n(5))
+        .putValues('l', Value.newBuilder().setListValue(list([n(1), n(2)])).build())
+        .putValues('o', obj([a: n(1)]))
+        .putItems('i', LooseItem.newBuilder().setValue(s('scalar'))
+            .setList(list([obj([a: n(1)]), obj([b: s('x')])])).setN(1).build())
+        .build()
+    def second = LooseValues.newBuilder()
+        .setId('lv-2')
+        .setValue(n(42))
+        .setList(list([obj([a: n(1)])]))
+        .putValues('s', n(7))
+        .putItems('i', LooseItem.newBuilder().setValue(obj([k: s('v')])).setList(list([s('x')])).setN(2).build())
+        .build()
+
+    def topValue = LooseValues.newBuilder().setId('lv-3').setValue(s('alone')).build()
+    def topList = LooseValues.newBuilder().setId('lv-4')
+        .setList(list([s('a'), n(2), Value.newBuilder().setNullValue(com.google.protobuf.NullValue.NULL_VALUE).build()]))
+        .build()
+
+    when: 'bootstrapped; a top-level scalar Value and a top-level ListValue of scalars indexed on their own'
+    def created = lvMigrator.bootstrap(LooseValues)
+    def singles = [topValue, topList].collect {
+      engine.bulk([BulkOp.index(lv.alias(), lvCodec.idOf(it).get(), lvCodec.toDocument(it))])
+    }
+
+    then:
+    created.ok()
+    singles.every { !it.errors() }
+
+    when: 'two documents with every shape indexed'
+    def bulk = engine.bulk([first, second].collect {
+      BulkOp.index(lv.alias(), lvCodec.idOf(it).get(), lvCodec.toDocument(it))
+    })
+    engine.refresh(lv.alias())
+    def live = engine.getMappings(lv.alias()).properties
+
+    then: 'every shape is accepted and kept unparsed, and the plan stays a no-op'
+    !bulk.errors()
+    String.valueOf(live.value.enabled) == 'false'
+    String.valueOf(live.list.enabled) == 'false'
+    live.struct.type == 'flattened'
+    ['s', 'n', 'l', 'o'].every { String.valueOf(live.values.properties[it].enabled) == 'false' }
+    String.valueOf(live.items.properties.i.properties.value.enabled) == 'false'
+    String.valueOf(live.items.properties.i.properties.list.enabled) == 'false'
+    live.items.properties.i.properties.n.type == 'double'
+    lvMigrator.plan(LooseValues).items()*.action() == [Action.NO_OP]
+
+    and: 'the other fields stay searchable'
+    docIds(where(fc('items.i.n', NUM_RANGE, range(1.5, 3))), lv) == ['lv-2'] as Set
+    docIds(where(fc('struct.x', EQUALS, str('y'))), lv) == ['lv-1'] as Set
+
+    and: 'hits parse back into the messages'
+    engine.search([lv.alias()], compiler.compile(sorted(fieldSort('id', SortingOrder.ASC)), lv).body())
+        .hits().collect { lvCodec.fromHit(it, LooseValues) } == [first, second, topValue, topList]
+
+    when: 'EXISTS on a disabled object'
+    compiler.compile(where(fc('value', EXISTS)), lv)
+
+    then: 'it is refused instead of silently matching nothing'
+    thrown(com.phatjam98.elasticprotos.query.QueryCompileException)
   }
 
   // ------------------------------------------------------------------ round trip

@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package phatjam98.elasticprotos.example;
 
+import "google/protobuf/any.proto";
+import "google/protobuf/field_mask.proto";
 import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 import "phatjam98/elasticprotos/v1/elastic_options.proto";
@@ -34,11 +36,11 @@ message TypedMaps {
   map<string, phatjam98.elasticprotos.v1.LatLon> places = 6 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
   // children.<key> => object with name, count, label and nested items
   map<string, TypedChild> children = 7 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
-  // bags.<key> => untyped object: TypedBag holds a map
+  // bags.<key> => object whose tags map is flattened, as a map anywhere else
   map<string, TypedBag> bags = 8 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
   // the default: flattened
   map<string, string> labels = 9;
-  // attributes.<key> => untyped object: a Struct has no fixed fields
+  // attributes.<key> => flattened, as a Struct anywhere else
   map<string, google.protobuf.Struct> attributes = 10 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
 }
 
@@ -63,4 +65,65 @@ message TypedItem {
 
 message TypedBag {
   map<string, string> tags = 1;
+}
+
+// Maps inside the values of typed maps (ADR 0011): the value message keeps typed leaves, and each
+// inner field follows the rule it would follow anywhere else.
+message InnerMaps {
+  option (phatjam98.elasticprotos.v1.elastic) = { alias: "inner_maps" };
+
+  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = TRUE];
+  // outer.<key> => object of InnerValue
+  map<string, InnerValue> outer = 2 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+  // nested_outer.<key> => nested InnerPart, whose counts map is typed
+  map<string, InnerPart> nested_outer = 3 [(phatjam98.elasticprotos.v1.elastic_field) = {
+    type: OBJECT
+    value_type: NESTED
+  }];
+}
+
+message InnerValue {
+  double score = 1;
+  // outer.<key>.labels => flattened, the default for a map
+  map<string, string> labels = 2;
+  // outer.<key>.metrics.<key> => double
+  map<string, double> metrics = 3 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+  // outer.<key>.parts.<key> => object with qty, at, where and counts.<key>
+  map<string, InnerPart> parts = 4 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+  // outer.<key>.extra => flattened, as a Struct anywhere else
+  google.protobuf.Struct extra = 5;
+  // outer.<key>.payload => disabled object, kept in _source
+  google.protobuf.Any payload = 6;
+  // outer.<key>.mask => disabled object; a FieldMask prints as a string
+  google.protobuf.FieldMask mask = 7;
+}
+
+// Value and ListValue print as any JSON (a bare scalar, an array, an object or null), which
+// flattened refuses unless it is an object, so they are disabled objects by default; Struct always
+// prints as an object and stays flattened.
+message LooseValues {
+  option (phatjam98.elasticprotos.v1.elastic) = { alias: "loose_values" };
+
+  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = TRUE];
+  google.protobuf.Value value = 2;
+  google.protobuf.ListValue list = 3;
+  google.protobuf.Struct struct = 4;
+  // values.<key> => disabled object
+  map<string, google.protobuf.Value> values = 5 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+  // items.<key> => object with disabled value and list, and a double
+  map<string, LooseItem> items = 6 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+}
+
+message LooseItem {
+  google.protobuf.Value value = 1;
+  google.protobuf.ListValue list = 2;
+  double n = 3;
+}
+
+message InnerPart {
+  int64 qty = 1;
+  google.protobuf.Timestamp at = 2;
+  phatjam98.elasticprotos.v1.LatLon where = 3;
+  // <part>.counts.<key> => long
+  map<string, int64> counts = 4 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
 }

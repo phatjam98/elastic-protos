@@ -22,6 +22,8 @@ import com.google.protobuf.Descriptors.FieldDescriptor;
  *     values of a typed map
  * @param pattern the index path pattern of a dynamic field, such as {@code counters.*}; null for a
  *     field the mapping declares
+ * @param enabled false for an object mapped with {@code enabled: false}: the engine keeps it in
+ *     {@code _source} without parsing it, so it cannot be searched, not even with {@code EXISTS}
  */
 public record FieldInfo(
     String path,
@@ -31,7 +33,21 @@ public record FieldInfo(
     boolean keywordSubfield,
     float boost,
     FieldDescriptor field,
-    String pattern) {
+    String pattern,
+    boolean enabled) {
+
+  /** Creates the description of an enabled field, dynamic when {@code pattern} is not null. */
+  public FieldInfo(
+      String path,
+      String protoPath,
+      FieldKind kind,
+      boolean repeated,
+      boolean keywordSubfield,
+      float boost,
+      FieldDescriptor field,
+      String pattern) {
+    this(path, protoPath, kind, repeated, keywordSubfield, boost, field, pattern, true);
+  }
 
   /** Creates the description of a field the mapping declares (not dynamic). */
   public FieldInfo(

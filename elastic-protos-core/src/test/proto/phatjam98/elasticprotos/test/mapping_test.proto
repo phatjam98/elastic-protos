@@ -16,6 +16,13 @@ option java_package = "com.phatjam98.elasticprotos.proto.test";
 option java_multiple_files = true;
 option java_outer_classname = "MappingTestProtos";
 
+// A typed map of Any: its values are disabled objects, and the codec leaves the map out without a
+// type registry.
+message TypedAnys {
+  string id = 1;
+  map<string, google.protobuf.Any> anys = 2 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+}
+
 // Every scalar type with no options: exercises the default rules.
 message Scalars {
   double double_value = 1;
