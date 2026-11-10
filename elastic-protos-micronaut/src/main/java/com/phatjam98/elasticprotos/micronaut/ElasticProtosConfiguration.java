@@ -6,6 +6,7 @@ import com.phatjam98.elasticprotos.mapping.MappingDefaults;
 import com.phatjam98.elasticprotos.migration.FailurePolicy;
 import com.phatjam98.elasticprotos.migration.ReindexMode;
 import com.phatjam98.elasticprotos.migration.RemovedFieldPolicy;
+import com.phatjam98.elasticprotos.migration.StaticSettingsPolicy;
 import com.phatjam98.elasticprotos.query.QueryCompilerConfig;
 import com.phatjam98.elasticprotos.query.TrackTotalHits;
 import io.micronaut.context.annotation.ConfigurationProperties;
@@ -267,6 +268,10 @@ public class ElasticProtosConfiguration {
    *   <li>{@code backfill}: apply additions existing documents were never indexed into in place
    *       with an update by query instead of reindexing; default true
    *   <li>{@code lock.*}: the per-alias migration lock; see {@link Lock}
+   *   <li>{@code static-settings}: {@code WARN} (default) or {@code REINDEX} when static index
+   *       settings the proto declares differ; dynamic settings are always applied in place
+   *   <li>{@code extra-dynamic-settings}: setting keys (without {@code index.}) to treat as
+   *       dynamic; default empty
    * </ul>
    */
   @ConfigurationProperties("bootstrap")
@@ -286,6 +291,8 @@ public class ElasticProtosConfiguration {
     private Duration swapGrace = Duration.ofSeconds(5);
     private boolean backfill = true;
     private Lock lock = new Lock();
+    private StaticSettingsPolicy staticSettings = StaticSettingsPolicy.WARN;
+    private List<String> extraDynamicSettings = new ArrayList<>();
 
     /** Returns {@code enabled}. */
     public boolean isEnabled() {
@@ -415,6 +422,26 @@ public class ElasticProtosConfiguration {
     /** Sets {@code backfill}. */
     public void setBackfill(boolean backfill) {
       this.backfill = backfill;
+    }
+
+    /** Returns {@code static-settings}. */
+    public StaticSettingsPolicy getStaticSettings() {
+      return staticSettings;
+    }
+
+    /** Sets {@code static-settings}. */
+    public void setStaticSettings(StaticSettingsPolicy staticSettings) {
+      this.staticSettings = staticSettings;
+    }
+
+    /** Returns {@code extra-dynamic-settings}. */
+    public List<String> getExtraDynamicSettings() {
+      return extraDynamicSettings;
+    }
+
+    /** Sets {@code extra-dynamic-settings}. */
+    public void setExtraDynamicSettings(List<String> extraDynamicSettings) {
+      this.extraDynamicSettings = extraDynamicSettings;
     }
 
     /** Returns the {@code lock} group. */

@@ -8,6 +8,7 @@ import com.phatjam98.elasticprotos.migration.FailurePolicy
 import com.phatjam98.elasticprotos.migration.IndexMigrator
 import com.phatjam98.elasticprotos.migration.MigrationOptions
 import com.phatjam98.elasticprotos.migration.ReindexMode
+import com.phatjam98.elasticprotos.migration.StaticSettingsPolicy
 import com.phatjam98.elasticprotos.migration.RemovedFieldPolicy
 import com.phatjam98.elasticprotos.migration.ReplicaPolicy
 import com.phatjam98.elasticprotos.proto.example.Firm
@@ -44,6 +45,8 @@ import spock.lang.Specification
 @Property(name = 'elastic-protos.bootstrap.lock.enabled', value = 'false')
 @Property(name = 'elastic-protos.bootstrap.lock.wait', value = '30s')
 @Property(name = 'elastic-protos.bootstrap.lock.ttl', value = '45s')
+@Property(name = 'elastic-protos.bootstrap.static-settings', value = 'reindex')
+@Property(name = 'elastic-protos.bootstrap.extra-dynamic-settings', value = 'codec, merge.policy.max_merged_segment')
 @Property(name = 'elastic-protos.defaults.shards', value = '3')
 @Property(name = 'elastic-protos.defaults.replicas', value = '2')
 @Property(name = 'elastic-protos.naming.prefix', value = 'dev')
@@ -121,6 +124,8 @@ class ConfigurationBindingSpec extends Specification {
       !lock.enabled
       lock.wait == Duration.ofSeconds(30)
       lock.ttl == Duration.ofSeconds(45)
+      staticSettings == StaticSettingsPolicy.REINDEX
+      extraDynamicSettings*.trim() == ['codec', 'merge.policy.max_merged_segment']
     }
   }
 
@@ -176,7 +181,8 @@ class ConfigurationBindingSpec extends Specification {
         .deleteOldAfter(true).removedFields(RemovedFieldPolicy.REINDEX).defaultShards(3)
         .replicas(ReplicaPolicy.fixed(2)).reindexTimeout(Duration.ofSeconds(90)).dryRun(true)
         .clearStaleWriteBlock(false).reindexMode(ReindexMode.BLOCKING).swapGrace(Duration.ofMillis(250))
-        .backfill(false).lock(false).lockWait(Duration.ofSeconds(30)).lockTtl(Duration.ofSeconds(45)).build()
+        .backfill(false).lock(false).lockWait(Duration.ofSeconds(30)).lockTtl(Duration.ofSeconds(45))
+        .staticSettings(StaticSettingsPolicy.REINDEX).extraDynamicSettings(['codec', 'merge.policy.max_merged_segment'] as Set).build()
     migrator.options() == migrationOptions
   }
 }

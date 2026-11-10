@@ -1,6 +1,7 @@
 package com.phatjam98.elasticprotos.migration;
 
 import com.phatjam98.elasticprotos.migration.MappingDiff.Change;
+import com.phatjam98.elasticprotos.util.Json;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -33,9 +34,14 @@ import java.util.TreeSet;
  * Unindexed additions are {@link Action#BACKFILL backfilled} in place.
  *
  * <p>Settings are compared only for keys the desired settings declare, by string value, against
- * the engine's {@code settings.index} object. Shard and replica counts cannot be migrated, so
- * differences there never set {@link MappingDiff#settingsChanged()}; see {@link
- * #settingsWarnings}.
+ * the engine's {@code settings.index} object, both flattened to dotted keys without the {@code
+ * index.} prefix ({@code analysis.analyzer.folding.tokenizer} is one key). A differing key is
+ * dynamic when it is in {@link #DYNAMIC_SETTINGS}, starts with one of {@link
+ * #DYNAMIC_SETTING_PREFIXES} or is listed in {@link MigrationOptions#extraDynamicSettings()};
+ * keys the engine or the migrator manages ({@link #MANAGED_SETTINGS}, {@code blocks.*}, {@code
+ * version.*}) are ignored; everything else, including {@code number_of_shards}, {@code
+ * analysis.*} and unknown keys, is static. {@code number_of_replicas} is not compared while the
+ * desired {@code auto_expand_replicas} is set and not {@code false}. See {@link SettingsDiff}.
  */
 public final class DiffClassifier {
 
@@ -61,8 +67,33 @@ public final class DiffClassifier {
   private static final String DEFAULT_DYNAMIC = "true";
 
   private static final Set<String> STRUCTURAL = Set.of("type", "properties", "fields");
-  private static final Set<String> FIXED_SETTINGS =
-      Set.of("number_of_shards", "number_of_replicas");
+
+  /** Index settings the engines update on a live index, by key without {@code index.}. */
+  public static final Set<String> DYNAMIC_SETTINGS = Set.of(
+      "number_of_replicas", "auto_expand_replicas", "refresh_interval", "search.idle.after",
+      "max_result_window", "max_inner_result_window", "max_rescore_window",
+      "max_docvalue_fields_search", "max_script_fields", "max_ngram_diff", "max_shingle_diff",
+      "max_terms_count", "max_regex_length", "max_refresh_listeners", "max_slices_per_scroll",
+      "analyze.max_token_count", "highlight.max_analyzed_offset", "query.default_field",
+      "default_pipeline", "final_pipeline", "gc_deletes", "hidden", "priority",
+      "write.wait_for_active_shards", "unassigned.node_left.delayed_timeout",
+      "routing.allocation.enable", "routing.rebalance.enable",
+      "routing.allocation.total_shards_per_node", "mapping.total_fields.limit",
+      "mapping.depth.limit", "mapping.nested_fields.limit", "mapping.nested_objects.limit",
+      "mapping.field_name_length.limit", "translog.durability", "translog.flush_threshold_size",
+      "soft_deletes.retention_lease.period");
+
+  /** Prefixes of dynamic index settings. */
+  public static final List<String> DYNAMIC_SETTING_PREFIXES = List.of(
+      "routing.allocation.include.", "routing.allocation.exclude.",
+      "routing.allocation.require.", "search.slowlog.", "indexing.slowlog.", "merge.");
+
+  /**
+   * Index settings the engine or the migrator manages, never applied from the proto; {@code
+   * blocks.*} (the migrator owns {@code blocks.write}) and {@code version.*} are managed too.
+   */
+  public static final Set<String> MANAGED_SETTINGS =
+      Set.of("uuid", "creation_date", "provided_name");
 
   private DiffClassifier() {}
 
@@ -78,6 +109,23 @@ public final class DiffClassifier {
   public static MappingDiff diff(
       Map<String, Object> existingMappings, Map<String, Object> desiredMappings,
       Map<String, Object> existingSettings, Map<String, Object> desiredSettings) {
+    return diff(existingMappings, desiredMappings, existingSettings, desiredSettings, Set.of());
+  }
+
+  /**
+   * Computes the differences, treating more setting keys as dynamic.
+   *
+   * @param existingMappings the index's mappings as the engine returns them
+   * @param desiredMappings the mappings the proto produces
+   * @param existingSettings the index's settings as the engine returns them, or empty
+   * @param desiredSettings the settings the proto produces, or empty
+   * @param extraDynamicSettings setting keys (without {@code index.}) to treat as dynamic
+   * @return the differences
+   */
+  public static MappingDiff diff(
+      Map<String, Object> existingMappings, Map<String, Object> desiredMappings,
+      Map<String, Object> existingSettings, Map<String, Object> desiredSettings,
+      Set<String> extraDynamicSettings) {
     Map<String, Object> before = normalizeNode(existingMappings, true);
     Map<String, Object> after = normalizeNode(desiredMappings, true);
     Collector out = new Collector();
@@ -86,8 +134,9 @@ public final class DiffClassifier {
         ? String.valueOf(before.get("dynamic")) : DEFAULT_DYNAMIC;
     diffChildren("", map(before.get("properties")), map(after.get("properties")), dynamic,
         false, true, out);
+    SettingsDiff settings = settingsDiff(existingSettings, desiredSettings, extraDynamicSettings);
     return new MappingDiff(out.added, out.removed, out.typeChanged, out.paramChanged,
-        settingsChanged(existingSettings, desiredSettings), out.unindexed);
+        !settings.isEmpty(), out.unindexed, settings);
   }
 
   /**
@@ -244,25 +293,149 @@ public final class DiffClassifier {
   }
 
   /**
-   * Describes shard and replica count differences, which are never applied.
+   * Describes the settings that a migration does not apply in place: static settings that differ,
+   * and keys the engine or the migrator manages.
    *
    * @param existingSettings the index's settings as the engine returns them
    * @param desiredSettings the settings the proto produces
-   * @return one warning per differing setting
+   * @return one warning per kind
    */
   public static List<String> settingsWarnings(
       Map<String, Object> existingSettings, Map<String, Object> desiredSettings) {
-    Map<String, Object> existing = flatten(existingSettings);
-    Map<String, Object> desired = flatten(desiredSettings);
-    List<String> warnings = new ArrayList<>();
-    for (String key : new TreeSet<>(FIXED_SETTINGS)) {
-      if (desired.containsKey(key)
-          && !Objects.equals(normalizeValue(desired.get(key)), normalizeValue(existing.get(key)))) {
-        warnings.add(key + " is " + existing.get(key) + " but the proto asks for "
-            + desired.get(key) + "; not applied");
-      }
+    return settingsWarnings(existingSettings, desiredSettings, Set.of());
+  }
+
+  /**
+   * Describes the settings that a migration does not apply in place, treating more keys as
+   * dynamic.
+   *
+   * @param existingSettings the index's settings as the engine returns them
+   * @param desiredSettings the settings the proto produces
+   * @param extraDynamicSettings setting keys (without {@code index.}; ending in {@code .} for a
+   *     prefix) to treat as dynamic
+   * @return one warning per kind
+   */
+  public static List<String> settingsWarnings(Map<String, Object> existingSettings,
+      Map<String, Object> desiredSettings, Set<String> extraDynamicSettings) {
+    SettingsDiff diff = settingsDiff(existingSettings, desiredSettings, extraDynamicSettings);
+    List<String> warnings = new ArrayList<>(managedWarnings(diff));
+    if (!diff.staticChanges().isEmpty()) {
+      warnings.add(staticWarning(diff));
     }
     return warnings;
+  }
+
+  /** Returns the warning for keys the engine or the migrator manages, or none. */
+  static List<String> managedWarnings(SettingsDiff diff) {
+    List<String> warnings = new ArrayList<>();
+    List<String> managed = new ArrayList<>(diff.ignored());
+    if (managed.remove("number_of_replicas")) {
+      warnings.add("number_of_replicas is managed by auto_expand_replicas on the index; not"
+          + " applied");
+    }
+    if (!managed.isEmpty()) {
+      warnings.add("settings managed by the engine or the migrator are never applied: "
+          + managed);
+    }
+    return warnings;
+  }
+
+  /** Returns the warning for static settings that differ. */
+  static String staticWarning(SettingsDiff diff) {
+    return "static settings differ; not applied: " + SettingsDiff.describe(diff.staticChanges());
+  }
+
+  /**
+   * Compares the settings the proto declares with the index's settings.
+   *
+   * @param existingSettings the index's settings as the engine returns them, or null
+   * @param desiredSettings the settings the proto produces, or null
+   * @param extraDynamicSettings setting keys (without {@code index.}) to treat as dynamic
+   * @return the differences
+   */
+  public static SettingsDiff settingsDiff(Map<String, Object> existingSettings,
+      Map<String, Object> desiredSettings, Set<String> extraDynamicSettings) {
+    Map<String, Object> existing = flattenSettings(existingSettings);
+    Map<String, Object> desired = flattenSettings(desiredSettings);
+    boolean expands = expands(desired.get("auto_expand_replicas"));
+    boolean existingExpands = !desired.containsKey("auto_expand_replicas")
+        && expands(existing.get("auto_expand_replicas"));
+    List<Change> dynamicChanges = new ArrayList<>();
+    List<Change> staticChanges = new ArrayList<>();
+    List<String> ignored = new ArrayList<>();
+    for (Map.Entry<String, Object> entry : desired.entrySet()) {
+      String key = entry.getKey();
+      if (expands && "number_of_replicas".equals(key)) {
+        continue;
+      }
+      Object before = existing.get(key);
+      if (Objects.equals(normalizeValue(entry.getValue()), normalizeValue(before))) {
+        continue;
+      }
+      if (isManagedSetting(key) || existingExpands && "number_of_replicas".equals(key)) {
+        ignored.add(key);
+        continue;
+      }
+      Change change = new Change(key, before, entry.getValue());
+      if (isDynamicSetting(key, extraDynamicSettings)) {
+        dynamicChanges.add(change);
+      } else {
+        staticChanges.add(change);
+      }
+    }
+    return new SettingsDiff(dynamicChanges, staticChanges, ignored);
+  }
+
+  /** Returns whether a setting key (without {@code index.}) is managed and never applied. */
+  public static boolean isManagedSetting(String key) {
+    return MANAGED_SETTINGS.contains(key) || key.startsWith("blocks.")
+        || key.startsWith("version.");
+  }
+
+  private static boolean expands(Object autoExpand) {
+    return autoExpand != null && !"false".equals(String.valueOf(autoExpand));
+  }
+
+  /**
+   * Returns whether a setting key (without {@code index.}) can be updated on a live index. Extra
+   * keys ending in {@code .} are prefixes.
+   */
+  public static boolean isDynamicSetting(String key, Set<String> extraDynamicSettings) {
+    if (DYNAMIC_SETTINGS.contains(key) || extraDynamicSettings.contains(key)) {
+      return true;
+    }
+    for (String prefix : DYNAMIC_SETTING_PREFIXES) {
+      if (key.startsWith(prefix)) {
+        return true;
+      }
+    }
+    for (String extra : extraDynamicSettings) {
+      if (extra.endsWith(".") && key.startsWith(extra)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Returns a digest of the static settings among the declared ones: the first 8 hex digits of
+   * the SHA-256 of their canonical flattened key/value map. Recorded at creation in {@code
+   * _meta.elastic_protos.static_settings}, it lets planning tell whether the declared static
+   * settings changed without comparing them with the engine's spelling of the values.
+   *
+   * @param desiredSettings the settings the proto produces
+   * @param extraDynamicSettings setting keys to treat as dynamic
+   * @return the digest
+   */
+  public static String staticSettingsDigest(Map<String, Object> desiredSettings,
+      Set<String> extraDynamicSettings) {
+    Map<String, Object> statics = new TreeMap<>();
+    flattenSettings(desiredSettings).forEach((key, value) -> {
+      if (!isManagedSetting(key) && !isDynamicSetting(key, extraDynamicSettings)) {
+        statics.put(key, normalizeValue(value));
+      }
+    });
+    return Json.sha256Hex(statics).substring(0, 8);
   }
 
   /**
@@ -427,36 +600,35 @@ public final class DiffClassifier {
 
   // ------------------------------------------------------------------ settings
 
-  private static boolean settingsChanged(
-      Map<String, Object> existingSettings, Map<String, Object> desiredSettings) {
-    Map<String, Object> existing = flatten(existingSettings);
-    for (Map.Entry<String, Object> entry : flatten(desiredSettings).entrySet()) {
-      if (FIXED_SETTINGS.contains(entry.getKey())) {
-        continue;
-      }
-      if (!Objects.equals(normalizeValue(entry.getValue()),
-          normalizeValue(existing.get(entry.getKey())))) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private static Map<String, Object> flatten(Map<String, Object> settings) {
+  /**
+   * Flattens settings to dotted keys without the {@code index.} prefix, whether they come nested
+   * ({@code {"index": {"analysis": {...}}}}) or flat ({@code "index.refresh_interval"}).
+   */
+  static Map<String, Object> flattenSettings(Map<String, Object> settings) {
     Map<String, Object> flat = new TreeMap<>();
-    if (settings == null) {
-      return flat;
-    }
-    for (Map.Entry<String, Object> entry : settings.entrySet()) {
-      String key = entry.getKey();
-      if ("index".equals(key) && entry.getValue() instanceof Map) {
-        flat.putAll(flatten(map(entry.getValue())));
-      } else {
-        flat.put(key.startsWith("index.") ? key.substring("index.".length()) : key,
-            entry.getValue());
-      }
+    if (settings != null) {
+      flattenInto("", settings, flat);
     }
     return flat;
+  }
+
+  private static void flattenInto(String prefix, Map<String, Object> node,
+      Map<String, Object> flat) {
+    for (Map.Entry<String, Object> entry : node.entrySet()) {
+      String key = prefix + entry.getKey();
+      if (key.equals("index") && entry.getValue() instanceof Map) {
+        flattenInto("", map(entry.getValue()), flat);
+        continue;
+      }
+      if (key.startsWith("index.")) {
+        key = key.substring("index.".length());
+      }
+      if (entry.getValue() instanceof Map) {
+        flattenInto(key + ".", map(entry.getValue()), flat);
+      } else {
+        flat.put(key, entry.getValue());
+      }
+    }
   }
 
   @SuppressWarnings("unchecked")

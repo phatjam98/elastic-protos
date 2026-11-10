@@ -992,22 +992,265 @@ class IndexMigratorSpec extends Specification {
     DEFAULT.naming() == IndexNamingStrategy.DEFAULT
   }
 
-  def "settings differences are warnings, never changes"() {
+  static ProtoMapper withSettings(Map<String, Object> settings) {
+    def overrides = MappingOverrides.builder()
+    settings.each { k, v -> overrides.setting(k, v) }
+    ProtoMapper.builder().overrides(overrides.build()).build()
+  }
+
+  def "dynamic settings are updated in place, and the next plan is a no-op"() {
+    given:
+    migrator().bootstrap(Firm)
+    String firms = DEFAULT.map(Firm).name()
+    def mapper = withSettings(refresh_interval: '5s', 'index.max_result_window': 20000)
+    engine.clearLog()
+
+    when:
+    def plan = migrator(mapper).plan(Firm)
+    def result = migrator(mapper).apply(plan)
+
+    then:
+    plan.items()[0].action() == Action.UPDATE_SETTINGS
+    plan.items()[0].reason() == 'dynamic settings changed: max_result_window null -> 20000, refresh_interval null -> 5s'
+    plan.items()[0].warnings().isEmpty()
+    plan.hasChanges()
+    plan.toReport().contains("UPDATE_SETTINGS firms: ${firms} (in place)")
+    plan.toJson().contains('"dynamic" : [')
+    result.ok()
+    result.outcomes()[0].index() == firms
+    engine.log().contains("putSettings ${firms} {index.max_result_window=20000, index.refresh_interval=5s}".toString())
+    engine.getSettings('firms').index.refresh_interval == '5s'
+    engine.getSettings('firms').index.max_result_window == '20000'
+    migrator(mapper).plan(Firm).items()[0].action() == Action.NO_OP
+  }
+
+  def "static settings that differ are a warning by default, and dynamic ones are still applied"() {
     given:
     engine.createIndex(DEFAULT.map(Firm).name(), [number_of_shards: 2],
         DEFAULT.map(Firm).mappings(), ['firms'] as Set)
-    def mapper = ProtoMapper.builder()
-        .overrides(MappingOverrides.builder().setting('refresh_interval', '5s').build()).build()
+    def mapper = withSettings(refresh_interval: '5s')
 
     when:
     def item = migrator(mapper).plan(Firm).items()[0]
 
     then:
-    item.action() == Action.NO_OP
+    item.action() == Action.UPDATE_SETTINGS
     item.diff().settingsChanged()
-    !item.diff().isEmpty()
-    item.warnings() == ['number_of_shards is 2 but the proto asks for 1; not applied',
-                        'settings differ; not applied']
+    item.diff().settings().staticChanges()*.path == ['number_of_shards']
+    item.warnings() == ['static settings differ; not applied: number_of_shards 2 -> 1']
+  }
+
+  def "static settings that differ only warn when nothing else changes"() {
+    given:
+    engine.createIndex(DEFAULT.map(Firm).name(), [number_of_shards: 2],
+        DEFAULT.map(Firm).mappings(), ['firms'] as Set)
+
+    when:
+    def item = migrator().plan(Firm).items()[0]
+
+    then:
+    item.action() == Action.NO_OP
+    item.warnings() == ['static settings differ; not applied: number_of_shards 2 -> 1']
+  }
+
+  def "with staticSettings REINDEX a static change reindexes into the next generation: #mode"() {
+    given:
+    String firms = DEFAULT.map(Firm).name()
+    engine.createIndex(firms, [number_of_shards: 2], DEFAULT.map(Firm).mappings(), ['firms'] as Set)
+    engine.index('firms', 'f1', [id: 'f1'], IndexOptions.defaults())
+    def options = BLOCKING.withReindexMode(mode).withSwapGrace(java.time.Duration.ZERO)
+        .withStaticSettings(StaticSettingsPolicy.REINDEX)
+
+    when:
+    def plan = migrator(DEFAULT, options).plan(Firm)
+    def result = migrator(DEFAULT, options).apply(plan)
+
+    then:
+    plan.items()[0].action() == Action.REINDEX
+    plan.items()[0].target().name() == firms + '-g2'
+    plan.items()[0].reason().startsWith('static settings changed: number_of_shards 2 -> 1')
+    result.ok()
+    engine.indices()[firms + '-g2'] == ['firms'] as Set
+    engine.getSettings(firms + '-g2').index.number_of_shards == '1'
+    engine.documents(firms + '-g2').keySet() == ['f1'] as Set
+    migrator(DEFAULT, options).plan(Firm).items()[0].action() == Action.NO_OP
+
+    where:
+    mode << [ReindexMode.BLOCKING, ReindexMode.ZERO_DOWNTIME]
+  }
+
+  def "a static change needing a reindex is blocked when reindexing is not allowed"() {
+    given:
+    engine.createIndex(DEFAULT.map(Firm).name(), [number_of_shards: 2],
+        DEFAULT.map(Firm).mappings(), ['firms'] as Set)
+
+    when:
+    def item = migrator(DEFAULT, BLOCKING.withStaticSettings(StaticSettingsPolicy.REINDEX).withAllowReindex(false))
+        .plan(Firm).items()[0]
+
+    then:
+    item.action() == Action.BLOCKED
+    item.reason() == 'breaking change needs a reindex but allowReindex is false: static settings changed: number_of_shards 2 -> 1'
+  }
+
+  def "a mapping change with dynamic settings updates the settings first"() {
+    given:
+    migrator(NO_RELEVANCE).bootstrap(Document)
+    def mapper = ProtoMapper.builder().overrides(MappingOverrides.builder()
+        .setting('mapping.total_fields.limit', 2000).build()).build()
+    engine.clearLog()
+
+    when:
+    def plan = migrator(mapper).plan(Document)
+    migrator(mapper).apply(plan)
+    def writes = engine.log().findAll { it.startsWith('putSettings') || it.startsWith('putMappings') }
+
+    then:
+    plan.items()[0].action() == Action.PUT_MAPPING
+    plan.items()[0].reason() == 'compatible change: added [relevance]; dynamic settings are updated first: mapping.total_fields.limit null -> 2000'
+    writes*.split(' ')*.getAt(0) == ['putSettings', 'putMappings']
+    engine.getSettings('documents').index['mapping.total_fields.limit'] == '2000'
+    migrator(mapper).plan(Document).items()[0].action() == Action.NO_OP
+  }
+
+  def "the replica policy never turns into a settings update"() {
+    given:
+    migrator(DEFAULT, BLOCKING.withReplicas(ReplicaPolicy.fixed(2))).bootstrap(Document)
+
+    expect:
+    migrator(DEFAULT, BLOCKING.withReplicas(ReplicaPolicy.fixed(0))).plan(Document).items()[0].action() == Action.NO_OP
+  }
+
+  def "a dry run of a settings update changes nothing, and a stale write block is cleared with it"() {
+    given:
+    migrator().bootstrap(Firm)
+    def mapper = withSettings(refresh_interval: '5s')
+    engine.setWriteBlock('firms', true)
+    engine.clearLog()
+
+    when:
+    def dry = migrator(mapper, BLOCKING.withDryRun(true)).bootstrap(Firm)
+
+    then:
+    dry.outcomes()[0].status() == MigrationResult.Status.DRY_RUN
+    !engine.log().any { it.startsWith('putSettings') }
+
+    when:
+    def plan = migrator(mapper).plan(Firm)
+    def result = migrator(mapper).apply(plan)
+
+    then:
+    plan.items()[0].warnings().any { it.contains('it will be cleared (clearStaleWriteBlock)') }
+    result.ok()
+    !engine.isWriteBlocked(DEFAULT.map(Firm).name())
+  }
+
+  def "a same-hash leftover with other static settings is recreated, not reused"() {
+    given:
+    String firms = DEFAULT.map(Firm).name()
+    engine.createIndex(firms, [number_of_shards: 2], DEFAULT.map(Firm).mappings(), ['firms'] as Set)
+    engine.createIndex(firms + '-g2', [number_of_shards: 3], DEFAULT.map(Firm).mappings(), [] as Set)
+    def options = BLOCKING.withStaticSettings(StaticSettingsPolicy.REINDEX)
+
+    when:
+    def result = migrator(DEFAULT, options).bootstrap(Firm)
+
+    then:
+    result.ok()
+    engine.log().contains("deleteIndex ${firms}-g2".toString())
+    engine.getSettings(firms + '-g2').index.number_of_shards == '1'
+  }
+
+  def "the recorded static settings digest decides, so an engine spelling cannot loop a reindex"() {
+    given: 'an index whose engine reports codec differently from the declaration, but records its digest'
+    def mapper = withSettings(codec: 'best_compression')
+    def target = mapper.map(Firm)
+    Map mappings = new TreeMap(target.mappings())
+    mappings._meta = [elastic_protos: mappings._meta.elastic_protos +
+        [static_settings: DiffClassifier.staticSettingsDigest(target.settings(), [] as Set)]]
+    engine.createIndex(target.name(), [number_of_shards: 1, codec: 'BEST_COMPRESSION'], mappings, ['firms'] as Set)
+    def options = BLOCKING.withStaticSettings(StaticSettingsPolicy.REINDEX)
+
+    expect:
+    migrator(mapper, options).plan(Firm).items()[0].action() == Action.NO_OP
+
+    when: 'without the digest the engine values are compared'
+    engine.putMappings(target.name(), [_meta: [elastic_protos: [hash: target.contentHash()]]])
+    def item = migrator(mapper, options).plan(Firm).items()[0]
+
+    then:
+    item.action() == Action.REINDEX
+    item.warnings().isEmpty()
+  }
+
+  def "a new index the engine reports with other static values fails instead of looping"() {
+    given:
+    engine = new SpellingEngine()
+    def mapper = withSettings(codec: 'best_compression')
+    String firms = mapper.map(Firm).name()
+    engine.createIndex(firms, [number_of_shards: 1, codec: 'default'], mapper.map(Firm).mappings(), ['firms'] as Set)
+
+    when:
+    def result = migrator(mapper, BLOCKING.withStaticSettings(StaticSettingsPolicy.REINDEX)).bootstrap(Firm)
+
+    then:
+    result.outcomes()[0].status() == MigrationResult.Status.FAILED
+    result.outcomes()[0].error().message.startsWith('engine reports BEST for codec; declare it that way')
+    !engine.indexExists(firms + '-g2')
+    !engine.isWriteBlocked(firms)
+  }
+
+  def "the static settings warning is left out when the item reindexes anyway"() {
+    given:
+    engine.createIndex(DOC_V1, [number_of_shards: 2], DEFAULT.map(Document).mappings(), ['documents'] as Set)
+    def mapper = ProtoMapper.builder().overrides(MappingOverrides.builder()
+        .forPath('title') { it.setType(EsType.KEYWORD) }.setting('number_of_shards', 1).build()).build()
+
+    when:
+    def item = migrator(mapper).plan(Document).items()[0]
+
+    then:
+    item.action() == Action.REINDEX
+    !item.warnings().any { it.startsWith('static settings differ') }
+  }
+
+  def "declared shard and replica counts are not doubled by the defaults, in any spelling"() {
+    given:
+    engine = new CapturingEngine()
+    def mapper = withSettings('index.number_of_shards': 3, index: [number_of_replicas: 0])
+
+    when:
+    migrator(mapper).bootstrap(Document)
+
+    then:
+    engine.created.keySet() == ['index', 'index.number_of_shards'] as Set
+  }
+
+  def "extra dynamic settings are applied in place, with or without the index. prefix"() {
+    given:
+    migrator().bootstrap(Firm)
+    def mapper = withSettings(codec: 'best_compression')
+
+    when:
+    def plain = migrator(mapper).plan(Firm).items()[0]
+    def item = migrator(mapper, BLOCKING.withExtraDynamicSettings(['index.codec'] as Set)).plan(Firm).items()[0]
+
+    then:
+    plain.action() == Action.NO_OP
+    plain.warnings() == ['static settings differ; not applied: codec null -> best_compression']
+    item.action() == Action.UPDATE_SETTINGS
+    item.reason() == 'dynamic settings changed: codec null -> best_compression'
+  }
+
+  def "a blocked reindex names the dynamic settings it leaves out too"() {
+    given:
+    migrator().bootstrap(Document)
+    def mapper = ProtoMapper.builder().overrides(MappingOverrides.builder()
+        .forPath('title') { it.setType(EsType.KEYWORD) }.setting('refresh_interval', '5s').build()).build()
+
+    expect:
+    migrator(mapper, BLOCKING.withAllowReindex(false)).plan(Document).items()[0].reason()
+        .endsWith('; dynamic settings not applied either: refresh_interval null -> 5s')
   }
 
   def "a legacy index without metadata reports the legacy hash"() {
@@ -1159,6 +1402,31 @@ class IndexMigratorSpec extends Specification {
   }
 
   /** Copies like the real engine, then answers with a canned result, optionally losing a document. */
+  /** Reports codec as BEST on new generations, like an engine that normalizes the value. */
+  static class SpellingEngine extends InMemorySearchEngine {
+    @Override
+    Map<String, Object> getSettings(String aliasOrIndex) {
+      def settings = super.getSettings(aliasOrIndex)
+      if (aliasOrIndex.endsWith('-g2')) {
+        def index = new TreeMap(settings.index)
+        index.codec = 'BEST'
+        return [index: index]
+      }
+      settings
+    }
+  }
+
+  /** Records the settings of the last created index. */
+  static class CapturingEngine extends InMemorySearchEngine {
+    Map<String, Object> created
+
+    @Override
+    void createIndex(String name, Map<String, Object> settings, Map<String, Object> mappings, Set<String> aliases) {
+      created = settings
+      super.createIndex(name, settings, mappings, aliases)
+    }
+  }
+
   static class CannedReindexEngine extends InMemorySearchEngine {
     ReindexResult answer
     boolean dropOne

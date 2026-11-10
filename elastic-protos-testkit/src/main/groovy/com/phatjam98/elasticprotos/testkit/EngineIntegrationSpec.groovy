@@ -40,6 +40,7 @@ import com.phatjam98.elasticprotos.migration.MigrationResult
 import com.phatjam98.elasticprotos.migration.MigrationScriptProvider
 import com.phatjam98.elasticprotos.migration.ReconcileStats
 import com.phatjam98.elasticprotos.migration.RollbackMode
+import com.phatjam98.elasticprotos.migration.StaticSettingsPolicy
 import com.phatjam98.elasticprotos.migration.RemovedFieldPolicy
 import com.phatjam98.elasticprotos.proto.Bool3
 import com.phatjam98.elasticprotos.proto.DistanceUnit
@@ -779,7 +780,7 @@ abstract class EngineIntegrationSpec extends Specification {
     result.outcomes()[0].retainedIndices().isEmpty()
     engine.getAliases(documents.alias()).keySet() == [originalDocumentIndex] as Set
     live._meta.elastic_protos.hash == keywordDocuments.contentHash()
-    live._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version'] as Set
+    live._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version', 'static_settings'] as Set
     live.properties.body.fields.keyword.type == 'keyword'
     multiField.plan(Document).items()*.action() == [Action.NO_OP]
 
@@ -822,7 +823,7 @@ abstract class EngineIntegrationSpec extends Specification {
     result.outcomes()[0].destCount() == 6L
     result.outcomes()[0].reconcile() == new ReconcileStats(0, 0, 0, 0)
     engine.getAliases(v1.alias()).keySet() == [v2.name()] as Set
-    engine.getMappings(v2.name())._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version'] as Set
+    engine.getMappings(v2.name())._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version', 'static_settings'] as Set
     ids(engine.search([v1.alias()], [query: [term: ['body.keyword':
         'Counsel enters an appearance on behalf of the defendant.']]])) == ['doc-4'] as Set
     migrator.plan(Document).items()*.action() == [Action.NO_OP]
@@ -870,7 +871,7 @@ abstract class EngineIntegrationSpec extends Specification {
     result.outcomes()[0].retainedIndices() == [originalDocumentIndex]
     engine.getAliases(alias).keySet() == [target.name()] as Set
     engine.getMappings(alias).properties.title.type == 'keyword'
-    engine.getMappings(target.name())._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version'] as Set
+    engine.getMappings(target.name())._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version', 'static_settings'] as Set
 
     and: 'the last write wins per document and nothing deleted comes back, including zd-9, updated in the old index after the catch-up and deleted in the new one after the swap'
     titles(target.name()) == SampleData.documents().collectEntries { [(it.id): it.title] } + [
@@ -998,7 +999,7 @@ abstract class EngineIntegrationSpec extends Specification {
     titles(originalDocumentIndex)['zd-8'] == 'after the reindex'
     titles(originalDocumentIndex)['zd-1'] == 'after swap'
     count(alias) == 11
-    engine.getMappings(originalDocumentIndex)._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version'] as Set
+    engine.getMappings(originalDocumentIndex)._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version', 'static_settings'] as Set
     outcome { engine.index(next, 'x', [id: 'x'], IndexOptions.defaults()) } == EngineException.Kind.BLOCKED
 
     when: 'the restored index takes writes'
@@ -1008,6 +1009,55 @@ abstract class EngineIntegrationSpec extends Specification {
     then:
     written != null
     count(alias) == 12
+  }
+
+  // ------------------------------------------------------------------ settings
+
+  def "dynamic settings are updated in place, and a static change reindexes into the next generation"() {
+    given: 'a documents alias under -st with the sample set'
+    IndexNamingStrategy stNaming = IndexNamingStrategy.prefixed(prefix + '-st')
+    def plain = ProtoMapper.builder().naming(stNaming).build()
+    IndexDefinition v1 = plain.map(Document)
+    indexSampleDocuments(plain)
+    def dynamic = ProtoMapper.builder().naming(stNaming).overrides(MappingOverrides.builder()
+        .setting('refresh_interval', '5s').setting('index.max_result_window', 20000).build()).build()
+    def migrator = IndexMigrator.builder().engine(engine).mapper(dynamic).options(FAST).build()
+
+    when:
+    MigrationPlan plan = migrator.plan(Document)
+    def result = migrator.apply(plan)
+    def settings = engine.getSettings(v1.name()).index
+
+    then:
+    plan.items()*.action() == [Action.UPDATE_SETTINGS]
+    result.ok()
+    settings.refresh_interval == '5s'
+    settings.max_result_window == '20000'
+    migrator.plan(Document).items()*.action() == [Action.NO_OP]
+
+    when: 'the shard count changes, with static settings reindexed'
+    def sharded = ProtoMapper.builder().naming(stNaming).overrides(MappingOverrides.builder()
+        .setting('refresh_interval', '5s').setting('index.max_result_window', 20000)
+        .setting('number_of_shards', 2).build()).build()
+    def reindexing = IndexMigrator.builder().engine(engine).mapper(sharded)
+        .options(FAST.withStaticSettings(StaticSettingsPolicy.REINDEX)).build()
+    MigrationPlan staticPlan = reindexing.plan(Document)
+    def reindexed = reindexing.apply(staticPlan)
+    def newSettings = engine.getSettings(v1.name() + '-g2').index
+
+    then:
+    staticPlan.items()*.action() == [Action.REINDEX]
+    staticPlan.items()[0].target().name() == v1.name() + '-g2'
+    staticPlan.items()[0].reason().startsWith('static settings changed: number_of_shards 1 -> 2')
+    reindexed.ok()
+    reindexed.outcomes()[0].sourceCount() == 6L
+    reindexed.outcomes()[0].destCount() == 6L
+    engine.getAliases(v1.alias()).keySet() == [v1.name() + '-g2'] as Set
+    newSettings.number_of_shards == '2'
+    newSettings.refresh_interval == '5s'
+    engine.getMappings(v1.name() + '-g2')._meta.elastic_protos.static_settings ==
+        DiffClassifier.staticSettingsDigest(sharded.map(Document).settings(), [] as Set)
+    reindexing.plan(Document).items()*.action() == [Action.NO_OP]
   }
 
   // ------------------------------------------------------------------ concurrent bootstrap

@@ -18,6 +18,7 @@ import io.micronaut.context.annotation.Factory;
 import io.micronaut.context.annotation.Requires;
 import io.micronaut.core.annotation.Nullable;
 import jakarta.inject.Singleton;
+import java.util.stream.Collectors;
 
 /**
  * Creates the elastic-protos components from {@link ElasticProtosConfiguration}. Every bean is
@@ -175,6 +176,9 @@ public class ElasticProtosFactory {
         .lock(bootstrap.getLock().isEnabled())
         .lockWait(bootstrap.getLock().getWait())
         .lockTtl(bootstrap.getLock().getTtl())
+        .staticSettings(bootstrap.getStaticSettings())
+        .extraDynamicSettings(bootstrap.getExtraDynamicSettings().stream().map(String::trim)
+            .filter(key -> !key.isEmpty()).collect(Collectors.toSet()))
         .build();
   }
 

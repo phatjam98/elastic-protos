@@ -12,6 +12,7 @@ import com.phatjam98.elasticprotos.migration.FailurePolicy
 import com.phatjam98.elasticprotos.migration.DegradedReconcile
 import com.phatjam98.elasticprotos.migration.MigrationOptions
 import com.phatjam98.elasticprotos.migration.ReindexMode
+import com.phatjam98.elasticprotos.migration.StaticSettingsPolicy
 import com.phatjam98.elasticprotos.migration.RemovedFieldPolicy
 import com.phatjam98.elasticprotos.migration.ReplicaPolicy
 import com.phatjam98.elasticprotos.proto.DynamicMode
@@ -339,7 +340,8 @@ class ConfigTypesSpec extends Specification {
         .reindexTimeout(Duration.ofSeconds(90)).dryRun(true).clearStaleWriteBlock(false)
         .reindexMode(ReindexMode.BLOCKING).swapGrace(Duration.ZERO).backfill(false)
         .degradedReconcile(DegradedReconcile.CREATE_MISSING)
-        .lock(false).lockWait(Duration.ZERO).lockTtl(Duration.ofSeconds(30)).build()
+        .lock(false).lockWait(Duration.ZERO).lockTtl(Duration.ofSeconds(30))
+        .staticSettings(StaticSettingsPolicy.REINDEX).extraDynamicSettings(['codec'] as Set).build()
     def copied = MigrationOptions.standard()
         .withFailure(FailurePolicy.CONTINUE).withAllowReindex(false).withDeleteOldAfter(true)
         .withRemovedFields(RemovedFieldPolicy.REINDEX).withDefaultShards(3)
@@ -348,6 +350,7 @@ class ConfigTypesSpec extends Specification {
         .withReindexMode(ReindexMode.BLOCKING).withSwapGrace(Duration.ZERO).withBackfill(false)
         .withDegradedReconcile(DegradedReconcile.CREATE_MISSING)
         .withLock(false).withLockWait(Duration.ZERO).withLockTtl(Duration.ofSeconds(30))
+        .withStaticSettings(StaticSettingsPolicy.REINDEX).withExtraDynamicSettings(['codec'] as Set)
 
     expect:
     MigrationOptions.builder().build() == MigrationOptions.standard()
@@ -360,7 +363,9 @@ class ConfigTypesSpec extends Specification {
         ' removedFields=REINDEX, defaultShards=3, replicas=ReplicaPolicy[mode=FIXED, count=2],' +
         ' reindexTimeout=PT1M30S, dryRun=true, clearStaleWriteBlock=false, reindexMode=BLOCKING,' +
         ' swapGrace=PT0S, backfill=false, degradedReconcile=CREATE_MISSING, lock=false, lockWait=PT0S,' +
-        ' lockTtl=PT30S]'
+        ' lockTtl=PT30S, staticSettings=REINDEX, extraDynamicSettings=[codec]]'
+    MigrationOptions.standard().staticSettings() == StaticSettingsPolicy.WARN
+    MigrationOptions.standard().extraDynamicSettings().isEmpty()
     MigrationOptions.standard().lock()
     MigrationOptions.standard().lockWait() == Duration.ofMinutes(10)
     MigrationOptions.standard().lockTtl() == Duration.ofMinutes(2)
@@ -394,6 +399,8 @@ class ConfigTypesSpec extends Specification {
     'lock'                 | { it.withLock(false) }
     'lockWait'             | { it.withLockWait(Duration.ZERO) }
     'lockTtl'              | { it.withLockTtl(Duration.ofMinutes(1)) }
+    'staticSettings'       | { it.withStaticSettings(StaticSettingsPolicy.REINDEX) }
+    'extraDynamicSettings' | { it.withExtraDynamicSettings(['codec'] as Set) }
   }
 
   @Unroll
@@ -422,6 +429,8 @@ class ConfigTypesSpec extends Specification {
     'short lock ttl' | { it.lockTtl(Duration.ofMillis(999)) }       || IllegalArgumentException | 'lockTtl must be at least one second: PT0.999S'
     'no lock wait'   | { it.lockWait(null) }                        || NullPointerException     | 'lockWait'
     'no lock ttl'    | { it.lockTtl(null) }                         || NullPointerException     | 'lockTtl'
+    'no static'      | { it.staticSettings(null) }                  || NullPointerException     | 'staticSettings'
+    'no extra keys'  | { it.extraDynamicSettings(null) }            || NullPointerException     | 'extraDynamicSettings'
   }
 
   // ---- ReplicaPolicy -----------------------------------------------------------------------

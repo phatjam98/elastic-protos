@@ -174,7 +174,7 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     seen[Phase.RECONCILED] == seen[Phase.FROZEN]
     seen[Phase.SWEPT] == seen[Phase.FROZEN]
     seen[Phase.FINISHED] == null
-    engine.getMappings(V2)._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version'] as Set
+    engine.getMappings(V2)._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version', 'static_settings'] as Set
   }
 
   def "a migration script runs on reconciled documents through a staging index"() {

@@ -17,7 +17,7 @@ import java.util.Set;
 public record MigrationPlan(List<IndexPlan> items) {
 
   private static final Set<Action> CHANGES = Set.of(Action.CREATE, Action.PUT_MAPPING,
-      Action.BACKFILL, Action.REINDEX);
+      Action.UPDATE_SETTINGS, Action.BACKFILL, Action.REINDEX);
 
   /** Copies the items. */
   public MigrationPlan {
@@ -39,8 +39,8 @@ public record MigrationPlan(List<IndexPlan> items) {
    * and the number of changed fields, followed by warnings and, for blocked and no-op items, the
    * reason. The indices read {@code current -> target} for {@link Action#CREATE}, {@link
    * Action#REINDEX} and {@link Action#BLOCKED}, and {@code current (in place)} for {@link
-   * Action#PUT_MAPPING}, {@link Action#BACKFILL} and {@link Action#NO_OP}, whose live index keeps
-   * its name.
+   * Action#PUT_MAPPING}, {@link Action#UPDATE_SETTINGS}, {@link Action#BACKFILL} and {@link
+   * Action#NO_OP}, whose live index keeps its name.
    */
   public String toReport() {
     StringBuilder out = new StringBuilder();
@@ -71,7 +71,7 @@ public record MigrationPlan(List<IndexPlan> items) {
   private static String indices(IndexPlan item) {
     String current = item.currentIndex() == null ? "(none)" : item.currentIndex();
     if (item.action() == Action.PUT_MAPPING || item.action() == Action.BACKFILL
-        || item.action() == Action.NO_OP) {
+        || item.action() == Action.UPDATE_SETTINGS || item.action() == Action.NO_OP) {
       return current + " (in place)";
     }
     return current + " -> " + item.target().name();
@@ -106,6 +106,11 @@ public record MigrationPlan(List<IndexPlan> items) {
       diff.put("paramChanged", changes(item.diff().paramChanged()));
       diff.put("unindexedAdditions", changes(item.diff().unindexedAdditions()));
       diff.put("settingsChanged", item.diff().settingsChanged());
+      Map<String, Object> settings = new LinkedHashMap<>();
+      settings.put("dynamic", changes(item.diff().settings().dynamicChanges()));
+      settings.put("static", changes(item.diff().settings().staticChanges()));
+      settings.put("ignored", item.diff().settings().ignored());
+      diff.put("settings", settings);
       entry.put("diff", diff);
       list.add(entry);
     }

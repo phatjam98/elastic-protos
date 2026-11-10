@@ -72,7 +72,8 @@ class IndexMigratorBackfillSpec extends Specification {
     engine.log() == ["putMappings ${V1}", "updateByQuery ${V1}", "putMappings ${V1}"]*.toString()
     engine.getMappings(V1).properties.body.fields.keyword.type == 'keyword'
     engine.getMappings(V1)._meta.elastic_protos == [hash: HASH2, proto: 'phatjam98.elasticprotos.example.Document',
-                                                    schema_version: engine.getMappings(V1)._meta.elastic_protos.schema_version]
+                                                    schema_version: engine.getMappings(V1)._meta.elastic_protos.schema_version,
+                                                    static_settings: DiffClassifier.staticSettingsDigest([:], [] as Set)]
     engine.get(V1, 'd0').get().version() == 2L
     phases == [Phase.BACKFILL_MARKED, Phase.BACKFILLED, Phase.BACKFILL_FINISHED]
     migrator().plan(Document).items()[0].action() == Action.NO_OP
@@ -169,6 +170,26 @@ class IndexMigratorBackfillSpec extends Specification {
     result.ok()
     engine.getMappings(V1)._meta.elastic_protos.pending == null
     migrator().plan(Document).items()[0].action() == Action.NO_OP
+  }
+
+  def "an interrupted backfill resumes even when the next plan would only update settings"() {
+    given:
+    on[Phase.BACKFILL_MARKED] = { throw new MigrationListener.Abort('killed') }
+    migrator().bootstrap(Document)
+    on.clear()
+    def withRefresh = ProtoMapper.builder().overrides(MappingOverrides.builder()
+        .forPath('body') { it.setKeywordSubfield(Bool3.TRUE) }.setting('refresh_interval', '5s').build()).build()
+
+    when:
+    def plan = migrator(mapper: withRefresh).plan(Document)
+    def result = migrator(mapper: withRefresh).apply(plan)
+
+    then:
+    plan.items()[0].action() == Action.BACKFILL
+    plan.items()[0].reason() == "resuming the interrupted backfill of ${V1}".toString()
+    result.ok()
+    engine.getSettings(V1).index.refresh_interval == '5s'
+    engine.getMappings(V1)._meta.elastic_protos.pending == null
   }
 
   def "a stale write block is cleared before a backfill"() {

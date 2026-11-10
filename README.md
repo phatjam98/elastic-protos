@@ -52,8 +52,8 @@ unchanged and be compiled on the server against the index definition.
   (`elastic`, `elastic_field`) and optional programmatic overrides; no field-name guessing.
 - Content-hash-versioned indices (`documents-v1a2b3c4d`) behind a stable alias, with a recorded
   `_meta` block.
-- Migrations that plan before they act: `CREATE`, `NO_OP`, `PUT_MAPPING`, `BACKFILL` (in-place
-  update by query), `REINDEX` (with optional Painless scripts) or `BLOCKED`, a printable dry-run
+- Migrations that plan before they act: `CREATE`, `NO_OP`, `PUT_MAPPING`, `UPDATE_SETTINGS`,
+  `BACKFILL` (in-place update by query), `REINDEX` (with optional Painless scripts) or `BLOCKED`, a printable dry-run
   report, and rollback. A reindex never blocks writes to the live index: it copies, catches up,
   swaps the alias and reconciles with conditional writes, and resumes after a crash.
 - `ProtoDocumentCodec`: message to document and back, honouring renamed and ignored fields, geo
@@ -496,9 +496,10 @@ MigrationResult result = migrator.apply(plan);
 |---|---|---|
 | `CREATE` | The alias does not exist | Creates the index with settings, mappings and the alias in one request |
 | `NO_OP` | Hash matches, or the mappings already match | Nothing |
-| `PUT_MAPPING` | Only fields were added that existing documents can be indexed into (new top-level fields, new properties under an object that already has typed properties, new typed maps with their `dynamic_templates`, new fields in the values of typed maps), or only `dynamic` changed | Extends the mapping of the current index in place |
+| `PUT_MAPPING` | Only fields were added that existing documents can be indexed into (new top-level fields, new properties under an object that already has typed properties, new typed maps with their `dynamic_templates`, new fields in the values of typed maps), or only `dynamic` changed | Extends the mapping of the current index in place (after updating dynamic settings that differ) |
+| `UPDATE_SETTINGS` | The mappings match, and dynamic settings the proto declares differ ([Settings changes](#settings-changes)) | `PUT /<index>/_settings` with the differing dynamic settings |
 | `BACKFILL` | Fields were added that existing documents were never indexed into: a multi-field added to an existing field (for example `name.keyword`), or a typed property added under an object whose current mapping is dynamic; nothing else needs a reindex | Extends the mapping in place, then re-indexes every document of the current index with `_update_by_query` (below) |
-| `REINDEX` | A field changed type or any mapping parameter other than `dynamic` (analyzer, `search_analyzer`, format, `ignore_above`, normalizer, `copy_to`, `index`, `doc_values`, `null_value`, `coerce`, `enabled`, ...); a template of a typed map that already exists changed or went away (except a removed map under `RemovedFieldPolicy.KEEP`), or an untyped map became typed; fields were removed under `RemovedFieldPolicy.REINDEX`; or a `BACKFILL` with `backfill` off or a migration script for the change | New index, copy, swap the alias, reconcile ([Zero-downtime reindex](#zero-downtime-reindex)) |
+| `REINDEX` | A field changed type or any mapping parameter other than `dynamic` (analyzer, `search_analyzer`, format, `ignore_above`, normalizer, `copy_to`, `index`, `doc_values`, `null_value`, `coerce`, `enabled`, ...); a template of a typed map that already exists changed or went away (except a removed map under `RemovedFieldPolicy.KEEP`), or an untyped map became typed; fields were removed under `RemovedFieldPolicy.REINDEX`; a `BACKFILL` with `backfill` off or a migration script for the change; or static settings differ under `StaticSettingsPolicy.REINDEX` | New index, copy, swap the alias, reconcile ([Zero-downtime reindex](#zero-downtime-reindex)) |
 | `BLOCKED` | A concrete index is named like the alias; the alias points at several indices; or a breaking change with `allowReindex` off | Nothing; the outcome's status is `BLOCKED`, the plan's `reason` says why and `MigrationResult.ok()` is false |
 
 An added multi-field, or typed properties over what used to be a dynamic object, need more than a
@@ -530,20 +531,65 @@ Removed fields are kept in the mapping with a warning by default (`RemovedFieldP
 ### Settings changes
 
 Settings (`shards`, `replicas`, `settings_json` such as analysis definitions, and
-`MappingOverrides.setting(...)`) are not part of the content hash
-([ADR 0006](docs/adr/0006-settings-outside-the-content-hash.md)). A change to settings alone never
-produces a new index:
+`MappingOverrides.setting(...)`, with or without the `index.` prefix, nested or dotted) are not part
+of the content hash ([ADR 0006](docs/adr/0006-settings-outside-the-content-hash.md)); they are
+compared with the live index on every plan, key by key, after flattening both sides to dotted keys
+(`analysis.analyzer.folding.tokenizer` is one key). Values compare as strings.
 
-- The plan is `NO_OP` with the warning `settings differ; not applied` (shard and replica
-  differences get one warning per key). The library never updates the settings of an existing index.
-- Settings are applied whenever an index is created: on `CREATE`, and on the new index of a
-  mapping-driven `REINDEX`, so pending settings changes ride along with the next reindex.
-- To roll out an analyzer change on its own, make it visible in the mappings: define the analyzer
-  under a **new name** in `settings_json` and point the field's `analyzer` (or the message's
-  `default_analyzer`) at it. The `analyzer` parameter is in the mappings, so the hash changes and the
-  plan is a `REINDEX` into a new index that carries the new analysis settings. Editing an analyzer
-  definition in place under the same name is not picked up; neither is any other settings-only edit.
-  The alternative is a manual reindex outside the library.
+- **Only keys the proto declares are compared.** The `replicas` option of `MigrationOptions` (and
+  `defaultShards`) applies only when an index is created, so a replica policy such as
+  `dataNodesMinusOne` never shows up as a change. `number_of_replicas` is not compared while the
+  proto sets `auto_expand_replicas` to anything but `false`, nor while the index has one and the
+  proto declares none (with a warning). Removing a setting from the proto never resets it on the
+  index.
+- **Dynamic settings are applied in place.** A plan whose mappings match but whose dynamic settings
+  differ is `UPDATE_SETTINGS` (`PUT /<index>/_settings`, under the alias lock); a `PUT_MAPPING` or
+  `BACKFILL` updates the dynamic settings first (so a raised `mapping.total_fields.limit` is in
+  place before the fields arrive); a `REINDEX` creates the new index with all settings. Dynamic
+  keys: `number_of_replicas`, `auto_expand_replicas`, `refresh_interval`, `search.idle.after`, the
+  `max_*` limits (`max_result_window`, `max_inner_result_window`, `max_rescore_window`,
+  `max_docvalue_fields_search`, `max_script_fields`, `max_ngram_diff`, `max_shingle_diff`,
+  `max_terms_count`, `max_regex_length`, `max_refresh_listeners`, `max_slices_per_scroll`),
+  `analyze.max_token_count`, `highlight.max_analyzed_offset`, `query.default_field`,
+  `default_pipeline`, `final_pipeline`, `gc_deletes`, `hidden`, `priority`,
+  `write.wait_for_active_shards`, `unassigned.node_left.delayed_timeout`, the `routing.allocation`
+  and `routing.rebalance` settings, the `mapping.*.limit` settings, `translog.durability`,
+  `translog.flush_threshold_size`, and keys under `routing.allocation.include|exclude|require.`,
+  `search.slowlog.`, `indexing.slowlog.` and `merge.`, and `soft_deletes.retention_lease.period`
+  (`DiffClassifier.DYNAMIC_SETTINGS` and `DYNAMIC_SETTING_PREFIXES`).
+  `MigrationOptions.extraDynamicSettings` adds keys (a leading `index.` is stripped; an entry
+  ending in `.` is a prefix). Candidates are engine-specific dynamic settings the built-in list
+  leaves out: on Elasticsearch `lifecycle.` and `mapping.total_fields.ignore_dynamic_beyond_limit`,
+  on OpenSearch `plugins.index_state_management.` and `search.default_pipeline`.
+- **Static settings** (everything else: `number_of_shards`, `analysis.*`, `codec`, `sort.*`,
+  `similarity.*`, unknown keys) can only be set when an index is created. With
+  `staticSettings(StaticSettingsPolicy.WARN)` (the default) a difference is the warning `static
+  settings differ; not applied: <key before -> after, ...>`, and the dynamic part is still applied.
+  With `StaticSettingsPolicy.REINDEX` the item is a `REINDEX` into the next generation of the index
+  name (the hash does not change, so the new index is `<name>-g2`, `-g3`, ...), with the reason
+  `static settings changed: ...`, or `BLOCKED` when `allowReindex` is off. The warning is left out
+  when the item reindexes anyway, since the new index gets every setting.
+- Every index the migrator creates records a digest of the declared static settings in
+  `_meta.elastic_protos.static_settings` (the first 8 hex digits of the SHA-256 of their canonical
+  flattened key/value map). When it is present, planning compares the declared static settings
+  with the digest rather than with the values the engine reports, so an engine that spells a value
+  differently cannot make `REINDEX` loop; indices without it are compared by value. Under
+  `StaticSettingsPolicy.REINDEX` a new index whose engine-reported static values still differ from
+  the declaration fails the item ("engine reports `<v>` for `<key>`; declare it that way") and is
+  deleted.
+- Keys the engine or the migrator manages (`blocks.*`, `uuid`, `creation_date`, `version.*`,
+  `provided_name`) are never applied; a warning names them when their value differs.
+- For dynamic keys, equivalent values in another spelling (`5000ms` against `5s`) compare as
+  different, so they are applied again on every run: harmless, but noisy. Declare them the way the
+  engine reports them. Static keys are covered by the digest above.
+- The plan's `diff().settings()` lists the dynamic and static changes and the ignored keys, and
+  `toJson()` includes them.
+
+An analyzer change can also be rolled out as a mapping change, which needs no static-settings
+policy: define the analyzer under a **new name** in `settings_json` and point the field's
+`analyzer` (or the message's `default_analyzer`) at it. The `analyzer` parameter is in the
+mappings, so the hash changes and the plan is a `REINDEX` into a new index that carries the new
+analysis settings.
 
 ```proto
 message Document {
@@ -574,6 +620,8 @@ message Document {
 | `lock` | `true`: take a per-alias lock and plan again under it (see [Running from several instances](#running-from-several-instances)) |
 | `lockWait` | 10 minutes: how long to wait for another holder before the item is `LOCKED`; zero fails at once |
 | `lockTtl` | 2 minutes (at least 1 second): a lock not renewed for this long is taken over |
+| `staticSettings` | `WARN`: static settings that differ are a warning; `REINDEX` reindexes into the next generation |
+| `extraDynamicSettings` | none: setting keys (without `index.`) to apply in place in addition to the built-in list |
 | `degradedReconcile` | `REPORT`: when the snapshot is lost after the swap, write nothing and end `INCOMPLETE`; `CREATE_MISSING` creates the missing documents (and so brings back documents deleted since the swap) |
 
 ### Dry run
@@ -1278,6 +1326,8 @@ that do not fit together such as a `max-page-size` below `default-size`, abort
 | `elastic-protos.bootstrap.reindex-timeout` | `10m` | How long a reindex or backfill may take |
 | `elastic-protos.bootstrap.reindex-mode` | `ZERO_DOWNTIME` | Or `BLOCKING` (write-block the old index during the copy) |
 | `elastic-protos.bootstrap.swap-grace` | `5s` | Wait after the alias swap before the old index is write-blocked |
+| `elastic-protos.bootstrap.static-settings` | `WARN` | Or `REINDEX`: reindex into the next generation when static settings differ |
+| `elastic-protos.bootstrap.extra-dynamic-settings` | empty | Setting keys (without `index.`) to apply in place in addition to the built-in list |
 | `elastic-protos.bootstrap.lock.enabled` | `true` | Take a per-alias lock in the lock index, so several instances can bootstrap at once |
 | `elastic-protos.bootstrap.lock.wait` | `10m` | How long to wait for a lock another instance holds; `0s` fails at once |
 | `elastic-protos.bootstrap.lock.ttl` | `2m` | How long a lock lives without a heartbeat |
@@ -1320,8 +1370,9 @@ before 3.3); `pager(...)` always adapts.
 - A document created after the catch-up pass and deleted through the alias after the swap,
   before the reconcile reached it, is created again by the reconcile: the new index never held it,
   so there is nothing to compare the delete with. The hot pass keeps this window short.
-- Settings of existing indices (shards, replicas, analysis) are never changed by a migration;
-  settings-only changes need a mapping-visible step (see [Settings changes](#settings-changes)).
+- Static settings (shards, analysis, ...) of an existing index only change by a reindex
+  (`StaticSettingsPolicy.REINDEX`); a setting removed from the proto is never reset (see
+  [Settings changes](#settings-changes)).
 - Keys of typed maps must not contain dots; dynamic keys count toward
   `index.mapping.total_fields.limit` (and nested fields in their values toward
   `index.mapping.nested_fields.limit`) at index time; inner maps inside typed map values stay untyped.
