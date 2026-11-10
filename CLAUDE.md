@@ -37,6 +37,7 @@ Checkstyle, JaCoCo and Javadoc.
 ./gradlew :elastic-protos-elasticsearch:integrationTest -PengineImage=<docker image>   # Testcontainers (Docker)
 ./gradlew :elastic-protos-opensearch:integrationTest -PengineImage=<docker image>      # Testcontainers (Docker)
 ./gradlew :elastic-protos-testkit:demo --args="elasticsearch http://localhost:9200"   # or: opensearch <url>
+./gradlew :elastic-protos-testkit:soak --args="elasticsearch http://localhost:9200 all"  # soak harness (docs/soak.md); live|kill|bootstrap|all, JSON reports in elastic-protos-testkit/build/soak
 ./gradlew test -PtestJavaVersion=21  # run tests on JDK 21 (compilation always targets 17)
 ./gradlew showVersion
 ./gradlew stageAll                   # publish every module into build/staging-deploy for JReleaser
@@ -96,6 +97,8 @@ Checkstyle, JaCoCo and Javadoc.
   `vX.Y.Z` or `vX.Y.Z-rc.N` and be on `origin/main`; runs `build` and `jreleaserFullRelease` with `-Pversion`.
   Dispatch also takes `release_only`: recovery when Central succeeded but the GitHub release failed; it checks
   out the tagged commit and runs `jreleaserRelease` (never redeploys; needs the existing tag, not with dryrun).
+- `soak.yml` (`workflow_dispatch` only; inputs scenario and docs): the soak harness on the four verified
+  images, reports uploaded as `soak-<label>` artifacts. Never on push or PR.
 - `codeql.yml` (Java, manual build) and `dependabot.yml` (`build(deps)` / `ci(deps)` prefixes, which the
   changelog excludes along with `chore`, `docs`, `test` and merge commits).
 - The GitHub release uses the automatic `GITHUB_TOKEN` (no PAT secret). Required secrets: `JRELEASER_MAVENCENTRAL_USERNAME`, `JRELEASER_MAVENCENTRAL_PASSWORD`,

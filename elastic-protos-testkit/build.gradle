@@ -30,3 +30,14 @@ tasks.register('demo', JavaExec) {
     mainClass = 'com.phatjam98.elasticprotos.testkit.Demo'
     javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }
 }
+
+// ./gradlew :elastic-protos-testkit:soak --args="elasticsearch http://localhost:9200 all"
+// Soak scenarios against a running cluster; see docs/soak.md. Reports go to build/soak.
+tasks.register('soak', JavaExec) {
+    group = 'verification'
+    description = 'Soaks the migration paths on a running cluster: --args="<elasticsearch|opensearch> <url> <live|kill|bootstrap|all> [options]".'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.phatjam98.elasticprotos.testkit.soak.Soak'
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }
+    maxHeapSize = '2g'
+}
