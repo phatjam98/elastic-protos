@@ -12,6 +12,7 @@ import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
 import com.phatjam98.elasticprotos.proto.example.InboxItem
 import com.phatjam98.elasticprotos.proto.example.InnerMaps
+import com.phatjam98.elasticprotos.proto.example.LooseValues
 import com.phatjam98.elasticprotos.proto.example.TypedMaps
 import com.phatjam98.elasticprotos.proto.test.Annotated
 import com.phatjam98.elasticprotos.proto.test.Child
@@ -66,6 +67,7 @@ class ProtoMapperSpec extends Specification {
     'inbox_item'   | InboxItem
     'maps_typed'   | TypedMaps
     'maps_inner'   | InnerMaps
+    'maps_loose_values' | LooseValues
   }
 
   def "scalars follow the default rules"() {
@@ -114,8 +116,8 @@ class ProtoMapperSpec extends Specification {
     props.bool_wrapper.type == 'boolean'
     props.double_wrapper.type == 'double'
     props.struct_value == [type: 'flattened']
-    props.value_value == [type: 'flattened']
-    props.list_value == [type: 'flattened']
+    props.value_value == [type: 'object', enabled: false]
+    props.list_value == [type: 'object', enabled: false]
     !props.containsKey('any_value')
     !props.containsKey('field_mask')
     !props.containsKey('empty_value')
@@ -470,7 +472,10 @@ class ProtoMapperSpec extends Specification {
     templates['ep:wrapped.*'].mapping == [type: 'integer']
     templates['ep:anys.*'] == [path_match: 'anys.*', mapping: DISABLED]
     definition.warnings().contains('anys.*: google.protobuf.Any inside the values of a typed map is mapped as a'
-        + ' disabled object (kept in _source, not indexed)')
+        + ' disabled object (kept in _source, not indexed); the codec writes it only with CodecConfig.anyTypes'
+        + ' and leaves it out otherwise')
+    !definition.dynamicFields()['anys.*'].enabled()
+    definition.dynamicFields()['structs.*'].enabled()
     definition.warnings().every { !it.contains('untyped') }
     definition.dynamicFields().keySet() == ['anys.*', 'structs.*', 'wrapped.*'] as Set
     definition.dynamicFields()['structs.*'].kind() == FieldKind.FLATTENED
@@ -894,7 +899,7 @@ class ProtoMapperSpec extends Specification {
     then:
     def e = thrown(MappingException)
     e.path == 'string_value'
-    e.message.contains("elastic_field.name '${name}' must be non-empty and contain no '.' or whitespace")
+    e.message.contains("elastic_field.name '${name}' must be non-empty and contain no '.', '*' or whitespace")
 
     where:
     label        | name
@@ -902,6 +907,7 @@ class ProtoMapperSpec extends Specification {
     'a space'    | 'a b'
     'blank'      | ' '
     'a tab'      | 'x\ty'
+    'a wildcard' | 'c*'
   }
 
   def "a valid mapped-name override renames the field"() {

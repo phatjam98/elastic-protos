@@ -7,6 +7,7 @@ import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
 import com.google.protobuf.Timestamp;
+import com.google.protobuf.TypeRegistry;
 import com.google.protobuf.util.JsonFormat;
 import com.google.protobuf.util.Timestamps;
 import com.phatjam98.elasticprotos.engine.Hit;
@@ -47,6 +48,7 @@ import java.util.concurrent.ConcurrentMap;
 public final class ProtoDocumentCodec {
 
   private static final String TIMESTAMP = "google.protobuf.Timestamp";
+  private static final String ANY = "google.protobuf.Any";
   private static final Set<String> LAT_NAMES = Set.of("lat", "latitude");
   private static final Set<String> LON_NAMES = Set.of("lon", "lng", "longitude");
   private static final Set<String> STRUCT_LIKE =
@@ -108,7 +110,10 @@ public final class ProtoDocumentCodec {
   }
 
   private Map<String, Object> toDocument(Message message, Schema schema) {
-    Message pruned = prune(message, schema.definition.ignoredPaths());
+    // Without a type registry an Any cannot be printed: inside typed map values it is then left
+    // out like a top-level Any, instead of failing the whole document.
+    Message pruned = prune(message, config.anyTypes() == TypeRegistry.getEmptyTypeRegistry()
+        ? schema.prunedWithoutAnyTypes : schema.definition.ignoredPaths());
     JsonFormat.Printer printer =
         JsonFormat.printer()
             .preservingProtoFieldNames()
@@ -124,7 +129,7 @@ public final class ProtoDocumentCodec {
       throw new CodecException("Cannot serialize " + message.getDescriptorForType().getFullName(),
           e);
     }
-    return forward(Json.parseObject(json), message.getDescriptorForType(), "", schema);
+    return forward(Json.parseObject(json), message.getDescriptorForType(), "", "", schema);
   }
 
   /**
@@ -170,7 +175,7 @@ public final class ProtoDocumentCodec {
   private Message fromDocument(
       Map<String, Object> source, Descriptor descriptor, Message.Builder builder) {
     Schema schema = schema(descriptor);
-    Map<String, Object> protoShaped = reverse(source, descriptor, "", schema);
+    Map<String, Object> protoShaped = reverse(source, descriptor, "", "", schema);
     JsonFormat.Parser parser = JsonFormat.parser().usingTypeRegistry(config.anyTypes());
     if (config.unknownFields() == UnknownFieldPolicy.IGNORE) {
       parser = parser.ignoringUnknownFields();
@@ -244,8 +249,13 @@ public final class ProtoDocumentCodec {
         + ", which cannot be a document id");
   }
 
-  private Map<String, Object> forward(
-      Map<String, Object> in, Descriptor descriptor, String prefix, Schema schema) {
+  /**
+   * Converts a printed message. {@code prefix} is its proto path as a pattern ({@code outer.*}),
+   * which finds the fields in the schema; {@code at} is its concrete proto path ({@code outer.a}),
+   * which error messages name.
+   */
+  private Map<String, Object> forward(Map<String, Object> in, Descriptor descriptor,
+      String prefix, String at, Schema schema) {
     Map<String, Object> out = new TreeMap<>();
     for (FieldDescriptor field : descriptor.getFields()) {
       Object value = in.get(field.getName());
@@ -254,7 +264,9 @@ public final class ProtoDocumentCodec {
       if (value == null || info == null) {
         continue;
       }
-      Object converted = convertEach(value, field, item -> forwardValue(item, field, info, schema));
+      String path = join(at, field.getName());
+      Object converted = convertEach(value, field,
+          item -> forwardValue(item, field, info, path, schema));
       if (converted != null) {
         out.put(info.esName(), converted);
       }
@@ -262,7 +274,8 @@ public final class ProtoDocumentCodec {
     return out;
   }
 
-  private Object forwardValue(Object value, FieldDescriptor field, FieldInfo info, Schema schema) {
+  private Object forwardValue(Object value, FieldDescriptor field, FieldInfo info, String at,
+      Schema schema) {
     if ("".equals(value) && !keepsEmptyString(info.kind())) {
       return null;
     }
@@ -273,7 +286,7 @@ public final class ProtoDocumentCodec {
           try {
             return Long.valueOf((String) value);
           } catch (NumberFormatException e) {
-            throw new CodecException("Field " + info.protoPath() + " holds " + value
+            throw new CodecException("Field " + at + " holds " + value
                 + ", which does not fit the " + info.kind().esType() + " it is mapped as", e);
           }
         }
@@ -299,10 +312,10 @@ public final class ProtoDocumentCodec {
       case NESTED:
         FieldInfo values = schema.typedMapValues(field, info);
         if (values != null && value instanceof Map) {
-          return forwardEntries(asMap(value), field, info, values, schema);
+          return forwardEntries(asMap(value), field, info, values, at, schema);
         }
         if (value instanceof Map && schema.hasChildren(info.protoPath()) && !isOpaque(field)) {
-          return forward(asMap(value), field.getMessageType(), info.protoPath(), schema);
+          return forward(asMap(value), field.getMessageType(), info.protoPath(), at, schema);
         }
         return value;
       default:
@@ -311,21 +324,23 @@ public final class ProtoDocumentCodec {
   }
 
   /**
-   * Converts the entries of a typed map: every key must be usable as a field name, and every value
-   * is converted like a field of the value type.
+   * Converts the entries of a typed map: every key must be usable as a field name (not blank, no
+   * {@code .}, which the engines expand into sub-objects, and no {@code *}, which paths use for a
+   * key pattern), and every value is converted like a field of the value type.
    */
   private Map<String, Object> forwardEntries(Map<String, Object> entries, FieldDescriptor field,
-      FieldInfo info, FieldInfo values, Schema schema) {
+      FieldInfo info, FieldInfo values, String at, Schema schema) {
     FieldDescriptor valueField = field.getMessageType().findFieldByName("value");
     Map<String, Object> out = new TreeMap<>();
     for (Map.Entry<String, Object> entry : entries.entrySet()) {
       String key = entry.getKey();
-      if (key.isBlank() || key.indexOf('.') >= 0) {
-        throw new CodecException("Field " + info.protoPath() + " has the key '" + key
+      if (key.isBlank() || key.indexOf('.') >= 0 || key.indexOf('*') >= 0) {
+        throw new CodecException("Field " + at + " has the key '" + key
             + "'; keys of a map mapped as " + info.kind()
-            + " must not be blank and must contain no '.'");
+            + " must not be blank and must contain no '.' or '*'");
       }
-      Object converted = forwardValue(entry.getValue(), valueField, values, schema);
+      Object converted = forwardValue(entry.getValue(), valueField, values, at + "." + key,
+          schema);
       if (converted != null) {
         out.put(key, converted);
       }
@@ -334,12 +349,12 @@ public final class ProtoDocumentCodec {
   }
 
   private Map<String, Object> reverseEntries(Map<String, Object> entries, FieldDescriptor field,
-      FieldInfo values, Schema schema) {
+      FieldInfo values, String at, Schema schema) {
     FieldDescriptor valueField = field.getMessageType().findFieldByName("value");
     Map<String, Object> out = new TreeMap<>();
     for (Map.Entry<String, Object> entry : entries.entrySet()) {
       Object converted = entry.getValue() == null ? null
-          : reverseValue(entry.getValue(), valueField, values, schema);
+          : reverseValue(entry.getValue(), valueField, values, at + "." + entry.getKey(), schema);
       if (converted != null) {
         out.put(entry.getKey(), converted);
       }
@@ -347,8 +362,9 @@ public final class ProtoDocumentCodec {
     return out;
   }
 
-  private Map<String, Object> reverse(
-      Map<String, Object> in, Descriptor descriptor, String prefix, Schema schema) {
+  /** Reads a document object back; {@code prefix} and {@code at} as for {@code forward}. */
+  private Map<String, Object> reverse(Map<String, Object> in, Descriptor descriptor,
+      String prefix, String at, Schema schema) {
     Map<String, Object> out = new TreeMap<>();
     Set<String> known = new HashSet<>();
     for (FieldDescriptor field : descriptor.getFields()) {
@@ -362,7 +378,9 @@ public final class ProtoDocumentCodec {
       if (value == null) {
         continue;
       }
-      Object converted = convertEach(value, field, item -> reverseValue(item, field, info, schema));
+      String path = join(at, field.getName());
+      Object converted = convertEach(value, field,
+          item -> reverseValue(item, field, info, path, schema));
       if (converted != null) {
         out.put(field.getName(), converted);
       }
@@ -370,7 +388,7 @@ public final class ProtoDocumentCodec {
     if (config.unknownFields() == UnknownFieldPolicy.FAIL) {
       for (String key : in.keySet()) {
         if (!known.contains(key)) {
-          throw new CodecException("Unknown document field " + join(prefix, key) + " for "
+          throw new CodecException("Unknown document field " + join(at, key) + " for "
               + descriptor.getFullName());
         }
       }
@@ -378,7 +396,8 @@ public final class ProtoDocumentCodec {
     return out;
   }
 
-  private Object reverseValue(Object value, FieldDescriptor field, FieldInfo info, Schema schema) {
+  private Object reverseValue(Object value, FieldDescriptor field, FieldInfo info, String at,
+      Schema schema) {
     boolean message = field.getJavaType() == FieldDescriptor.JavaType.MESSAGE;
     switch (info.kind()) {
       case DATE:
@@ -401,10 +420,10 @@ public final class ProtoDocumentCodec {
       case NESTED:
         FieldInfo values = schema.typedMapValues(field, info);
         if (values != null && value instanceof Map) {
-          return reverseEntries(asMap(value), field, values, schema);
+          return reverseEntries(asMap(value), field, values, at, schema);
         }
         if (value instanceof Map && schema.hasChildren(info.protoPath()) && !isOpaque(field)) {
-          return reverse(asMap(value), field.getMessageType(), info.protoPath(), schema);
+          return reverse(asMap(value), field.getMessageType(), info.protoPath(), at, schema);
         }
         return value;
       default:
@@ -530,7 +549,7 @@ public final class ProtoDocumentCodec {
   private static void prune(Message.Builder builder, String prefix, Set<String> ignored) {
     for (FieldDescriptor field : builder.getDescriptorForType().getFields()) {
       String path = join(prefix, field.getName());
-      if (ignored.contains(path)) {
+      if (ignored.contains(path) || (field.isMapField() && ignored.contains(path + ".*"))) {
         builder.clearField(field);
         continue;
       }
@@ -590,9 +609,19 @@ public final class ProtoDocumentCodec {
     private final IndexDefinition definition;
     private final Map<String, FieldInfo> byProtoPath = new HashMap<>();
     private final Set<String> parents = new HashSet<>();
+    // the ignored paths plus every Any inside typed map values, pruned without a type registry
+    private final Set<String> prunedWithoutAnyTypes;
 
     Schema(IndexDefinition definition) {
       this.definition = definition;
+      Set<String> pruned = new HashSet<>(definition.ignoredPaths());
+      for (FieldInfo info : definition.dynamicFields().values()) {
+        if (info.field().getJavaType() == FieldDescriptor.JavaType.MESSAGE
+            && ANY.equals(info.field().getMessageType().getFullName())) {
+          pruned.add(info.protoPath());
+        }
+      }
+      this.prunedWithoutAnyTypes = Set.copyOf(pruned);
       List<FieldInfo> all = new ArrayList<>(definition.fields().values());
       all.addAll(definition.dynamicFields().values());
       for (FieldInfo info : all) {

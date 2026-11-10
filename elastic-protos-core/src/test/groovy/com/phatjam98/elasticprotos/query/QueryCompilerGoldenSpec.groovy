@@ -28,6 +28,7 @@ import com.phatjam98.elasticprotos.proto.SortingOrder
 import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
 import com.phatjam98.elasticprotos.proto.example.InnerMaps
+import com.phatjam98.elasticprotos.proto.example.LooseValues
 import com.phatjam98.elasticprotos.proto.example.TypedMaps
 import com.phatjam98.elasticprotos.proto.test.Geo
 import com.phatjam98.elasticprotos.proto.test.Library
@@ -51,6 +52,7 @@ class QueryCompilerGoldenSpec extends Specification {
   @Shared IndexDefinition geo = mapper.map(Geo)
   @Shared IndexDefinition typedMaps = mapper.map(TypedMaps)
   @Shared IndexDefinition innerMaps = mapper.map(InnerMaps)
+  @Shared QueryCompiler lenient = QueryCompiler.of(QueryCompilerConfig.standard().withLenient(true))
   @Shared IndexDefinition library = mapper.map(Library)
   @Shared QueryCompiler strict = QueryCompiler.withDefaults()
   @Shared QueryCompiler wildcards =
@@ -136,6 +138,39 @@ class QueryCompilerGoldenSpec extends Specification {
     then:
     QueryCompileException e = thrown()
     e.message.contains("below the nested field 'nested_outer.k' inside typed map values")
+  }
+
+  @Unroll
+  def "#operation on the disabled object '#field' is refused, strict or lenient"() {
+    when:
+    compiler.compile(where(fc(field, operation, value)), mapper.map(LooseValues))
+
+    then:
+    QueryCompileException e = thrown()
+    e.field == field
+    e.message == "${operation} cannot be used on '${field}': it is mapped as an object with enabled: false," +
+        " kept in _source but not searchable"
+
+    where:
+    compiler   | field           | operation | value
+    strict     | 'value'         | EXISTS    | FlatValue.defaultInstance
+    strict     | 'value'         | EQUALS    | nul()
+    strict     | 'items.k.list'  | EXISTS    | FlatValue.defaultInstance
+    lenient    | 'list'          | EXISTS    | FlatValue.defaultInstance
+  }
+
+  def "a path below a disabled object names it; lenient skips it like an unknown field"() {
+    when:
+    strict.compile(where(fc('value.x', EQUALS, str('y'))), mapper.map(LooseValues))
+
+    then:
+    QueryCompileException e = thrown()
+    e.message == "Field 'value.x' in EQUALS is below 'value', which index loose_values maps as an object with" +
+        " enabled: false, kept in _source but not searchable"
+
+    expect:
+    lenient.compile(where(fc('items.k.value.x', EQUALS, str('y'))), mapper.map(LooseValues)).warnings() ==
+        ["Skipped EQUALS on unknown field 'items.k.value.x'"]
   }
 
   def "op_map_key_unknown_subfield names the value type"() {

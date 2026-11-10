@@ -12,6 +12,7 @@ import static com.phatjam98.elasticprotos.proto.SearchOperationType.TEXT_REGEX
 
 import com.google.protobuf.Any
 import com.google.protobuf.FieldMask
+import com.google.protobuf.ListValue
 import com.google.protobuf.Message
 import com.google.protobuf.StringValue
 import com.google.protobuf.Struct
@@ -76,6 +77,8 @@ import com.phatjam98.elasticprotos.proto.example.InboxItem
 import com.phatjam98.elasticprotos.proto.example.InnerMaps
 import com.phatjam98.elasticprotos.proto.example.InnerPart
 import com.phatjam98.elasticprotos.proto.example.InnerValue
+import com.phatjam98.elasticprotos.proto.example.LooseItem
+import com.phatjam98.elasticprotos.proto.example.LooseValues
 import com.phatjam98.elasticprotos.proto.example.Office
 import com.phatjam98.elasticprotos.proto.example.TypedBag
 import com.phatjam98.elasticprotos.proto.example.TypedChild
@@ -812,6 +815,84 @@ abstract class EngineIntegrationSpec extends Specification {
     orderedIds(im, sorted(fieldSort('outer.metrics.metrics.score', SortingOrder.DESC))) == ['im-2', 'im-1']
     engine.search([im.alias()], compiler.compile(sorted(fieldSort('outer.metrics.metrics.score', SortingOrder.ASC)), im).body())
         .hits().collect { imCodec.fromHit(it, InnerMaps) } == [first, second]
+  }
+
+  def "Value and ListValue hold scalars, arrays and objects, at the top level and inside typed map values"() {
+    given: 'its own index; Value and ListValue are disabled objects, Struct is flattened'
+    def lvMapper = ProtoMapper.builder().naming(IndexNamingStrategy.prefixed(prefix + '-lv')).build()
+    def lvCodec = ProtoDocumentCodec.of(lvMapper)
+    def lvMigrator = IndexMigrator.builder().engine(engine).mapper(lvMapper).build()
+    IndexDefinition lv = lvMapper.map(LooseValues)
+    def s = { String text -> Value.newBuilder().setStringValue(text).build() }
+    def n = { double number -> Value.newBuilder().setNumberValue(number).build() }
+    def obj = { Map<String, Value> fields -> Value.newBuilder().setStructValue(Struct.newBuilder().putAllFields(fields)).build() }
+    def list = { List<Value> values -> ListValue.newBuilder().addAllValues(values).build() }
+    def first = LooseValues.newBuilder()
+        .setId('lv-1')
+        .setValue(s('text'))
+        .setList(list([s('a'), n(1), Value.newBuilder().setBoolValue(true).build()]))
+        .setStruct(Struct.newBuilder().putFields('x', s('y')))
+        .putValues('s', s('str'))
+        .putValues('n', n(5))
+        .putValues('l', Value.newBuilder().setListValue(list([n(1), n(2)])).build())
+        .putValues('o', obj([a: n(1)]))
+        .putItems('i', LooseItem.newBuilder().setValue(s('scalar'))
+            .setList(list([obj([a: n(1)]), obj([b: s('x')])])).setN(1).build())
+        .build()
+    def second = LooseValues.newBuilder()
+        .setId('lv-2')
+        .setValue(n(42))
+        .setList(list([obj([a: n(1)])]))
+        .putValues('s', n(7))
+        .putItems('i', LooseItem.newBuilder().setValue(obj([k: s('v')])).setList(list([s('x')])).setN(2).build())
+        .build()
+
+    def topValue = LooseValues.newBuilder().setId('lv-3').setValue(s('alone')).build()
+    def topList = LooseValues.newBuilder().setId('lv-4')
+        .setList(list([s('a'), n(2), Value.newBuilder().setNullValue(com.google.protobuf.NullValue.NULL_VALUE).build()]))
+        .build()
+
+    when: 'bootstrapped; a top-level scalar Value and a top-level ListValue of scalars indexed on their own'
+    def created = lvMigrator.bootstrap(LooseValues)
+    def singles = [topValue, topList].collect {
+      engine.bulk([BulkOp.index(lv.alias(), lvCodec.idOf(it).get(), lvCodec.toDocument(it))])
+    }
+
+    then:
+    created.ok()
+    singles.every { !it.errors() }
+
+    when: 'two documents with every shape indexed'
+    def bulk = engine.bulk([first, second].collect {
+      BulkOp.index(lv.alias(), lvCodec.idOf(it).get(), lvCodec.toDocument(it))
+    })
+    engine.refresh(lv.alias())
+    def live = engine.getMappings(lv.alias()).properties
+
+    then: 'every shape is accepted and kept unparsed, and the plan stays a no-op'
+    !bulk.errors()
+    String.valueOf(live.value.enabled) == 'false'
+    String.valueOf(live.list.enabled) == 'false'
+    live.struct.type == 'flattened'
+    ['s', 'n', 'l', 'o'].every { String.valueOf(live.values.properties[it].enabled) == 'false' }
+    String.valueOf(live.items.properties.i.properties.value.enabled) == 'false'
+    String.valueOf(live.items.properties.i.properties.list.enabled) == 'false'
+    live.items.properties.i.properties.n.type == 'double'
+    lvMigrator.plan(LooseValues).items()*.action() == [Action.NO_OP]
+
+    and: 'the other fields stay searchable'
+    docIds(where(fc('items.i.n', NUM_RANGE, range(1.5, 3))), lv) == ['lv-2'] as Set
+    docIds(where(fc('struct.x', EQUALS, str('y'))), lv) == ['lv-1'] as Set
+
+    and: 'hits parse back into the messages'
+    engine.search([lv.alias()], compiler.compile(sorted(fieldSort('id', SortingOrder.ASC)), lv).body())
+        .hits().collect { lvCodec.fromHit(it, LooseValues) } == [first, second, topValue, topList]
+
+    when: 'EXISTS on a disabled object'
+    compiler.compile(where(fc('value', EXISTS)), lv)
+
+    then: 'it is refused instead of silently matching nothing'
+    thrown(com.phatjam98.elasticprotos.query.QueryCompileException)
   }
 
   // ------------------------------------------------------------------ round trip

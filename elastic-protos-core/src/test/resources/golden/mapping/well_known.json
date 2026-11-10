@@ -6,7 +6,7 @@
   "mappings" : {
     "_meta" : {
       "elastic_protos" : {
-        "hash" : "8e774410",
+        "hash" : "65abd077",
         "proto" : "phatjam98.elasticprotos.test.WellKnown",
         "schema_version" : 1
       }
@@ -27,7 +27,8 @@
         "type" : "long"
       },
       "list_value" : {
-        "type" : "flattened"
+        "enabled" : false,
+        "type" : "object"
       },
       "string_wrapper" : {
         "ignore_above" : 256,
@@ -41,11 +42,12 @@
         "type" : "date"
       },
       "value_value" : {
-        "type" : "flattened"
+        "enabled" : false,
+        "type" : "object"
       }
     }
   },
-  "name" : "well_known-v8e774410",
+  "name" : "well_known-v65abd077",
   "nestedPaths" : [ ],
   "settings" : { },
   "warnings" : [ "any_value: google.protobuf.Any has no index representation and is ignored", "field_mask: google.protobuf.FieldMask has no index representation and is ignored", "empty_value: google.protobuf.Empty has no index representation and is ignored" ]

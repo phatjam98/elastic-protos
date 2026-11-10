@@ -98,6 +98,28 @@ message InnerValue {
   google.protobuf.FieldMask mask = 7;
 }
 
+// Value and ListValue print as any JSON (a bare scalar, an array, an object or null), which
+// flattened refuses unless it is an object, so they are disabled objects by default; Struct always
+// prints as an object and stays flattened.
+message LooseValues {
+  option (phatjam98.elasticprotos.v1.elastic) = { alias: "loose_values" };
+
+  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = TRUE];
+  google.protobuf.Value value = 2;
+  google.protobuf.ListValue list = 3;
+  google.protobuf.Struct struct = 4;
+  // values.<key> => disabled object
+  map<string, google.protobuf.Value> values = 5 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+  // items.<key> => object with disabled value and list, and a double
+  map<string, LooseItem> items = 6 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+}
+
+message LooseItem {
+  google.protobuf.Value value = 1;
+  google.protobuf.ListValue list = 2;
+  double n = 3;
+}
+
 message InnerPart {
   int64 qty = 1;
   google.protobuf.Timestamp at = 2;

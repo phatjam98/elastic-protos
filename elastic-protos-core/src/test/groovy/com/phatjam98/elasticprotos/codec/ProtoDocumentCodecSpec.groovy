@@ -25,6 +25,9 @@ import com.phatjam98.elasticprotos.proto.example.InboxStatus
 import com.phatjam98.elasticprotos.proto.example.InnerMaps
 import com.phatjam98.elasticprotos.proto.example.InnerPart
 import com.phatjam98.elasticprotos.proto.example.InnerValue
+import com.phatjam98.elasticprotos.proto.example.LooseItem
+import com.phatjam98.elasticprotos.proto.example.LooseValues
+import com.phatjam98.elasticprotos.proto.test.TypedAnys
 import com.phatjam98.elasticprotos.proto.example.Office
 import com.phatjam98.elasticprotos.proto.example.Party
 import com.phatjam98.elasticprotos.proto.example.PartyRole
@@ -474,10 +477,10 @@ class ProtoDocumentCodecSpec extends Specification {
 
     then:
     def e = thrown(CodecException)
-    e.message == "Field counters has the key '${key}'; keys of a map mapped as OBJECT must not be blank and must contain no '.'"
+    e.message == "Field counters has the key '${key}'; keys of a map mapped as OBJECT must not be blank and must contain no '.' or '*'"
 
     where:
-    key << ['a.b', '', '  ']
+    key << ['a.b', '', '  ', '*', 'a*']
   }
 
   static InnerMaps innerMaps() {
@@ -531,15 +534,54 @@ class ProtoDocumentCodecSpec extends Specification {
 
     then:
     def e = thrown(CodecException)
-    e.message == "Field ${field} has the key '${key}'; keys of a map mapped as OBJECT must not be blank and must contain no '.'"
+    e.message == "Field ${field} has the key '${key}'; keys of a map mapped as OBJECT must not be blank and must contain no '.' or '*'"
 
     where:
     level         | key   | field                      | message
-    'the second'  | 'a.b' | 'outer.*.metrics'          | InnerMaps.newBuilder().putOuter('a', InnerValue.newBuilder().putMetrics(key, 1d).build()).build()
-    'the second'  | ''    | 'outer.*.metrics'          | InnerMaps.newBuilder().putOuter('a', InnerValue.newBuilder().putMetrics(key, 1d).build()).build()
-    'the third'   | ' '   | 'outer.*.parts.*.counts'   | InnerMaps.newBuilder().putOuter('a', InnerValue.newBuilder().putParts('p', InnerPart.newBuilder().putCounts(key, 1L).build()).build()).build()
-    'the third'   | 'x.y' | 'outer.*.parts.*.counts'   | InnerMaps.newBuilder().putOuter('a', InnerValue.newBuilder().putParts('p', InnerPart.newBuilder().putCounts(key, 1L).build()).build()).build()
+    'the second'  | 'a.b' | 'outer.a.metrics'          | InnerMaps.newBuilder().putOuter('a', InnerValue.newBuilder().putMetrics(key, 1d).build()).build()
+    'the second'  | ''    | 'outer.a.metrics'          | InnerMaps.newBuilder().putOuter('a', InnerValue.newBuilder().putMetrics(key, 1d).build()).build()
+    'the third'   | ' '   | 'outer.a.parts.p.counts'   | InnerMaps.newBuilder().putOuter('a', InnerValue.newBuilder().putParts('p', InnerPart.newBuilder().putCounts(key, 1L).build()).build()).build()
+    'the third'   | 'x.y' | 'outer.a.parts.p.counts'   | InnerMaps.newBuilder().putOuter('a', InnerValue.newBuilder().putParts('p', InnerPart.newBuilder().putCounts(key, 1L).build()).build()).build()
     'the first'   | 'x.y' | 'outer'                    | InnerMaps.newBuilder().putOuter(key, InnerValue.defaultInstance).build()
+  }
+
+  def "without a type registry an Any inside typed map values is left out, like a top-level Any"() {
+    given:
+    def message = innerMaps()
+    def anys = TypedAnys.newBuilder().putAnys('k', com.google.protobuf.Any.pack(StringValue.of('x'))).setId('a').build()
+
+    when:
+    def document = codec.toDocument(message)
+
+    then:
+    !document.outer.a.containsKey('payload')
+    document.outer.a.mask == 'a.b,c'
+    codec.fromDocument(document, InnerMaps) == message.toBuilder()
+        .putOuter('a', message.getOuterOrThrow('a').toBuilder().clearPayload().build()).build()
+
+    and: 'a map of Any loses all its entries'
+    codec.toDocument(anys) == [anys: [:], id: 'a']
+  }
+
+  def "scalar Value and ListValue documents round-trip at the top level and inside typed map values"() {
+    given:
+    def s = { String text -> Value.newBuilder().setStringValue(text).build() }
+    def list = ListValue.newBuilder().addValues(s('a')).addValues(Value.newBuilder().setNumberValue(2)).build()
+    def message = LooseValues.newBuilder().setId('lv').setValue(s('alone')).setList(list)
+        .putValues('s', s('str'))
+        .putValues('l', Value.newBuilder().setListValue(list).build())
+        .putItems('i', LooseItem.newBuilder().setValue(Value.newBuilder().setBoolValue(true)).setList(list).setN(1).build())
+        .build()
+
+    when:
+    def document = codec.toDocument(message)
+
+    then:
+    document.value == 'alone'
+    document.list == ['a', 2.0d]
+    document.values == [s: 'str', l: ['a', 2.0d]]
+    document.items == [i: [value: true, list: ['a', 2.0d], n: 1.0d]]
+    codec.fromDocument(document, LooseValues) == message
   }
 
   def "keys of a flattened map inside typed map values stay opaque"() {
@@ -563,7 +605,7 @@ class ProtoDocumentCodecSpec extends Specification {
 
     then:
     def e = thrown(CodecException)
-    e.message.contains('children.*.stale')
+    e.message.contains('Unknown document field children.k.stale')
   }
 
   def "an unknown enum value is tolerated by default and rejected when strict"() {

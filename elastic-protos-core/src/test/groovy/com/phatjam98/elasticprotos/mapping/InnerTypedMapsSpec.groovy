@@ -9,6 +9,8 @@ import com.phatjam98.elasticprotos.proto.EsType
 import com.phatjam98.elasticprotos.proto.example.InnerMaps
 import com.phatjam98.elasticprotos.proto.example.InnerPart
 import com.phatjam98.elasticprotos.proto.example.InnerValue
+import com.phatjam98.elasticprotos.proto.example.LooseItem
+import com.phatjam98.elasticprotos.proto.example.LooseValues
 import com.phatjam98.elasticprotos.proto.example.TypedMaps
 import java.util.regex.Pattern
 import spock.lang.Shared
@@ -160,14 +162,84 @@ class InnerTypedMapsSpec extends Specification {
     !ignored.dynamicFields().containsKey('outer.*.payload')
   }
 
-  def "a field name holding * is refused inside the values"() {
-    when:
+  def "a field name holding * is refused everywhere, since it would act as a template wildcard"() {
+    when: 'inside the values'
     ProtoMapper.builder().overrides(MappingOverrides.builder()
         .forField(InnerValue.descriptor, 'score') { it.name = 's*' }.build()).build().map(InnerMaps)
 
     then:
     MappingException e = thrown()
-    e.message.startsWith("outer.*.score: elastic_field.name 's*' inside the values of a typed map must not contain '*'")
+    e.message == "outer.*.score: elastic_field.name 's*' must be non-empty and contain no '.', '*' or whitespace"
+
+    when: 'a typed map renamed to c* would emit ep:c*.*, which matches children.k before its own template'
+    ProtoMapper.builder().overrides(MappingOverrides.builder()
+        .forField(TypedMaps.descriptor, 'counters') { it.name = 'c*' }.build()).build().map(TypedMaps)
+
+    then:
+    e = thrown()
+    e.message == "counters: elastic_field.name 'c*' must be non-empty and contain no '.', '*' or whitespace"
+
+    when: 'by path override too'
+    ProtoMapper.builder().overrides(MappingOverrides.builder()
+        .forPath('counters') { it.name = '*' }.build()).build().map(TypedMaps)
+
+    then:
+    thrown(MappingException)
+  }
+
+  def "Value and ListValue are disabled objects at the top level and inside typed map values; Struct is flattened"() {
+    when:
+    def definition = mapper.map(LooseValues)
+    Map props = definition.mappings().properties
+    Map templates = definition.mappings().dynamic_templates.collectEntries { it }
+
+    then:
+    props.value == DISABLED
+    props.list == DISABLED
+    props.struct == [type: 'flattened']
+    templates['ep:values.*'] == [path_match: 'values.*', mapping: DISABLED]
+    templates['ep:items.*.value'] == [path_match: 'items.*.value', mapping: DISABLED]
+    templates['ep:items.*.list'] == [path_match: 'items.*.list', mapping: DISABLED]
+    !definition.field('value').get().enabled()
+    !definition.resolve('items.k.list').get().enabled()
+    definition.resolve('items.k.n').get().enabled()
+    definition.warnings().every { !it.contains('Value') }
+
+    and: 'structKind governs Struct only'
+    ProtoMapper.builder().defaults(MappingDefaults.standard().withStructKind(FieldKind.OBJECT)).build()
+        .map(LooseValues).mappings().properties.with { it.value == DISABLED && it.struct == [type: 'object', dynamic: true] }
+  }
+
+  def "an explicit type on a top-level Value is kept, with a warning; inside typed map values it is refused"() {
+    when:
+    def definition = ProtoMapper.builder().overrides(MappingOverrides.builder()
+        .forField(LooseValues.descriptor, 'value') { it.type = EsType.FLATTENED }
+        .forField(LooseValues.descriptor, 'list') { it.type = EsType.OBJECT }.build()).build().map(LooseValues)
+
+    then:
+    definition.mappings().properties.value == [type: 'flattened']
+    definition.mappings().properties.list == [type: 'object', dynamic: true]
+    definition.warnings().contains('value: google.protobuf.Value mapped as FLATTENED rejects documents whose value'
+        + ' is not an object (a scalar, an array of scalars or null)')
+    definition.warnings().contains('list: google.protobuf.ListValue mapped as OBJECT rejects documents whose value'
+        + ' is not an object (a scalar, an array of scalars or null)')
+
+    when:
+    ProtoMapper.builder().overrides(MappingOverrides.builder()
+        .forField(LooseItem.descriptor, 'value') { it.type = EsType.FLATTENED }.build()).build().map(LooseValues)
+
+    then:
+    MappingException e = thrown()
+    e.message == 'items.*.value: FLATTENED cannot be applied to google.protobuf.Value inside the values of a typed' +
+        ' map, which is mapped as a disabled object; set type: IGNORE to leave it out'
+
+    when: 'value_type on a map of Value'
+    ProtoMapper.builder().overrides(MappingOverrides.builder()
+        .forField(LooseValues.descriptor, 'values') { it.type = EsType.OBJECT; it.valueType = EsType.FLATTENED }.build())
+        .build().map(LooseValues)
+
+    then:
+    thrown(MappingException)
   }
 
   def "resolve instantiates every key of a doubly keyed path"() {

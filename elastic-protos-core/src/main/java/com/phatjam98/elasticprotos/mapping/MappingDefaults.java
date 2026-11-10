@@ -32,8 +32,9 @@ import java.util.Objects;
  *       default, or {@code NESTED})
  *   <li>{@code repeatedMessage}: how a repeated message field is mapped ({@code OBJECT} or {@code
  *       NESTED}, the default)
- *   <li>{@code structKind}: how {@code google.protobuf.Struct} and friends are mapped ({@code
- *       FLATTENED}, the default, or {@code OBJECT})
+ *   <li>{@code structKind}: how {@code google.protobuf.Struct} is mapped ({@code FLATTENED}, the
+ *       default, or {@code OBJECT}); {@code Value} and {@code ListValue}, which can print as a
+ *       scalar or an array, are disabled objects whatever this says
  *   <li>{@code maxNestedFields}: the most {@code nested} fields a mapping may have, as the engines'
  *       {@code index.mapping.nested_fields.limit} (default 50); 0 disables the check
  *   <li>{@code maxTotalFields}: the most fields a mapping may have, counted like the engines'
@@ -163,7 +164,7 @@ public final class MappingDefaults {
     return repeatedMessage;
   }
 
-  /** Returns how {@code google.protobuf.Struct} and friends are mapped. */
+  /** Returns how {@code google.protobuf.Struct} is mapped ({@code Value}/{@code ListValue} not). */
   public FieldKind structKind() {
     return structKind;
   }
@@ -349,7 +350,7 @@ public final class MappingDefaults {
       return this;
     }
 
-    /** Sets how {@code google.protobuf.Struct} and friends are mapped; default FLATTENED. */
+    /** Sets how {@code google.protobuf.Struct} is mapped; default FLATTENED. */
     public Builder structKind(FieldKind value) {
       this.structKind = value;
       return this;

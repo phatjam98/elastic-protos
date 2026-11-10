@@ -44,6 +44,6 @@ final class FlattenedKeys {
     String key = name.substring(root.path().length() + 1);
     return new FieldInfo(name, root.protoPath() + "." + key, FieldKind.FLATTENED,
         root.repeated(), false, root.boost(), root.field(),
-        root.isDynamic() ? root.pattern() + "." + key : null);
+        root.isDynamic() ? root.pattern() + "." + key : null, true);
   }
 }

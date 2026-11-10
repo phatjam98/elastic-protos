@@ -223,6 +223,7 @@ public record IndexDefinition(
       }
     }
     return new FieldInfo(path, String.join(".", protoSegments), pattern.kind(), pattern.repeated(),
-        pattern.keywordSubfield(), pattern.boost(), pattern.field(), pattern.path());
+        pattern.keywordSubfield(), pattern.boost(), pattern.field(), pattern.path(),
+        pattern.enabled());
   }
 }

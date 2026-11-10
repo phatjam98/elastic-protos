@@ -47,11 +47,13 @@ public final class ProtoMapper {
   private static final String TIMESTAMP = "google.protobuf.Timestamp";
   private static final String LAT_LON = "phatjam98.elasticprotos.v1.LatLon";
   private static final String GEO_SHAPE = "phatjam98.elasticprotos.v1.GeoShape";
-  private static final Pattern VALID_NAME = Pattern.compile("^[^.\\s]+$");
+  private static final Pattern VALID_NAME = Pattern.compile("^[^.*\\s]+$");
   private static final Set<String> LAT_NAMES = Set.of("lat", "latitude");
   private static final Set<String> LON_NAMES = Set.of("lon", "lng", "longitude");
   private static final Set<String> STRUCT_LIKE =
       Set.of("google.protobuf.Struct", "google.protobuf.Value", "google.protobuf.ListValue");
+  private static final Set<String> LOOSE_VALUES =
+      Set.of("google.protobuf.Value", "google.protobuf.ListValue");
   private static final Set<String> UNTYPED_VALUES =
       Set.of("google.protobuf.Any", "google.protobuf.FieldMask", "google.protobuf.Empty");
   private static final Set<String> SINGLE_VALUE_MESSAGES =
@@ -367,13 +369,10 @@ public final class ProtoMapper {
         }
         String esName = options.getName().isEmpty() ? field.getName() : options.getName();
         if (!VALID_NAME.matcher(esName).matches()) {
+          // '*' is the wildcard of path_match: a name holding it would make the dynamic templates
+          // of typed maps match paths they were not generated for (ADR 0011)
           throw new MappingException(protoPath, "elastic_field.name '" + esName
-              + "' must be non-empty and contain no '.' or whitespace");
-        }
-        if (mapValueDepth > 0 && esName.indexOf('*') >= 0) {
-          throw new MappingException(protoPath, "elastic_field.name '" + esName
-              + "' inside the values of a typed map must not contain '*', which stands for a key"
-              + " in the dynamic templates");
+              + "' must be non-empty and contain no '.', '*' or whitespace");
         }
         String path = join(pathPrefix, esName);
         Map<String, Object> property = property(field, options, path, protoPath);
@@ -392,6 +391,19 @@ public final class ProtoMapper {
         FieldDescriptor field, FieldOpts options, String path, String protoPath) {
       if (mapValueDepth > 0 && isUntypedValue(field)) {
         return disabledInValues(field, options, path, protoPath);
+      }
+      if (isLooseValue(field)) {
+        String typeName = field.getMessageType().getFullName();
+        if (options.getType() == EsType.AUTO) {
+          return disabled(field, path, protoPath);
+        }
+        if (mapValueDepth > 0) {
+          throw new MappingException(path, options.getType() + " cannot be applied to " + typeName
+              + " inside the values of a typed map, which is mapped as a disabled object; set type:"
+              + " IGNORE to leave it out");
+        }
+        warnings.add(path + ": " + typeName + " mapped as " + options.getType() + " rejects"
+            + " documents whose value is not an object (a scalar, an array of scalars or null)");
       }
       FieldKind kind = kindOf(field, options, path);
       if (mapValueDepth > 0) {
@@ -501,7 +513,8 @@ public final class ProtoMapper {
       float boost = options.getBoost() > 0 ? options.getBoost() : 1.0f;
       fields.put(
           path,
-          new FieldInfo(path, protoPath, kind, field.isRepeated(), keywordSubfield, boost, field));
+          new FieldInfo(path, protoPath, kind, field.isRepeated(), keywordSubfield, boost, field,
+              null, !Boolean.FALSE.equals(property.get("enabled"))));
       if (options.getFullText() == Bool3.TRUE
           || (kind.isText() && options.getFullText() != Bool3.FALSE)) {
         fullTextFields.put(path, boost);
@@ -532,9 +545,21 @@ public final class ProtoMapper {
             + " IGNORE to leave it out");
       }
       warnings.add(path + ": " + typeName + " inside the values of a typed map is mapped as a"
-          + " disabled object (kept in _source, not indexed)");
+          + " disabled object (kept in _source, not indexed)"
+          + ("google.protobuf.Any".equals(typeName)
+              ? "; the codec writes it only with CodecConfig.anyTypes and leaves it out otherwise"
+              : ""));
+      return disabled(field, path, protoPath);
+    }
+
+    /**
+     * Maps a field as {@code {"type": "object", "enabled": false}}: the engine keeps any JSON
+     * value in {@code _source} without parsing it. Field options such as {@code boost}, {@code
+     * copy_to} or {@code raw_mapping_json} do not apply.
+     */
+    private Map<String, Object> disabled(FieldDescriptor field, String path, String protoPath) {
       fields.put(path, new FieldInfo(path, protoPath, FieldKind.OBJECT, field.isRepeated(), false,
-          1.0f, field));
+          1.0f, field, null, false));
       return disabledObject();
     }
 
@@ -610,7 +635,7 @@ public final class ProtoMapper {
       if (scratch.mapping() == null) {
         template(valuePath, false, disabledObject());
         dynamicFields.put(valuePath, new FieldInfo(valuePath, valueProtoPath, FieldKind.OBJECT,
-            false, false, boost, value, valuePath));
+            false, false, boost, value, valuePath, false));
         keyWarning(path, 1, 0);
         return;
       }
@@ -810,8 +835,7 @@ public final class ProtoMapper {
         case "google.protobuf.BytesValue":
           return FieldKind.BINARY;
         case "google.protobuf.Struct":
-        case "google.protobuf.Value":
-        case "google.protobuf.ListValue":
+          // Value and ListValue are disabled objects unless a type is requested (see property)
           return defaults.structKind();
         case "google.protobuf.Any":
         case "google.protobuf.FieldMask":
@@ -901,7 +925,7 @@ public final class ProtoMapper {
 
   private static FieldInfo dynamic(FieldInfo info) {
     return new FieldInfo(info.path(), info.protoPath(), info.kind(), info.repeated(),
-        info.keywordSubfield(), info.boost(), info.field(), info.path());
+        info.keywordSubfield(), info.boost(), info.field(), info.path(), info.enabled());
   }
 
   private static Map<String, Object> container(String type) {
@@ -937,6 +961,16 @@ public final class ProtoMapper {
     }
     return valueType == EsType.OBJECT || valueType == EsType.NESTED
         || (valueType == EsType.AUTO && !SINGLE_VALUE_MESSAGES.contains(name));
+  }
+
+  /**
+   * Returns whether a field holds a {@code Value} or {@code ListValue}, which print as any JSON: a
+   * scalar, an array, an object or null. {@code flattened} accepts only objects, so they are
+   * disabled objects unless a type is requested.
+   */
+  private static boolean isLooseValue(FieldDescriptor field) {
+    return field.getType() == FieldDescriptor.Type.MESSAGE
+        && LOOSE_VALUES.contains(field.getMessageType().getFullName());
   }
 
   /** Returns whether a field holds an {@code Any}, {@code FieldMask} or {@code Empty}. */
