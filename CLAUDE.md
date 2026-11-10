@@ -16,7 +16,7 @@ skeleton, M1 core demoable, M2 both adapters + CI, M3 docs + 1.0.0-rc, M4 releas
 
 | Module | Purpose |
 |---|---|
-| `elastic-protos-core` | mapping, options, codec, engine SPI, migration, query (incl. `AggregationCompiler`, `HighlightCompiler`, `AggregationResults`, `Aggs`); owns all `.proto` files under `src/main/proto/phatjam98/elasticprotos/v1/` (`elastic_options`, `search_criteria`, `aggregations`, `flat_struct`, `sorting_criteria`, `pagination`, `geo`) |
+| `elastic-protos-core` | mapping, options, codec, engine SPI, migration, query (incl. `AggregationCompiler`, `HighlightCompiler`, `AggregationResults`, `Aggs`, `CompositePager`); owns all `.proto` files under `src/main/proto/phatjam98/elasticprotos/v1/` (`elastic_options`, `search_criteria`, `conditions`, `aggregations`, `flat_struct`, `sorting_criteria`, `pagination`, `geo`) |
 | `elastic-protos-elasticsearch` | `SearchEngine` adapter on `elasticsearch-rest-client` (ES 8.x and 9.x) |
 | `elastic-protos-opensearch` | `SearchEngine` adapter on `opensearch-rest-client` (OpenSearch 2.x and 3.x) |
 | `elastic-protos-micronaut` | optional Micronaut 4 integration: config (`ElasticProtosConfiguration`), bean factories, startup bootstrap, `ElasticProtosService` (`search` -> `SearchPage`, `aggregate` -> `AggregationPage`) |
@@ -132,8 +132,19 @@ Checkstyle, JaCoCo and Javadoc.
   irreversible steps. `MigrationOptions.lock` / `lockWait` (10m) / `lockTtl` (2m); `Status.LOCKED`,
   `LockException`. The migrator writes the whole `_meta` on every update, since the engines replace it.
 - Query DSL: `SearchCriteria.aggregation` / `highlight` (ADR 0009) compile through `AggregationCompiler`
-  and `HighlightCompiler`; one sub-aggregation level, nested/reverse_nested wrappers named
-  `<name>__nested` / `<name>__reverse`. `RangeValue.min`/`max` are `optional` (open bounds).
-- `InMemorySearchEngine` (testkit) runs only terms, the six metrics, `nested` and `reverse_nested`
-  aggregations, ignores `highlight`, and models seq_no, tombstones and PIT snapshots like the engines.
-  `EngineIntegrationSpec` has 52 feature methods.
+  and `HighlightCompiler`; nested/reverse_nested wrappers named `<name>__nested` / `<name>__reverse`.
+  Sub-aggregations nest down to `QueryCompilerConfig.maxAggregationDepth` (default 3, top level
+  included); `maxAggregationBuckets` (default 0, off) guards the product of requested bucket counts.
+  `filter` / `filters` / `composite` (ADR 0011): conditions are `SearchCondition`s compiled by
+  `ConditionCompiler` with the aggregation's nested context entered (`NestedPathResolver` context:
+  context paths not re-wrapped, fields outside refused); a filter with a nested path as `field`
+  filters those nested objects. Composite is top level only, sources in one nested context, paged
+  by `CompositePager` (stops at a page without buckets or `after_key`). The condition messages live
+  in `conditions.proto` (publicly imported by `search_criteria.proto`, which `aggregations.proto`
+  cannot import: cycle). The adapters parse responses into key-sorted maps, so keyed buckets and
+  composite keys come sorted by key. `RangeValue.min`/`max` are `optional` (open bounds).
+- `InMemorySearchEngine` (testkit) runs only terms, filter, filters (conditions of `match_all`,
+  `bool`, `term`, `terms`, `exists`, `nested`), the six metrics, `nested` and `reverse_nested`
+  aggregations at any depth, refuses `composite` (BAD_REQUEST), ignores `highlight`, and models
+  seq_no, tombstones and PIT snapshots like the engines. `EngineIntegrationSpec` has 55 feature
+  methods.

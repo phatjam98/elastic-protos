@@ -1,6 +1,6 @@
 # 0009. Aggregation and highlight DSL in the proto query model
 
-- Status: Accepted
+- Status: Accepted; the aggregation kinds and the sub-aggregation depth are amended by [0011](0011-filter-composite-and-deeper-aggregations.md)
 - Date: 2026-11-09
 
 ## Context
