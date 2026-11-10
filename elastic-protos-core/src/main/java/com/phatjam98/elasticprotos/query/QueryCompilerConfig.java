@@ -49,8 +49,16 @@ import java.util.Objects;
  *       arbitrarily expensive, so it is disabled by default
  *   <li>{@code maxPageSize}: the largest page {@code size}, with or without a point in time;
  *       default {@value #DEFAULT_MAX_PAGE_SIZE}, the default {@code index.max_result_window}
- *   <li>{@code maxTermsSize}: the largest {@code size} of a terms aggregation; default {@value
- *       #DEFAULT_MAX_TERMS_SIZE}
+ *   <li>{@code maxTermsSize}: the largest {@code size} of a terms or composite aggregation;
+ *       default {@value #DEFAULT_MAX_TERMS_SIZE}
+ *   <li>{@code maxAggregationDepth}: how many levels of aggregations a search may nest, the top
+ *       level included; default {@value #DEFAULT_MAX_AGGREGATION_DEPTH} (top-level aggregations,
+ *       their sub-aggregations and one more level); 1 allows no sub-aggregations
+ *   <li>{@code maxAggregationBuckets}: when positive, the largest product of the requested bucket
+ *       counts along any path of aggregations (terms and composite {@code size}, 10 when unset,
+ *       the number of range buckets and of filters); date histograms and histograms count as one
+ *       bucket, since their count depends on the data. Default 0: no limit, the engine's {@code
+ *       search.max_buckets} applies
  * </ul>
  */
 public final class QueryCompilerConfig {
@@ -60,6 +68,9 @@ public final class QueryCompilerConfig {
 
   /** The default {@link #maxTermsSize()}. */
   public static final int DEFAULT_MAX_TERMS_SIZE = 1_000;
+
+  /** The default {@link #maxAggregationDepth()}. */
+  public static final int DEFAULT_MAX_AGGREGATION_DEPTH = 3;
 
   private final boolean allowLeadingWildcards;
   private final boolean lenient;
@@ -73,6 +84,8 @@ public final class QueryCompilerConfig {
   private final boolean allowRegex;
   private final int maxPageSize;
   private final int maxTermsSize;
+  private final int maxAggregationDepth;
+  private final long maxAggregationBuckets;
 
   private QueryCompilerConfig(Builder builder) {
     if (builder.maxResultWindow <= 0) {
@@ -89,6 +102,14 @@ public final class QueryCompilerConfig {
     if (builder.maxTermsSize <= 0) {
       throw new IllegalArgumentException(
           "maxTermsSize must be positive: " + builder.maxTermsSize);
+    }
+    if (builder.maxAggregationDepth <= 0) {
+      throw new IllegalArgumentException(
+          "maxAggregationDepth must be positive: " + builder.maxAggregationDepth);
+    }
+    if (builder.maxAggregationBuckets < 0) {
+      throw new IllegalArgumentException(
+          "maxAggregationBuckets must not be negative: " + builder.maxAggregationBuckets);
     }
     if (builder.defaultSize > builder.maxPageSize) {
       throw new IllegalArgumentException("defaultSize " + builder.defaultSize
@@ -112,13 +133,15 @@ public final class QueryCompilerConfig {
     this.allowRegex = builder.allowRegex;
     this.maxPageSize = builder.maxPageSize;
     this.maxTermsSize = builder.maxTermsSize;
+    this.maxAggregationDepth = builder.maxAggregationDepth;
+    this.maxAggregationBuckets = builder.maxAggregationBuckets;
   }
 
   /**
    * Returns the defaults: strict fields, no leading wildcards, no script sorts, no regular
    * expressions, exact totals, a result window of 10000, pages of 10 and at most 10000, a one
-   * minute keep-alive, nested grouping, the {@code _shard_doc} tiebreaker and terms aggregations
-   * of at most 1000 buckets.
+   * minute keep-alive, nested grouping, the {@code _shard_doc} tiebreaker, terms aggregations of
+   * at most 1000 buckets, three levels of aggregations and no limit on their bucket product.
    */
   public static QueryCompilerConfig standard() {
     return builder().build();
@@ -189,9 +212,22 @@ public final class QueryCompilerConfig {
     return maxPageSize;
   }
 
-  /** Returns the largest {@code size} of a terms aggregation. */
+  /** Returns the largest {@code size} of a terms or composite aggregation. */
   public int maxTermsSize() {
     return maxTermsSize;
+  }
+
+  /** Returns how many levels of aggregations may be nested, the top level included. */
+  public int maxAggregationDepth() {
+    return maxAggregationDepth;
+  }
+
+  /**
+   * Returns the largest product of requested bucket counts along a path of aggregations; 0 means
+   * no limit.
+   */
+  public long maxAggregationBuckets() {
+    return maxAggregationBuckets;
   }
 
   /** Returns a copy with {@code allowLeadingWildcards} replaced. */
@@ -259,6 +295,16 @@ public final class QueryCompilerConfig {
     return toBuilder().maxTermsSize(value).build();
   }
 
+  /** Returns a copy with {@code maxAggregationDepth} replaced. */
+  public QueryCompilerConfig withMaxAggregationDepth(int value) {
+    return toBuilder().maxAggregationDepth(value).build();
+  }
+
+  /** Returns a copy with {@code maxAggregationBuckets} replaced. */
+  public QueryCompilerConfig withMaxAggregationBuckets(long value) {
+    return toBuilder().maxAggregationBuckets(value).build();
+  }
+
   @Override
   public boolean equals(Object other) {
     return other instanceof QueryCompilerConfig that
@@ -273,14 +319,16 @@ public final class QueryCompilerConfig {
         && allowScriptSort == that.allowScriptSort
         && allowRegex == that.allowRegex
         && maxPageSize == that.maxPageSize
-        && maxTermsSize == that.maxTermsSize;
+        && maxTermsSize == that.maxTermsSize
+        && maxAggregationDepth == that.maxAggregationDepth
+        && maxAggregationBuckets == that.maxAggregationBuckets;
   }
 
   @Override
   public int hashCode() {
     return Objects.hash(allowLeadingWildcards, lenient, trackTotalHits, maxResultWindow,
         defaultSize, defaultKeepAlive, groupNested, shardDocTiebreaker, allowScriptSort,
-        allowRegex, maxPageSize, maxTermsSize);
+        allowRegex, maxPageSize, maxTermsSize, maxAggregationDepth, maxAggregationBuckets);
   }
 
   @Override
@@ -296,7 +344,9 @@ public final class QueryCompilerConfig {
         + ", allowScriptSort=" + allowScriptSort
         + ", allowRegex=" + allowRegex
         + ", maxPageSize=" + maxPageSize
-        + ", maxTermsSize=" + maxTermsSize + "]";
+        + ", maxTermsSize=" + maxTermsSize
+        + ", maxAggregationDepth=" + maxAggregationDepth
+        + ", maxAggregationBuckets=" + maxAggregationBuckets + "]";
   }
 
   /** Builds a {@link QueryCompilerConfig}; starts from the {@link #standard()} settings. */
@@ -314,6 +364,8 @@ public final class QueryCompilerConfig {
     private boolean allowRegex = false;
     private int maxPageSize = DEFAULT_MAX_PAGE_SIZE;
     private int maxTermsSize = DEFAULT_MAX_TERMS_SIZE;
+    private int maxAggregationDepth = DEFAULT_MAX_AGGREGATION_DEPTH;
+    private long maxAggregationBuckets = 0;
 
     private Builder() {}
 
@@ -330,6 +382,8 @@ public final class QueryCompilerConfig {
       this.allowRegex = config.allowRegex;
       this.maxPageSize = config.maxPageSize;
       this.maxTermsSize = config.maxTermsSize;
+      this.maxAggregationDepth = config.maxAggregationDepth;
+      this.maxAggregationBuckets = config.maxAggregationBuckets;
     }
 
     /** Sets whether wildcard queries may start with {@code *}; default false. */
@@ -404,11 +458,29 @@ public final class QueryCompilerConfig {
     }
 
     /**
-     * Sets the largest {@code size} of a terms aggregation; default {@value
+     * Sets the largest {@code size} of a terms or composite aggregation; default {@value
      * QueryCompilerConfig#DEFAULT_MAX_TERMS_SIZE}.
      */
     public Builder maxTermsSize(int value) {
       this.maxTermsSize = value;
+      return this;
+    }
+
+    /**
+     * Sets how many levels of aggregations may be nested, the top level included; default
+     * {@value QueryCompilerConfig#DEFAULT_MAX_AGGREGATION_DEPTH}.
+     */
+    public Builder maxAggregationDepth(int value) {
+      this.maxAggregationDepth = value;
+      return this;
+    }
+
+    /**
+     * Sets the largest product of requested bucket counts along a path of aggregations; default 0,
+     * no limit.
+     */
+    public Builder maxAggregationBuckets(long value) {
+      this.maxAggregationBuckets = value;
       return this;
     }
 

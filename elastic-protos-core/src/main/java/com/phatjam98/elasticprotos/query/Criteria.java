@@ -388,6 +388,17 @@ public final class Criteria {
       return parent.build();
     }
 
+    /**
+     * Returns the predicates of this branch alone as a {@link SearchCondition}, for the condition
+     * of a filter or filters aggregation ({@link Aggs#filter}); criteria-wide predicates added
+     * with {@link Criteria#fullText} are not included.
+     *
+     * @return the condition
+     */
+    public SearchCondition asCondition() {
+      return SearchCondition.newBuilder().addAllFieldCondition(conditions).build();
+    }
+
     private Branch add(String field, SearchOperationType operation, FlatValue value,
         boolean negate) {
       FieldCondition.Builder condition = FieldCondition.newBuilder().setField(field)

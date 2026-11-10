@@ -1,0 +1,45 @@
+{
+  "aggs" : {
+    "plaintiffs__nested" : {
+      "aggs" : {
+        "plaintiffs" : {
+          "aggs" : {
+            "docs__reverse" : {
+              "aggs" : {
+                "docs" : {
+                  "cardinality" : {
+                    "field" : "id"
+                  }
+                }
+              },
+              "reverse_nested" : { }
+            },
+            "names" : {
+              "terms" : {
+                "field" : "parties.name.keyword"
+              }
+            }
+          },
+          "filter" : {
+            "bool" : {
+              "filter" : [ {
+                "term" : {
+                  "parties.role" : "PLAINTIFF"
+                }
+              } ]
+            }
+          }
+        }
+      },
+      "nested" : {
+        "path" : "parties"
+      }
+    }
+  },
+  "from" : 0,
+  "query" : {
+    "match_all" : { }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

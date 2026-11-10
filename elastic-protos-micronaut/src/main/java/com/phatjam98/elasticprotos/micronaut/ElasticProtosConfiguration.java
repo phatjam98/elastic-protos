@@ -698,7 +698,12 @@ public class ElasticProtosConfiguration {
    *   <li>{@code allow-regex}: accept {@code TEXT_REGEX}; default false
    *   <li>{@code max-page-size}: the largest page size, with or without a point in time; default
    *       10000
-   *   <li>{@code max-terms-size}: the largest {@code size} of a terms aggregation; default 1000
+   *   <li>{@code max-terms-size}: the largest {@code size} of a terms or composite aggregation;
+   *       default 1000
+   *   <li>{@code max-aggregation-depth}: how many levels of aggregations may be nested, the top
+   *       level included; default 3
+   *   <li>{@code max-aggregation-buckets}: when positive, the largest product of the requested
+   *       bucket counts along a path of aggregations; default 0, no limit
    * </ul>
    */
   @ConfigurationProperties("query")
@@ -717,6 +722,8 @@ public class ElasticProtosConfiguration {
     private boolean allowRegex = STANDARD.allowRegex();
     private int maxPageSize = STANDARD.maxPageSize();
     private int maxTermsSize = STANDARD.maxTermsSize();
+    private int maxAggregationDepth = STANDARD.maxAggregationDepth();
+    private long maxAggregationBuckets = STANDARD.maxAggregationBuckets();
 
     /** Values of {@code shard-doc-tiebreaker}. */
     public enum ShardDocTiebreaker {
@@ -844,6 +851,26 @@ public class ElasticProtosConfiguration {
     /** Sets {@code max-terms-size}. */
     public void setMaxTermsSize(int maxTermsSize) {
       this.maxTermsSize = maxTermsSize;
+    }
+
+    /** Returns {@code max-aggregation-depth}. */
+    public int getMaxAggregationDepth() {
+      return maxAggregationDepth;
+    }
+
+    /** Sets {@code max-aggregation-depth}. */
+    public void setMaxAggregationDepth(int maxAggregationDepth) {
+      this.maxAggregationDepth = maxAggregationDepth;
+    }
+
+    /** Returns {@code max-aggregation-buckets}. */
+    public long getMaxAggregationBuckets() {
+      return maxAggregationBuckets;
+    }
+
+    /** Sets {@code max-aggregation-buckets}. */
+    public void setMaxAggregationBuckets(long maxAggregationBuckets) {
+      this.maxAggregationBuckets = maxAggregationBuckets;
     }
   }
 

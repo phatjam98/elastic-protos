@@ -1,0 +1,314 @@
+{
+  "by_type": {
+    "doc_count_error_upper_bound": 0,
+    "sum_other_doc_count": 0,
+    "buckets": [
+      {
+        "key": "FILING",
+        "doc_count": 3,
+        "roles__nested": {
+          "doc_count": 3,
+          "roles": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": "DEFENDANT",
+                "doc_count": 2,
+                "firms__reverse": {
+                  "doc_count": 2,
+                  "firms": {
+                    "value": 2
+                  }
+                }
+              },
+              {
+                "key": "PLAINTIFF",
+                "doc_count": 1,
+                "firms__reverse": {
+                  "doc_count": 1,
+                  "firms": {
+                    "value": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "key": "MOTION",
+        "doc_count": 1,
+        "roles__nested": {
+          "doc_count": 2,
+          "roles": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": "DEFENDANT",
+                "doc_count": 1,
+                "firms__reverse": {
+                  "doc_count": 1,
+                  "firms": {
+                    "value": 1
+                  }
+                }
+              },
+              {
+                "key": "PLAINTIFF",
+                "doc_count": 1,
+                "firms__reverse": {
+                  "doc_count": 1,
+                  "firms": {
+                    "value": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "key": "NOTICE",
+        "doc_count": 1,
+        "roles__nested": {
+          "doc_count": 1,
+          "roles": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": "COUNSEL",
+                "doc_count": 1,
+                "firms__reverse": {
+                  "doc_count": 1,
+                  "firms": {
+                    "value": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "key": "ORDER",
+        "doc_count": 1,
+        "roles__nested": {
+          "doc_count": 2,
+          "roles": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": "DEFENDANT",
+                "doc_count": 1,
+                "firms__reverse": {
+                  "doc_count": 1,
+                  "firms": {
+                    "value": 1
+                  }
+                }
+              },
+              {
+                "key": "PLAINTIFF",
+                "doc_count": 1,
+                "firms__reverse": {
+                  "doc_count": 1,
+                  "firms": {
+                    "value": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "filings": {
+    "doc_count": 1,
+    "total": {
+      "value": 120000.0
+    }
+  },
+  "kinds": {
+    "buckets": {
+      "acme": {
+        "doc_count": 2,
+        "latest": {
+          "value": 1708437600000.0,
+          "value_as_string": "2024-02-20T14:00:00.000Z"
+        }
+      },
+      "filings": {
+        "doc_count": 3,
+        "latest": {
+          "value": 1719734400000.0,
+          "value_as_string": "2024-06-30T08:00:00.000Z"
+        }
+      },
+      "rest": {
+        "doc_count": 2,
+        "latest": {
+          "value": 1712335500000.0,
+          "value_as_string": "2024-04-05T16:45:00.000Z"
+        }
+      }
+    }
+  },
+  "none_matched": {
+    "buckets": {
+      "motions": {
+        "doc_count": 1,
+        "tags": {
+          "doc_count_error_upper_bound": 0,
+          "sum_other_doc_count": 0,
+          "buckets": [
+            {
+              "key": "civil",
+              "doc_count": 1
+            },
+            {
+              "key": "urgent",
+              "doc_count": 1
+            }
+          ]
+        }
+      }
+    }
+  },
+  "plaintiffs__nested": {
+    "doc_count": 8,
+    "plaintiffs": {
+      "doc_count": 3,
+      "docs__reverse": {
+        "doc_count": 3,
+        "docs": {
+          "value": 3
+        }
+      },
+      "names": {
+        "doc_count_error_upper_bound": 0,
+        "sum_other_doc_count": 0,
+        "buckets": [
+          {
+            "key": "Acme Corp",
+            "doc_count": 1
+          },
+          {
+            "key": "Initech LLC",
+            "doc_count": 1
+          },
+          {
+            "key": "Jane Doe",
+            "doc_count": 1
+          }
+        ]
+      }
+    }
+  },
+  "roles_by_name__nested": {
+    "doc_count": 8,
+    "roles_by_name": {
+      "after_key": {
+        "role": "PLAINTIFF",
+        "name": "Jane Doe"
+      },
+      "buckets": [
+        {
+          "key": {
+            "role": "COUNSEL",
+            "name": "Saul Goodman"
+          },
+          "doc_count": 1,
+          "docs__reverse": {
+            "doc_count": 1,
+            "docs": {
+              "value": 1
+            }
+          }
+        },
+        {
+          "key": {
+            "role": "DEFENDANT",
+            "name": "Acme Corp"
+          },
+          "doc_count": 1,
+          "docs__reverse": {
+            "doc_count": 1,
+            "docs": {
+              "value": 1
+            }
+          }
+        },
+        {
+          "key": {
+            "role": "DEFENDANT",
+            "name": "Globex Corp"
+          },
+          "doc_count": 2,
+          "docs__reverse": {
+            "doc_count": 2,
+            "docs": {
+              "value": 2
+            }
+          }
+        },
+        {
+          "key": {
+            "role": "DEFENDANT",
+            "name": "John Roe"
+          },
+          "doc_count": 1,
+          "docs__reverse": {
+            "doc_count": 1,
+            "docs": {
+              "value": 1
+            }
+          }
+        },
+        {
+          "key": {
+            "role": "PLAINTIFF",
+            "name": "Acme Corp"
+          },
+          "doc_count": 1,
+          "docs__reverse": {
+            "doc_count": 1,
+            "docs": {
+              "value": 1
+            }
+          }
+        },
+        {
+          "key": {
+            "role": "PLAINTIFF",
+            "name": "Initech LLC"
+          },
+          "doc_count": 1,
+          "docs__reverse": {
+            "doc_count": 1,
+            "docs": {
+              "value": 1
+            }
+          }
+        },
+        {
+          "key": {
+            "role": "PLAINTIFF",
+            "name": "Jane Doe"
+          },
+          "doc_count": 1,
+          "docs__reverse": {
+            "doc_count": 1,
+            "docs": {
+              "value": 1
+            }
+          }
+        }
+      ]
+    }
+  }
+}

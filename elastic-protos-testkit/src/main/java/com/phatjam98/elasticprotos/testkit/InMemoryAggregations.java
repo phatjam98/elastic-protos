@@ -18,8 +18,9 @@ import java.util.Set;
 import java.util.TreeMap;
 
 /**
- * The aggregations of {@link InMemorySearchEngine}: terms, single-value metrics, nested and
- * reverse_nested, over plain document maps, with keys typed by the index mappings.
+ * The aggregations of {@link InMemorySearchEngine}: terms, filter, filters, single-value metrics,
+ * nested and reverse_nested, at any depth, over plain document maps, with keys typed by the index
+ * mappings.
  */
 final class InMemoryAggregations {
 
@@ -93,6 +94,12 @@ final class InMemoryAggregations {
     switch (type) {
       case "terms":
         return terms(body, subs, scopes);
+      case "filter":
+        Object filter = definition.get(type);
+        return singleBucket(scopes.stream().filter(scope -> matches(filter, scope)).toList(),
+            subs);
+      case "filters":
+        return filters(body, subs, scopes);
       case "nested":
         return nested(String.valueOf(body.get("path")), subs, scopes);
       case "reverse_nested":
@@ -109,10 +116,121 @@ final class InMemoryAggregations {
         }
         return metric(type, String.valueOf(body.get("field")), scopes);
       default:
-        throw bad("the in-memory engine supports only the terms, min, max, avg, sum, value_count,"
-            + " cardinality, nested and reverse_nested aggregations, not [" + type + "] in ["
-            + name + "]");
+        throw bad("the in-memory engine supports only the terms, filter, filters, min, max, avg,"
+            + " sum, value_count, cardinality, nested and reverse_nested aggregations, not ["
+            + type + "] in [" + name + "]");
     }
+  }
+
+  // ---- filters -------------------------------------------------------------------------------
+
+  /** Keyed buckets in key order, the other bucket included, as the adapters read them. */
+  private Map<String, Object> filters(Map<String, Object> body, Map<String, Object> subs,
+      List<Scope> scopes) {
+    Map<String, Object> filters = new TreeMap<>(map(body.get("filters")));
+    Map<String, Object> buckets = new TreeMap<>();
+    Set<Scope> matchedAny = Collections.newSetFromMap(new IdentityHashMap<>());
+    for (Map.Entry<String, Object> filter : filters.entrySet()) {
+      List<Scope> matched = new ArrayList<>();
+      for (Scope scope : scopes) {
+        if (matches(filter.getValue(), scope)) {
+          matched.add(scope);
+          matchedAny.add(scope);
+        }
+      }
+      buckets.put(filter.getKey(), singleBucket(matched, subs));
+    }
+    Object other = body.get("other_bucket_key");
+    if (other != null) {
+      buckets.put(String.valueOf(other), singleBucket(
+          scopes.stream().filter(scope -> !matchedAny.contains(scope)).toList(), subs));
+    }
+    Map<String, Object> out = new LinkedHashMap<>();
+    out.put("buckets", buckets);
+    return out;
+  }
+
+  /**
+   * Whether an object matches the query of a filter: {@code match_all}, {@code bool}, {@code
+   * term}, {@code terms}, {@code exists} and {@code nested}, with field paths read relative to the
+   * object's nested path.
+   */
+  private boolean matches(Object query, Scope scope) {
+    Map<String, Object> clause = map(query);
+    if (clause.isEmpty() || clause.containsKey("match_all")) {
+      return true;
+    }
+    if (clause.size() != 1) {
+      throw bad("unsupported filter " + clause);
+    }
+    String type = clause.keySet().iterator().next();
+    Map<String, Object> body = map(clause.get(type));
+    switch (type) {
+      case "bool":
+        return matchesBool(body, scope);
+      case "term":
+      case "terms":
+        if (body.size() != 1) {
+          throw bad("unsupported filter " + clause);
+        }
+        Map.Entry<String, Object> condition = body.entrySet().iterator().next();
+        List<Object> expected = new ArrayList<>();
+        if (type.equals("terms")) {
+          expected.addAll((List<?>) condition.getValue());
+        } else {
+          expected.add(condition.getValue() instanceof Map
+              ? map(condition.getValue()).get("value") : condition.getValue());
+        }
+        return values(scope, condition.getKey()).stream().anyMatch(actual -> expected.stream()
+            .anyMatch(value -> String.valueOf(actual).equals(String.valueOf(value))));
+      case "exists":
+        return !values(scope, String.valueOf(body.get("field"))).isEmpty();
+      case "nested":
+        String path = String.valueOf(body.get("path"));
+        List<Object> children = new ArrayList<>();
+        collect(scope.node(), relative(scope, path).split("\\."), 0, children);
+        return children.stream().anyMatch(child -> child instanceof Map
+            && matches(body.get("query"), new Scope(map(child), path, scope)));
+      default:
+        throw bad("the in-memory engine filters only with match_all, bool, term, terms, exists"
+            + " and nested, not [" + type + "]");
+    }
+  }
+
+  private boolean matchesBool(Map<String, Object> bool, Scope scope) {
+    for (String key : List.of("filter", "must")) {
+      for (Object clause : clauses(bool.get(key))) {
+        if (!matches(clause, scope)) {
+          return false;
+        }
+      }
+    }
+    for (Object clause : clauses(bool.get("must_not"))) {
+      if (matches(clause, scope)) {
+        return false;
+      }
+    }
+    List<Object> should = clauses(bool.get("should"));
+    if (should.isEmpty()) {
+      return true;
+    }
+    boolean scoringOnly = clauses(bool.get("filter")).isEmpty()
+        && clauses(bool.get("must")).isEmpty();
+    long minimum = number(bool.get("minimum_should_match"), scoringOnly ? 1 : 0);
+    return should.stream().filter(clause -> matches(clause, scope)).count() >= minimum;
+  }
+
+  private static List<Object> clauses(Object value) {
+    if (value == null) {
+      return List.of();
+    }
+    List<Object> out = new ArrayList<>();
+    if (value instanceof List<?> list) {
+      out.addAll(list);
+    } else {
+      out.add(value);
+    }
+    return out;
   }
 
   // ---- buckets -------------------------------------------------------------------------------

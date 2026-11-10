@@ -128,6 +128,8 @@ public class ElasticProtosFactory {
         .allowRegex(query.isAllowRegex())
         .maxPageSize(query.getMaxPageSize())
         .maxTermsSize(query.getMaxTermsSize())
+        .maxAggregationDepth(query.getMaxAggregationDepth())
+        .maxAggregationBuckets(query.getMaxAggregationBuckets())
         .shardDocTiebreaker(query.getShardDocTiebreaker() != ShardDocTiebreaker.OFF)
         .build();
   }

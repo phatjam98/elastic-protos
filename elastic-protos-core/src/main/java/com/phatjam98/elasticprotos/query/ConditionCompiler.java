@@ -38,9 +38,18 @@ final class ConditionCompiler {
   private final List<String> warnings;
 
   ConditionCompiler(QueryCompilerConfig config, IndexDefinition index, List<String> warnings) {
+    this(config, index, warnings, List.of(), null);
+  }
+
+  /**
+   * Creates a compiler for conditions that run inside nested objects, such as the condition of a
+   * filter aggregation in a nested context; see {@link NestedPathResolver}.
+   */
+  ConditionCompiler(QueryCompilerConfig config, IndexDefinition index, List<String> warnings,
+      List<String> context, String contextOwner) {
     this.config = config;
     this.index = index;
-    this.resolver = new NestedPathResolver(index, config.groupNested());
+    this.resolver = new NestedPathResolver(index, config.groupNested(), context, contextOwner);
     this.warnings = warnings;
   }
 

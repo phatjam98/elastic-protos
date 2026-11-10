@@ -3,6 +3,7 @@ syntax = "proto3";
 package phatjam98.elasticprotos.v1;
 
 import "google/protobuf/timestamp.proto";
+import "phatjam98/elasticprotos/v1/conditions.proto";
 import "phatjam98/elasticprotos/v1/flat_struct.proto";
 import "phatjam98/elasticprotos/v1/sorting_criteria.proto";
 
@@ -11,10 +12,12 @@ option java_multiple_files = true;
 option java_outer_classname = "AggregationProtos";
 
 // One aggregation of a search, compiled into the search body's "aggs" and validated against the
-// mapped type of its field. Bucket aggregations (terms, date_histogram, histogram, range) may carry
-// one level of sub-aggregations; metrics carry none. Fields inside nested objects are wrapped in
-// "nested" / "reverse_nested" aggregations named "<name>__nested" and "<name>__reverse"; read the
-// results with com.phatjam98.elasticprotos.query.AggregationResults, which unwraps them.
+// mapped type of its field. Bucket aggregations (terms, date_histogram, histogram, range, filter,
+// filters, composite) may carry sub-aggregations, down to QueryCompilerConfig.maxAggregationDepth
+// levels (3 by default, the top level included); metrics carry none. Fields inside nested objects
+// are wrapped in "nested" / "reverse_nested" aggregations named "<name>__nested" and
+// "<name>__reverse"; read the results with com.phatjam98.elasticprotos.query.AggregationResults,
+// which unwraps them.
 message Aggregation {
   // The name of the aggregation in the response; required and unique among its siblings. It must
   // not contain "__" (reserved for the wrappers), "[", "]", ">" or ".", must not end with "_", and
@@ -23,8 +26,11 @@ message Aggregation {
   // doc_count_error_upper_bound or meta.
   string name = 1;
   // The dotted index path of the field to aggregate, such as "type" or "parties.role"; required by
-  // every current kind. Text fields aggregate through their keyword sub-field; keys of a flattened
-  // field are allowed for terms, value_count and cardinality.
+  // terms, date_histogram, histogram, range and metric. Text fields aggregate through their
+  // keyword sub-field; keys of a flattened field are allowed for terms, value_count and
+  // cardinality. filter and filters take either no field, to run in the context of their parent
+  // (the root documents at the top level), or a nested path such as "parties", to filter the
+  // nested objects at that path. composite takes none: its sources name their fields.
   string field = 2;
   // What to compute; exactly one must be set.
   oneof kind {
@@ -38,10 +44,111 @@ message Aggregation {
     RangeAggregation range = 6;
     // A single-value metric over the field.
     MetricAggregation metric = 7;
+    // One bucket of the documents (or nested objects) that match a condition.
+    FilterAggregation filter = 9;
+    // One named bucket per condition, optionally with a bucket for the rest.
+    FiltersAggregation filters = 10;
+    // Every combination of the values of several sources, paged with an after key; top level
+    // only.
+    CompositeAggregation composite = 11;
   }
-  // Aggregations computed inside every bucket of this one. Only one level is supported: the
-  // sub-aggregations themselves must have none, and metrics take none at all.
+  // Aggregations computed inside every bucket of this one. Metrics take none; the depth is
+  // limited by QueryCompilerConfig.maxAggregationDepth.
   repeated Aggregation sub_aggregation = 8;
+}
+
+// A filter aggregation: a single bucket of the documents, or of the nested objects when
+// Aggregation.field names a nested path, that match the condition.
+message FilterAggregation {
+  // The condition, compiled exactly like a SearchCondition of the query: an AND of field
+  // conditions, typed and checked against the mapping, with fields inside nested objects below
+  // the aggregation's context wrapped in nested queries. Fields outside the context (such as a
+  // root field while filtering nested objects) are refused. An empty condition matches
+  // everything.
+  SearchCondition condition = 1;
+}
+
+// A filters aggregation: one bucket per named condition. A document (or nested object) falls
+// into every bucket whose condition it matches.
+message FiltersAggregation {
+  // The buckets; at least one is required, and their keys must be unique.
+  repeated KeyedFilter filters = 1;
+  // When set, adds a bucket under this key for what matches none of the filters; it must differ
+  // from the filter keys.
+  string other_bucket_key = 2;
+}
+
+// One named bucket of a filters aggregation.
+message KeyedFilter {
+  // The bucket key in the response; required.
+  string key = 1;
+  // The condition, as in FilterAggregation.condition.
+  SearchCondition condition = 2;
+}
+
+// A composite aggregation: buckets for every combination of the values of its sources, ordered
+// by the sources and paged with "after". It must be a top-level aggregation; when its sources
+// are inside nested objects it is wrapped in nested aggregations, and all its sources must then
+// be inside the same nested path.
+message CompositeAggregation {
+  // The sources, in key order; at least one is required, and their names must be unique.
+  repeated CompositeSource sources = 1;
+  // The number of buckets per page; 0 means the engine default (10). At most
+  // QueryCompilerConfig.maxTermsSize.
+  int32 size = 2;
+  // The key to continue after: the after_key of the previous page, one value per source name. A
+  // PrimitiveValue without a kind stands for null, the key of the missing bucket of a source with
+  // missing_bucket. Empty starts at the first page.
+  map<string, PrimitiveValue> after = 3;
+}
+
+// One source of a composite aggregation; exactly one kind must be set.
+message CompositeSource {
+  // The name of the source in the bucket keys; required and unique within the aggregation, with
+  // the same character rules as aggregation names.
+  string name = 1;
+  // The dotted index path of the field, as for a terms, date_histogram or histogram aggregation.
+  string field = 2;
+  // How the field's values become key values.
+  oneof kind {
+    // The field's values themselves; text fields use their keyword sub-field.
+    CompositeTermsSource terms = 3;
+    // The start of the calendar or fixed interval of a date field: epoch milliseconds or, with
+    // format, a formatted string.
+    CompositeDateHistogramSource date_histogram = 4;
+    // The lower bound of the fixed interval of a numeric field.
+    CompositeHistogramSource histogram = 5;
+  }
+  // The order of this source's values; unset means ascending.
+  SortingOrder order = 6;
+  // Whether documents without the field get a bucket with a null value for this source; by
+  // default they are left out.
+  bool missing_bucket = 7;
+}
+
+// The terms source of a composite aggregation; it has no settings yet.
+message CompositeTermsSource {}
+
+// The date_histogram source of a composite aggregation.
+message CompositeDateHistogramSource {
+  // The bucket width; exactly one must be set.
+  oneof interval {
+    // A calendar-aware interval.
+    CalendarInterval calendar_interval = 1;
+    // A fixed interval: a positive whole number and a unit of ms, s, m, h or d, such as "90m".
+    string fixed_interval = 2;
+  }
+  // The time zone that places bucket boundaries, as a java.time.ZoneId; empty means UTC.
+  string time_zone = 3;
+  // The date format of the key values, such as "yyyy-MM"; empty keeps epoch milliseconds. The
+  // after key must then use the same format.
+  string format = 4;
+}
+
+// The histogram source of a composite aggregation.
+message CompositeHistogramSource {
+  // The bucket width; must be positive.
+  double interval = 1;
 }
 
 // A terms aggregation: one bucket per distinct value of a keyword, numeric, date, boolean or ip

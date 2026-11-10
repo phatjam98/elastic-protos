@@ -1,0 +1,51 @@
+{
+  "aggs" : {
+    "pairs" : {
+      "aggs" : {
+        "total" : {
+          "sum" : {
+            "field" : "size_bytes"
+          }
+        }
+      },
+      "composite" : {
+        "after" : {
+          "firm" : "firm-2",
+          "month" : "2024-02",
+          "size" : 0
+        },
+        "size" : 50,
+        "sources" : [ {
+          "firm" : {
+            "terms" : {
+              "field" : "firm_id",
+              "missing_bucket" : true
+            }
+          }
+        }, {
+          "month" : {
+            "date_histogram" : {
+              "calendar_interval" : "1M",
+              "field" : "filed_at",
+              "format" : "yyyy-MM"
+            }
+          }
+        }, {
+          "size" : {
+            "histogram" : {
+              "field" : "size_bytes",
+              "interval" : 100000,
+              "order" : "desc"
+            }
+          }
+        } ]
+      }
+    }
+  },
+  "from" : 0,
+  "query" : {
+    "match_all" : { }
+  },
+  "size" : 0,
+  "track_total_hits" : true
+}

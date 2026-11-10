@@ -1089,5 +1089,52 @@ class InMemorySearchEngineSpec extends Specification {
     [terms: [field: 'status', order: [_key: 'asc', _count: 'desc']]] || 'exactly one key'
     [reverse_nested: [path: 'owner']]                                 || 'does not enclose'
     [nested: [path: 'owner'], aggs: [y: [terms: [field: 'status']]]] || 'is not inside nested path [owner]'
+    [composite: [sources: [[s: [terms: [field: 'status']]]]]]         || 'not [composite]'
+    [filter: [range: [n: [gte: 1]]]]                                 || 'not [range]'
+    [filter: [term: [a: 1, b: 2]]]                                    || 'unsupported filter'
+    [filter: [term: [a: 1], terms: [b: [2]]]]                         || 'unsupported filter'
+  }
+
+  def "compiled filter and filters aggregations, three levels deep, over the sample documents"() {
+    given:
+    def mapper = com.phatjam98.elasticprotos.mapping.ProtoMapper.withDefaults()
+    def codec = com.phatjam98.elasticprotos.codec.ProtoDocumentCodec.of(mapper)
+    def documents = mapper.map(com.phatjam98.elasticprotos.proto.example.Document)
+    def compiler = com.phatjam98.elasticprotos.query.QueryCompiler.withDefaults()
+    engine.createIndex(documents.name(), [:], documents.mappings(), [documents.alias()] as Set)
+    SampleData.documents().each { engine.index(documents.alias(), it.id, codec.toDocument(it), IndexOptions.defaults()) }
+
+    when:
+    def criteria = Criteria.builder().aggregate(
+        Aggs.sub(Aggs.filters('kinds', Aggs.keyed('filings', Criteria.where('type').equalTo('FILING')),
+            Aggs.keyed('acme', Criteria.where('parties.name').equalTo('Acme Corp')),
+            Aggs.keyed('either', Criteria.where('tags').anyOf('civil', 'none').and('relevance').isNull()))
+            .tap { filtersBuilder.setOtherBucketKey('aaa_rest') }, Aggs.sum('total', 'size_bytes')),
+        Aggs.sub(Aggs.filter('filings', Criteria.where('type').equalTo('FILING').and('parties.role').equalTo('PLAINTIFF')),
+            Aggs.sum('total', 'size_bytes')),
+        Aggs.sub(Aggs.filter('plaintiffs', 'parties', Criteria.where('parties.role').equalTo('PLAINTIFF')),
+            Aggs.terms('names', 'parties.name'), Aggs.cardinality('docs', 'id')),
+        Aggs.sub(Aggs.terms('by_type', 'type'), Aggs.sub(Aggs.terms('roles', 'parties.role'),
+            Aggs.cardinality('firms', 'firm_id'))),
+        Aggs.filter('everything', com.phatjam98.elasticprotos.proto.SearchCondition.defaultInstance),
+        Aggs.filter('not_counsel', Criteria.where('parties.role').not().equalTo('COUNSEL').and('metadata.pages').exists())
+    ).aggregationsOnly().build()
+    def aggs = AggregationResults.of(engine.search([documents.alias()], compiler.compile(criteria, documents).body()))
+
+    then: 'keyed buckets in key order, the other bucket included'
+    aggs.buckets('kinds')*.key() == ['aaa_rest', 'acme', 'either', 'filings']
+    aggs.buckets('kinds')*.docCount() == [1L, 2L, 2L, 3L]
+    aggs.buckets('kinds')[0].sub().metric('total').asLong() == 8_000L
+
+    and:
+    aggs.bucket('filings').docCount() == 1L
+    aggs.bucket('filings').sub().metric('total').asLong() == 120_000L
+    aggs.bucket('plaintiffs').docCount() == 3L
+    aggs.bucket('plaintiffs').sub().buckets('names')*.key() == ['Acme Corp', 'Initech LLC', 'Jane Doe']
+    aggs.bucket('plaintiffs').sub().metric('docs').asLong() == 3L
+    aggs.buckets('by_type')[0].sub().buckets('roles')*.key() == ['DEFENDANT', 'PLAINTIFF']
+    aggs.buckets('by_type')[0].sub().buckets('roles')*.sub()*.metric('firms')*.asLong() == [2L, 1L]
+    aggs.bucket('everything').docCount() == 6L
+    aggs.bucket('not_counsel').docCount() == 1L
   }
 }

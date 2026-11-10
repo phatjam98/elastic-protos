@@ -1,0 +1,46 @@
+{
+  "aggs" : {
+    "labels__nested" : {
+      "aggs" : {
+        "labels" : {
+          "aggs" : {
+            "front" : {
+              "filter" : {
+                "bool" : {
+                  "filter" : [ {
+                    "term" : {
+                      "shelves.position" : 1
+                    }
+                  }, {
+                    "nested" : {
+                      "path" : "shelves.books",
+                      "query" : {
+                        "range" : {
+                          "shelves.books.rank" : {
+                            "gte" : 2
+                          }
+                        }
+                      }
+                    }
+                  } ]
+                }
+              }
+            }
+          },
+          "terms" : {
+            "field" : "shelves.label"
+          }
+        }
+      },
+      "nested" : {
+        "path" : "shelves"
+      }
+    }
+  },
+  "from" : 0,
+  "query" : {
+    "match_all" : { }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}
