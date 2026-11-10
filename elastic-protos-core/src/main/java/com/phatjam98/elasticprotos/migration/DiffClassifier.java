@@ -3,6 +3,7 @@ package com.phatjam98.elasticprotos.migration;
 import com.phatjam98.elasticprotos.migration.MappingDiff.Change;
 import com.phatjam98.elasticprotos.util.Json;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -41,7 +42,9 @@ import java.util.TreeSet;
  * keys the engine or the migrator manages ({@link #MANAGED_SETTINGS}, {@code blocks.*}, {@code
  * version.*}) are ignored; everything else, including {@code number_of_shards}, {@code
  * analysis.*} and unknown keys, is static. {@code number_of_replicas} is not compared while the
- * desired {@code auto_expand_replicas} is set and not {@code false}. See {@link SettingsDiff}.
+ * desired {@code auto_expand_replicas} is set and not {@code false}. Given the dynamic keys the
+ * index records as declared, a recorded key the desired settings no longer declare is listed as
+ * a reset ({@link SettingsDiff#resets()}). See {@link SettingsDiff}.
  */
 public final class DiffClassifier {
 
@@ -126,6 +129,27 @@ public final class DiffClassifier {
       Map<String, Object> existingMappings, Map<String, Object> desiredMappings,
       Map<String, Object> existingSettings, Map<String, Object> desiredSettings,
       Set<String> extraDynamicSettings) {
+    return diff(existingMappings, desiredMappings, existingSettings, desiredSettings,
+        extraDynamicSettings, null);
+  }
+
+  /**
+   * Computes the differences, treating more setting keys as dynamic and resetting the dynamic
+   * settings the index records as declared that the proto no longer declares.
+   *
+   * @param existingMappings the index's mappings as the engine returns them
+   * @param desiredMappings the mappings the proto produces
+   * @param existingSettings the index's settings as the engine returns them, or empty
+   * @param desiredSettings the settings the proto produces, or empty
+   * @param extraDynamicSettings setting keys (without {@code index.}) to treat as dynamic
+   * @param recordedDynamic the dynamic setting keys the index records as declared ({@code
+   *     _meta.elastic_protos.dynamic_settings}), or null when it records none
+   * @return the differences
+   */
+  public static MappingDiff diff(
+      Map<String, Object> existingMappings, Map<String, Object> desiredMappings,
+      Map<String, Object> existingSettings, Map<String, Object> desiredSettings,
+      Set<String> extraDynamicSettings, Collection<String> recordedDynamic) {
     Map<String, Object> before = normalizeNode(existingMappings, true);
     Map<String, Object> after = normalizeNode(desiredMappings, true);
     Collector out = new Collector();
@@ -134,7 +158,8 @@ public final class DiffClassifier {
         ? String.valueOf(before.get("dynamic")) : DEFAULT_DYNAMIC;
     diffChildren("", map(before.get("properties")), map(after.get("properties")), dynamic,
         false, true, out);
-    SettingsDiff settings = settingsDiff(existingSettings, desiredSettings, extraDynamicSettings);
+    SettingsDiff settings = settingsDiff(existingSettings, desiredSettings, extraDynamicSettings,
+        recordedDynamic);
     return new MappingDiff(out.added, out.removed, out.typeChanged, out.paramChanged,
         !settings.isEmpty(), out.unindexed, settings);
   }
@@ -355,10 +380,52 @@ public final class DiffClassifier {
    */
   public static SettingsDiff settingsDiff(Map<String, Object> existingSettings,
       Map<String, Object> desiredSettings, Set<String> extraDynamicSettings) {
+    return settingsDiff(existingSettings, desiredSettings, extraDynamicSettings, null);
+  }
+
+  /**
+   * Compares the settings the proto declares with the index's settings, and lists for a reset
+   * the dynamic settings the index records as declared that the proto no longer declares.
+   *
+   * <p>A recorded key (a leading {@code index.} is stripped) that is not declared any more is
+   * reset when it is dynamic under {@code extraDynamicSettings}, is not managed and the index
+   * carries it; the reset's {@code after} is null (the engine default). Otherwise it is released:
+   * it only leaves the record. {@code number_of_replicas} is released while {@code
+   * auto_expand_replicas} manages it (declared, or set on the index and not being reset);
+   * otherwise its reset is null here too, and {@link IndexMigrator} replaces it with the count of
+   * the replica policy. A reset {@code auto_expand_replicas} resets an undeclared {@code
+   * number_of_replicas} with it (back to the policy), and no longer keeps a declared one from
+   * being compared.
+   *
+   * @param existingSettings the index's settings as the engine returns them, or null
+   * @param desiredSettings the settings the proto produces, or null
+   * @param extraDynamicSettings setting keys (without {@code index.}) to treat as dynamic
+   * @param recordedDynamic the dynamic setting keys the index records as declared, or null
+   * @return the differences
+   */
+  public static SettingsDiff settingsDiff(Map<String, Object> existingSettings,
+      Map<String, Object> desiredSettings, Set<String> extraDynamicSettings,
+      Collection<String> recordedDynamic) {
     Map<String, Object> existing = flattenSettings(existingSettings);
     Map<String, Object> desired = flattenSettings(desiredSettings);
+    Set<String> resetting = new TreeSet<>();
+    Set<String> released = new TreeSet<>();
+    for (String key : normalizeKeys(recordedDynamic)) {
+      if (desired.containsKey(key)) {
+        continue;
+      }
+      if (!isManagedSetting(key) && isDynamicSetting(key, extraDynamicSettings)
+          && existing.containsKey(key)) {
+        resetting.add(key);
+      } else {
+        // a null for a key the engine does not know is a 400, and one the index does not carry
+        // is already at the default: either way the key only leaves the record
+        released.add(key);
+      }
+    }
     boolean expands = expands(desired.get("auto_expand_replicas"));
     boolean existingExpands = !desired.containsKey("auto_expand_replicas")
+        && !resetting.contains("auto_expand_replicas")
         && expands(existing.get("auto_expand_replicas"));
     List<Change> dynamicChanges = new ArrayList<>();
     List<Change> staticChanges = new ArrayList<>();
@@ -383,7 +450,80 @@ public final class DiffClassifier {
         staticChanges.add(change);
       }
     }
-    return new SettingsDiff(dynamicChanges, staticChanges, ignored);
+    if (resetting.contains("auto_expand_replicas") && !desired.containsKey("number_of_replicas")) {
+      // auto-expand stops, and the replica count goes back to the policy with it
+      resetting.add("number_of_replicas");
+    }
+    List<Change> resets = new ArrayList<>();
+    for (String key : resetting) {
+      if ("number_of_replicas".equals(key) && (expands || existingExpands)) {
+        released.add(key);
+        continue;
+      }
+      resets.add(new Change(key, existing.get(key), null));
+    }
+    return new SettingsDiff(dynamicChanges, staticChanges, ignored, resets,
+        new ArrayList<>(released));
+  }
+
+  /**
+   * Normalises recorded keys: strips a leading {@code index.}, drops null and blank entries.
+   *
+   * @param keys recorded keys, or null
+   * @return the normalised keys, possibly empty
+   */
+  static List<String> normalizeKeys(Collection<?> keys) {
+    List<String> normalized = new ArrayList<>();
+    if (keys == null) {
+      return normalized;
+    }
+    for (Object key : keys) {
+      if (key == null || key.toString().isBlank()) {
+        continue;
+      }
+      String text = key.toString().trim();
+      normalized.add(text.startsWith("index.") ? text.substring("index.".length()) : text);
+    }
+    return normalized;
+  }
+
+  /**
+   * Returns the static settings among the declared ones, flattened and with normalised values,
+   * sorted: what {@link IndexMigrator} records in {@code _meta.elastic_protos.static_values} when
+   * it creates an index. Managed and dynamic keys are left out.
+   *
+   * @param desiredSettings the settings the proto produces
+   * @param extraDynamicSettings setting keys to treat as dynamic
+   * @return the static keys and their values
+   */
+  public static Map<String, Object> declaredStaticSettings(Map<String, Object> desiredSettings,
+      Set<String> extraDynamicSettings) {
+    Map<String, Object> statics = new TreeMap<>();
+    flattenSettings(desiredSettings).forEach((key, value) -> {
+      if (!isManagedSetting(key) && !isDynamicSetting(key, extraDynamicSettings)) {
+        statics.put(key, normalizeValue(value));
+      }
+    });
+    return statics;
+  }
+
+  /**
+   * Returns the dynamic setting keys among the declared ones, sorted: what {@link IndexMigrator}
+   * records in {@code _meta.elastic_protos.dynamic_settings}. Managed keys are left out.
+   *
+   * @param desiredSettings the settings the proto produces
+   * @param extraDynamicSettings setting keys to treat as dynamic
+   * @return the keys, without {@code index.}
+   */
+  public static List<String> declaredDynamicSettings(Map<String, Object> desiredSettings,
+      Set<String> extraDynamicSettings) {
+    List<String> keys = new ArrayList<>();
+    for (String key : flattenSettings(desiredSettings).keySet()) {
+      if (!isManagedSetting(key) && isDynamicSetting(key, extraDynamicSettings)) {
+        keys.add(key);
+      }
+    }
+    return keys;
   }
 
   /** Returns whether a setting key (without {@code index.}) is managed and never applied. */
@@ -429,13 +569,8 @@ public final class DiffClassifier {
    */
   public static String staticSettingsDigest(Map<String, Object> desiredSettings,
       Set<String> extraDynamicSettings) {
-    Map<String, Object> statics = new TreeMap<>();
-    flattenSettings(desiredSettings).forEach((key, value) -> {
-      if (!isManagedSetting(key) && !isDynamicSetting(key, extraDynamicSettings)) {
-        statics.put(key, normalizeValue(value));
-      }
-    });
-    return Json.sha256Hex(statics).substring(0, 8);
+    return Json.sha256Hex(declaredStaticSettings(desiredSettings, extraDynamicSettings))
+        .substring(0, 8);
   }
 
   /**

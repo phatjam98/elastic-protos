@@ -1266,6 +1266,369 @@ class IndexMigratorSpec extends Specification {
         .endsWith('; dynamic settings not applied either: refresh_interval null -> 5s')
   }
 
+  // ---- removed dynamic settings ----------------------------------------------------------------
+
+  /** Returns {@code _meta.elastic_protos.dynamic_settings} of an index or alias, or null. */
+  List<String> record(String index) {
+    engine.getMappings(index)._meta?.elastic_protos?.dynamic_settings
+  }
+
+  def "a dynamic setting removed from the proto is reset to the default, and the record follows"() {
+    given:
+    def both = withSettings(refresh_interval: '5s', 'index.max_result_window': 20000)
+    migrator(both).bootstrap(Firm)
+    String firms = DEFAULT.map(Firm).name()
+    def one = withSettings('index.max_result_window': 20000)
+
+    expect: 'CREATE records the declared dynamic keys'
+    record('firms') == ['max_result_window', 'refresh_interval']
+    engine.getSettings('firms').index.refresh_interval == '5s'
+
+    when:
+    def plan = migrator(one).plan(Firm)
+    engine.clearLog()
+    def result = migrator(one).apply(plan)
+
+    then:
+    plan.items()[0].action() == Action.UPDATE_SETTINGS
+    plan.items()[0].reason() == 'dynamic settings changed: refresh_interval 5s -> default'
+    plan.items()[0].diff().settings().resets()*.path == ['refresh_interval']
+    plan.toReport().contains('      reset: refresh_interval 5s -> default')
+    plan.toJson().contains('"reset" : [ {')
+    result.ok()
+    engine.log().contains("putSettings ${firms} {index.refresh_interval=null}".toString())
+    engine.getSettings('firms').index.refresh_interval == null
+    engine.getSettings('firms').index.max_result_window == '20000'
+    record('firms') == ['max_result_window']
+    engine.getMappings('firms')._meta.elastic_protos.static_settings != null
+    migrator(one).plan(Firm).items()[0].action() == Action.NO_OP
+
+    when: 'the last one goes too'
+    migrator().bootstrap(Firm)
+
+    then:
+    engine.getSettings('firms').index.max_result_window == null
+    record('firms') == null
+    engine.getMappings('firms')._meta.elastic_protos.keySet() == ['hash', 'proto', 'schema_version', 'static_settings', 'static_values'] as Set
+    migrator().plan(Firm).items()[0].action() == Action.NO_OP
+  }
+
+  def "an index without the record gets it on its next settings update, and nothing is reset"() {
+    given: 'an index created by rc.3: refresh_interval set, no record'
+    String firms = DEFAULT.map(Firm).name()
+    engine.createIndex(firms, [number_of_shards: 1, refresh_interval: '5s'], DEFAULT.map(Firm).mappings(), ['firms'] as Set)
+    def mapper = withSettings('index.max_result_window': 20000)
+
+    expect: 'a NO_OP leaves the metadata alone'
+    migrator().plan(Firm).items()[0].action() == Action.NO_OP
+    migrator().apply(migrator().plan(Firm)).ok()
+    record('firms') == null
+
+    when:
+    def plan = migrator(mapper).plan(Firm)
+    migrator(mapper).apply(plan)
+
+    then:
+    plan.items()[0].reason() == 'dynamic settings changed: max_result_window null -> 20000'
+    engine.getSettings('firms').index.refresh_interval == '5s'
+    record('firms') == ['max_result_window']
+    engine.getMappings('firms')._meta.elastic_protos.hash == DEFAULT.map(Firm).contentHash()
+    migrator(mapper).plan(Firm).items()[0].action() == Action.NO_OP
+  }
+
+  def "a mapping change resets removed settings first and writes the record with the mapping"() {
+    given:
+    def before = ProtoMapper.builder().overrides(MappingOverrides.builder().ignorePath('relevance')
+        .setting('refresh_interval', '5s').build()).build()
+    migrator(before).bootstrap(Document)
+    engine.clearLog()
+
+    when:
+    def plan = migrator().plan(Document)
+    migrator().apply(plan)
+    def writes = engine.log().findAll { it.startsWith('putSettings') || it.startsWith('putMappings') }
+
+    then:
+    plan.items()[0].action() == Action.PUT_MAPPING
+    plan.items()[0].reason() == 'compatible change: added [relevance]; dynamic settings are updated first: refresh_interval 5s -> default'
+    writes == ["putSettings ${before.map(Document).name()} {index.refresh_interval=null}", "putMappings ${before.map(Document).name()}"]*.toString()
+    record('documents') == null
+    engine.getSettings('documents').index.refresh_interval == null
+    migrator().plan(Document).items()[0].action() == Action.NO_OP
+  }
+
+  def "a reindex creates the new index without the removed setting, recording what is declared"() {
+    given:
+    def before = withSettings(refresh_interval: '5s', 'index.max_result_window': 20000)
+    migrator(before).bootstrap(Document)
+    def after = ProtoMapper.builder().overrides(MappingOverrides.builder()
+        .forPath('title') { it.setType(EsType.KEYWORD) }.setting('max_result_window', 20000).build()).build()
+
+    when:
+    def plan = migrator(after).plan(Document)
+    def result = migrator(after).apply(plan)
+
+    then:
+    plan.items()[0].action() == Action.REINDEX
+    !plan.toReport().contains('reset:')
+    result.ok()
+    engine.getSettings(DOC_V2).index.refresh_interval == null
+    engine.getSettings(DOC_V2).index.max_result_window == '20000'
+    record(DOC_V2) == ['max_result_window']
+    record(DOC_V1) == ['max_result_window', 'refresh_interval']
+  }
+
+  def "a removed replica count goes back to the replica policy, never to the engine default"() {
+    given:
+    def options = BLOCKING.withReplicas(ReplicaPolicy.fixed(0))
+    migrator(withSettings(number_of_replicas: 2), options).bootstrap(Firm)
+
+    expect:
+    record('firms') == ['number_of_replicas']
+
+    when:
+    def plan = migrator(DEFAULT, options).plan(Firm)
+    migrator(DEFAULT, options).apply(plan)
+
+    then:
+    plan.items()[0].action() == Action.UPDATE_SETTINGS
+    plan.items()[0].reason() == 'dynamic settings changed: number_of_replicas 2 -> 0'
+    engine.getSettings('firms').index.number_of_replicas == '0'
+    record('firms') == null
+
+    and: 'from then on the replica policy is a create-time policy again'
+    migrator(DEFAULT, BLOCKING.withReplicas(ReplicaPolicy.fixed(1))).plan(Firm).items()[0].action() == Action.NO_OP
+  }
+
+  def "a removed auto_expand_replicas is reset, and a declared replica count is then applied"() {
+    given:
+    migrator(withSettings(auto_expand_replicas: '0-1')).bootstrap(Firm)
+    def mapper = withSettings(number_of_replicas: 1)
+
+    when:
+    def item = migrator(mapper).plan(Firm).items()[0]
+    migrator(mapper).apply(new MigrationPlan([item]))
+
+    then:
+    item.action() == Action.UPDATE_SETTINGS
+    item.reason() == 'dynamic settings changed: number_of_replicas 0 -> 1, auto_expand_replicas 0-1 -> default'
+    item.warnings().isEmpty()
+    engine.getSettings('firms').index.auto_expand_replicas == null
+    engine.getSettings('firms').index.number_of_replicas == '1'
+    record('firms') == ['number_of_replicas']
+    migrator(mapper).plan(Firm).items()[0].action() == Action.NO_OP
+  }
+
+  def "a removed replica count under a hand-set auto_expand_replicas leaves the record at once, so a later hand-set count stays"() {
+    given: 'the review scenario: declared replicas, then auto-expand by hand, then the proto drops replicas'
+    def options = BLOCKING.withReplicas(ReplicaPolicy.fixed(0))
+    migrator(withSettings(number_of_replicas: 1), options).bootstrap(Firm)
+    engine.putSettings('firms', ['index.auto_expand_replicas': '0-all'])
+
+    when:
+    def item = migrator(DEFAULT, options).plan(Firm).items()[0]
+    engine.clearLog()
+    migrator(DEFAULT, options).apply(new MigrationPlan([item]))
+
+    then: 'nothing is reset, the key only leaves the record'
+    item.action() == Action.UPDATE_SETTINGS
+    item.reason() == 'dynamic settings changed: no longer declared, left as they are: [number_of_replicas]'
+    item.diff().settings().released() == ['number_of_replicas']
+    !engine.log().any { it.startsWith('putSettings') }
+    record('firms') == null
+    migrator(DEFAULT, options).plan(Firm).items()[0].action() == Action.NO_OP
+
+    when: 'months later the operator turns auto-expand off and sets two replicas by hand'
+    engine.putSettings('firms', ['index.auto_expand_replicas': 'false', 'index.number_of_replicas': 2])
+
+    then: 'the library does not touch them'
+    migrator(DEFAULT, options).plan(Firm).items()[0].action() == Action.NO_OP
+  }
+
+  def "a removed auto_expand_replicas takes an undeclared replica count back to the policy in the same request"() {
+    given:
+    def options = BLOCKING.withReplicas(ReplicaPolicy.fixed(2))
+    migrator(withSettings(auto_expand_replicas: '0-1'), options).bootstrap(Firm)
+    engine.putSettings('firms', ['index.number_of_replicas': 1])
+    engine.clearLog()
+
+    when:
+    def item = migrator(DEFAULT, options).plan(Firm).items()[0]
+    migrator(DEFAULT, options).apply(new MigrationPlan([item]))
+
+    then:
+    item.reason() == 'dynamic settings changed: auto_expand_replicas 0-1 -> default, number_of_replicas 1 -> 2'
+    engine.log().count { it.startsWith('putSettings') } == 1
+    engine.getSettings('firms').index.auto_expand_replicas == null
+    engine.getSettings('firms').index.number_of_replicas == '2'
+    migrator(DEFAULT, options).plan(Firm).items()[0].action() == Action.NO_OP
+  }
+
+  def "a removed extra dynamic setting is reset; one that is no longer dynamic only warns"() {
+    given:
+    def extras = BLOCKING.withExtraDynamicSettings(['lifecycle.', 'codec'] as Set)
+    migrator(withSettings('lifecycle.name': 'p', codec: 'best_compression'), extras).bootstrap(Firm)
+
+    expect:
+    record('firms') == ['codec', 'lifecycle.name']
+
+    when: 'planned with lifecycle. still extra, codec no longer'
+    def item = migrator(DEFAULT, BLOCKING.withExtraDynamicSettings(['lifecycle.'] as Set)).plan(Firm).items()[0]
+
+    then:
+    item.action() == Action.UPDATE_SETTINGS
+    item.diff().settings().resets()*.path == ['lifecycle.name']
+    item.warnings().contains('codec is no longer declared but is not a dynamic setting under the current options (extraDynamicSettings), so it is not reset')
+  }
+
+  def "a static setting removed from the proto is named in a warning under either policy, and never reindexes"() {
+    given:
+    migrator(withSettings(codec: 'best_compression')).bootstrap(Firm)
+    String firms = DEFAULT.map(Firm).name()
+
+    when:
+    def warn = migrator().plan(Firm).items()[0]
+    def reindex = migrator(DEFAULT, BLOCKING.withStaticSettings(StaticSettingsPolicy.REINDEX)).plan(Firm).items()[0]
+
+    then: 'no change, a warning naming it, the setting stays'
+    [warn, reindex]*.action() == [Action.NO_OP, Action.NO_OP]
+    [warn, reindex].every { it.warnings() == ["static settings no longer declared stay on ${firms} until it is reindexed: [codec]".toString()] }
+    engine.getSettings('firms').index.codec == 'best_compression'
+  }
+
+  def "no static warning for #description"() {
+    given:
+    migrator(DEFAULT).bootstrap(Document)
+
+    expect:
+    with(migrator(mapper, options).plan(Document).items()[0]) {
+      action() == Action.NO_OP
+      warnings().isEmpty()
+    }
+
+    where:
+    description                                          | mapper                                                         | options
+    'a static setting added with the live value'         | withSettings(number_of_shards: 1)                              | BLOCKING
+    'a static setting added with the live value (REINDEX)' | withSettings(number_of_shards: 1)                            | BLOCKING.withStaticSettings(StaticSettingsPolicy.REINDEX)
+  }
+
+  def "a declared static key moved into extraDynamicSettings is neither removed nor changed"() {
+    given:
+    migrator(withSettings(codec: 'best_compression')).bootstrap(Firm)
+
+    when:
+    def item = migrator(withSettings(codec: 'best_compression'), BLOCKING.withExtraDynamicSettings(['codec'] as Set)).plan(Firm).items()[0]
+
+    then:
+    item.action() == Action.NO_OP
+    item.warnings().isEmpty()
+  }
+
+  def "with the recorded static values, an engine's spelling cannot reindex after a static key was removed"() {
+    given: 'the engine spells codec differently; the proto then drops another static key'
+    engine = new AlwaysSpellingEngine()
+    migrator(withSettings(codec: 'best_compression', 'sort.field': 'id')).bootstrap(Firm)
+    def options = BLOCKING.withStaticSettings(StaticSettingsPolicy.REINDEX)
+
+    when:
+    def item = migrator(withSettings(codec: 'best_compression'), options).plan(Firm).items()[0]
+
+    then: 'the remaining key is compared with what was recorded, not with the engine'
+    engine.getSettings('firms').index.codec == 'BEST'
+    item.action() == Action.NO_OP
+    item.warnings() == ["static settings no longer declared stay on ${DEFAULT.map(Firm).name()} until it is reindexed: [sort.field]".toString()]
+
+    when: 'a recorded static value really changes'
+    def changed = migrator(withSettings(codec: 'default', 'sort.field': 'id'), options).plan(Firm).items()[0]
+
+    then:
+    changed.action() == Action.REINDEX
+    changed.reason().startsWith('static settings changed: codec best_compression -> default')
+  }
+
+  def "an index without recorded static values keeps the digest rules and no removal warning"() {
+    given: 'rc.3 recorded only the digest'
+    migrator(withSettings(codec: 'best_compression')).bootstrap(Firm)
+    def ours = engine.getMappings('firms')._meta.elastic_protos
+    engine.putMappings(DEFAULT.map(Firm).name(), [_meta: [elastic_protos: ours.findAll { k, v -> k != 'static_values' }]])
+
+    expect:
+    migrator().plan(Firm).items()[0].warnings().isEmpty()
+  }
+
+  def "a dry run reports the resets and changes nothing"() {
+    given:
+    migrator(withSettings(refresh_interval: '5s')).bootstrap(Firm)
+    engine.clearLog()
+
+    when:
+    def dry = migrator(DEFAULT, BLOCKING.withDryRun(true)).bootstrap(Firm)
+
+    then:
+    dry.outcomes()[0].status() == MigrationResult.Status.DRY_RUN
+    dry.outcomes()[0].plan().diff().settings().resets()*.path == ['refresh_interval']
+    dry.outcomes()[0].plan().reason() == 'dynamic settings changed: refresh_interval 5s -> default'
+    !engine.log().any { it.startsWith('putSettings') || it.startsWith('putMappings') }
+    record('firms') == ['refresh_interval']
+  }
+
+  def "a reset interrupted before the record was written converges on the next run, without a second put"() {
+    given: 'the setting was reset, the record still lists it'
+    migrator(withSettings(refresh_interval: '5s')).bootstrap(Firm)
+    engine.putSettings('firms', ['index.refresh_interval': null])
+    engine.clearLog()
+
+    when:
+    def item = migrator().plan(Firm).items()[0]
+    migrator().apply(new MigrationPlan([item]))
+
+    then: 'a key the index no longer carries is never sent (a null for an unknown key is a 400): it only leaves the record'
+    item.action() == Action.UPDATE_SETTINGS
+    item.reason() == 'dynamic settings changed: no longer declared, left as they are: [refresh_interval]'
+    !engine.log().any { it.startsWith('putSettings') }
+    record('firms') == null
+    migrator().plan(Firm).items()[0].action() == Action.NO_OP
+  }
+
+  def "an interrupted reset of a PUT_MAPPING converges the same way"() {
+    given: 'a crash after the settings update of a PUT_MAPPING, before its mapping and record'
+    def before = ProtoMapper.builder().overrides(MappingOverrides.builder().ignorePath('relevance')
+        .setting('refresh_interval', '5s').build()).build()
+    migrator(before).bootstrap(Document)
+    engine.putSettings('documents', ['index.refresh_interval': null])
+
+    when:
+    def item = migrator().plan(Document).items()[0]
+    migrator().apply(new MigrationPlan([item]))
+
+    then:
+    item.action() == Action.PUT_MAPPING
+    item.reason() == 'compatible change: added [relevance]; dynamic settings are updated first: no longer declared, left as they are: [refresh_interval]'
+    record('documents') == null
+    migrator().plan(Document).items()[0].action() == Action.NO_OP
+  }
+
+  def "a reused leftover is brought in line with the declared dynamic settings before the copy (zero downtime)"() {
+    given: 'an attempt declaring refresh_interval dies after creating the new index'
+    def options = BLOCKING.withReindexMode(ReindexMode.ZERO_DOWNTIME).withSwapGrace(java.time.Duration.ZERO)
+    migrator(DEFAULT).bootstrap(Document)
+    def withRefresh = ProtoMapper.builder().overrides(MappingOverrides.builder()
+        .forPath('title') { it.setType(EsType.KEYWORD) }.setting('refresh_interval', '5s').build()).build()
+    IndexMigrator.builder().engine(engine).mapper(withRefresh).options(options)
+        .listener({ a, phase -> if (phase == MigrationListener.Phase.COPIED) { throw new MigrationListener.Abort('killed') } } as MigrationListener)
+        .build().bootstrap(Document)
+    assert engine.getSettings(DOC_V2).index.refresh_interval == '5s'
+
+    when: 'the fix deploy has the same mappings and no refresh_interval'
+    def result = migrator(TITLE_KEYWORD, options).bootstrap(Document)
+
+    then:
+    result.ok()
+    engine.getSettings(DOC_V2).index.refresh_interval == null
+    record(DOC_V2) == null
+    migrator(TITLE_KEYWORD, options).plan(Document).items()[0].action() == Action.NO_OP
+  }
+
   def "a legacy index without metadata reports the legacy hash"() {
     given:
     Map mappings = new TreeMap(DEFAULT.map(Document).mappings())
@@ -1426,6 +1789,19 @@ class IndexMigratorSpec extends Specification {
         return [index: index]
       }
       settings
+    }
+  }
+
+  /** Spells codec in upper case, whatever was set. */
+  static class AlwaysSpellingEngine extends InMemorySearchEngine {
+    @Override
+    Map<String, Object> getSettings(String aliasOrIndex) {
+      def settings = super.getSettings(aliasOrIndex)
+      def index = new TreeMap(settings.index)
+      if (index.codec == 'best_compression') {
+        index.codec = 'BEST'
+      }
+      [index: index]
     }
   }
 

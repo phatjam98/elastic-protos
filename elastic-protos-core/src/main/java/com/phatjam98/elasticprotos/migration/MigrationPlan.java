@@ -55,6 +55,14 @@ public record MigrationPlan(List<IndexPlan> items) {
       for (String warning : item.warnings()) {
         out.append("      warning: ").append(warning).append('\n');
       }
+      if (inPlace(item) && !diff.settings().resets().isEmpty()) {
+        out.append("      reset: ").append(SettingsDiff.describe(diff.settings().resets()))
+            .append('\n');
+      }
+      if (inPlace(item) && !diff.settings().released().isEmpty()) {
+        out.append("      released (no longer declared, left as they are): ")
+            .append(diff.settings().released()).append('\n');
+      }
       if (item.action() == Action.BLOCKED) {
         out.append("      blocked: ").append(item.reason()).append('\n');
       } else if (item.action() == Action.NO_OP) {
@@ -110,6 +118,9 @@ public record MigrationPlan(List<IndexPlan> items) {
       settings.put("dynamic", changes(item.diff().settings().dynamicChanges()));
       settings.put("static", changes(item.diff().settings().staticChanges()));
       settings.put("ignored", item.diff().settings().ignored());
+      // resets and released keys apply only in place; a new index simply lacks the keys
+      settings.put("reset", inPlace(item) ? changes(item.diff().settings().resets()) : List.of());
+      settings.put("released", inPlace(item) ? item.diff().settings().released() : List.of());
       diff.put("settings", settings);
       entry.put("diff", diff);
       list.add(entry);
@@ -118,6 +129,12 @@ public record MigrationPlan(List<IndexPlan> items) {
     root.put("hasChanges", hasChanges());
     root.put("items", list);
     return Json.pretty(root);
+  }
+
+  /** Returns whether an item updates the live index in place, so that resets apply. */
+  private static boolean inPlace(IndexPlan item) {
+    return item.action() == Action.UPDATE_SETTINGS || item.action() == Action.PUT_MAPPING
+        || item.action() == Action.BACKFILL;
   }
 
   private static List<Object> changes(List<Change> changes) {
