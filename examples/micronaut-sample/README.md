@@ -36,7 +36,7 @@ The sample resolves `elasticProtosVersion` (default `1.0.0-SNAPSHOT`, in
 against a published release instead:
 
 ```bash
-./gradlew build -PelasticProtosVersion=1.0.0
+./gradlew build -PelasticProtosVersion=1.0.0-rc.3
 ```
 
 ## 2. Start an engine
