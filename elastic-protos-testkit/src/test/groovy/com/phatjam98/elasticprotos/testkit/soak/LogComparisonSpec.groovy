@@ -1,0 +1,494 @@
+package com.phatjam98.elasticprotos.testkit.soak
+
+import com.phatjam98.elasticprotos.testkit.soak.LogComparison.Anomaly
+import com.phatjam98.elasticprotos.testkit.soak.LogComparison.Timeline
+import com.phatjam98.elasticprotos.testkit.soak.LogComparison.Violation
+import com.phatjam98.elasticprotos.testkit.soak.OpLog.Entry
+import com.phatjam98.elasticprotos.testkit.soak.OpLog.OpType
+import com.phatjam98.elasticprotos.testkit.soak.WriteFailures.Failure
+import com.phatjam98.elasticprotos.testkit.soak.WriteFailures.Mode
+import spock.lang.Specification
+
+class LogComparisonSpec extends Specification {
+
+  // copy starts after 1000, the catch-up after 2000, the alias moves at 3000
+  // the catch-up ends at 2400, the first reconcile completes at 6000, the first sweep at 7000
+  // the snapshot is reported at 2900
+  static final Timeline ZD = new Timeline('old', 1000, 2000, 2400, 2900, 3000, 6000, 7000, true)
+  static final Timeline STRICT = Timeline.strict('old', 3000)
+
+  static Entry seed(Map doc) { new Entry(OpType.SEED, doc, 0, 1, 'old', false) }
+
+  static Entry onOld(OpType type, Map body, long at, boolean found = false) {
+    new Entry(type, body, at, at + 1, 'old', found)
+  }
+
+  static Entry onNew(OpType type, Map body, long at, boolean found = false) {
+    new Entry(type, body, at, at + 1, 'new', found)
+  }
+
+  static LogComparison.Result compare(Map<String, List<Entry>> log, Map<String, Map> actual,
+      Timeline timeline = ZD, Set<String> uncertain = [] as Set) {
+    LogComparison.compare(log, uncertain, actual, timeline, 10)
+  }
+
+  def 'replay applies full writes, partial updates and deletes in order'() {
+    expect:
+    OpLog.replay([seed([a: 1, b: 1]), onOld(OpType.UPDATE, [b: 2], 10)]) == [a: 1, b: 2]
+    OpLog.replay([seed([a: 1]), onOld(OpType.DELETE, null, 10)]) == null
+    OpLog.replay([onOld(OpType.UPDATE, [b: 2], 10)]) == null
+    OpLog.replay([seed([a: 1]), onOld(OpType.INDEX, [c: 3], 10)]) == [c: 3]
+  }
+
+  def 'documents the log explains match, numbers compare by value'() {
+    given:
+    def log = [x: [seed([id: 'x', n: 1]), onNew(OpType.UPDATE, [n: 2L], 3100)],
+               y: [seed([id: 'y']), onOld(OpType.DELETE, null, 500, true)]]
+
+    when:
+    def result = compare(log, [x: [id: 'x', n: 2]])
+
+    then:
+    result.checked() == 2
+    result.matched() == 2
+    result.violationCount() == 0
+    result.anomalyCount() == 0
+  }
+
+  def 'missing, extra, unknown and differing documents are violations'() {
+    given:
+    def log = [m: [seed([id: 'm'])],
+               e: [seed([id: 'e']), onNew(OpType.DELETE, null, 3500, true)],
+               d: [seed([id: 'd', n: 1]), onNew(OpType.INDEX, [id: 'd', n: 2], 3500, true)]]
+
+    when:
+    def result = compare(log, [e: [id: 'e'], d: [id: 'd', n: 1], u: [id: 'u']])
+
+    then:
+    result.violations() == [(Violation.MISSING): 1L, (Violation.EXTRA): 2L,
+                            (Violation.DIFFERING): 1L]
+    result.findings()*.id().toSet() == ['m', 'e', 'd', 'u'] as Set
+    result.differing() == ['d', 'e', 'm', 'u'] as Set
+  }
+
+  def 'uncertain ids are skipped'() {
+    when:
+    def result = compare([x: [seed([id: 'x'])]], [:], ZD, ['x'] as Set)
+
+    then:
+    result.checked() == 0
+    result.uncertain() == 1
+    result.violationCount() == 0
+  }
+
+  def 'a partial update after the swap on a copy that missed late old-index writes is documented'() {
+    given: 'the old index took a full write after the catch-up began; the update hit the stale copy'
+    def entries = [seed([id: 'x', t: 'seed', n: 0]),
+                   onOld(OpType.INDEX, [id: 'x', t: 'late', n: 1], 2500, true),
+                   onNew(OpType.UPDATE, [n: 2], 3100)]
+
+    expect:
+    compare([x: entries], [x: [id: 'x', t: 'seed', n: 2]]).anomalies()[Anomaly.STALE_PARTIAL_UPDATE] == 1
+  }
+
+  def 'a lost write the catch-up should have copied is a violation, not a stale update'() {
+    given: 'the full write was sent before the catch-up began'
+    def entries = [seed([id: 'x', t: 'seed', n: 0]),
+                   onOld(OpType.INDEX, [id: 'x', t: 'early', n: 1], 1500, true),
+                   onNew(OpType.UPDATE, [n: 2], 3100)]
+
+    when:
+    def result = compare([x: entries], [x: [id: 'x', t: 'seed', n: 2]])
+
+    then:
+    result.violations()[Violation.DIFFERING] == 1
+    result.anomalyCount() == 0
+  }
+
+  def 'a stale update on a ghost of a document deleted during the copy is told apart'() {
+    given: 'deleted during the copy, created again after the catch-up began, updated after the swap'
+    def entries = [seed([id: 'x', t: 'seed', n: 0]),
+                   onOld(OpType.DELETE, null, 1500, true),
+                   onOld(OpType.CREATE, [id: 'x', t: 'again', n: 1], 2500),
+                   onNew(OpType.UPDATE, [n: 2], 3100)]
+
+    expect:
+    compare([x: entries], [x: [id: 'x', t: 'seed', n: 2]])
+        .anomalies()[Anomaly.STALE_PARTIAL_UPDATE_ON_GHOST] == 1
+  }
+
+  def 'a ghost from before the copy started is a violation'() {
+    given: 'deleted before the copy began, so no copy can hold it'
+    def entries = [seed([id: 'x', t: 'seed', n: 0]),
+                   onOld(OpType.DELETE, null, 500, true),
+                   onOld(OpType.CREATE, [id: 'x', t: 'again', n: 1], 2500),
+                   onNew(OpType.UPDATE, [n: 2], 3100)]
+
+    expect:
+    compare([x: entries], [x: [id: 'x', t: 'seed', n: 2]]).violations()[Violation.DIFFERING] == 1
+  }
+
+  def 'a ghost needs the document deleted when the catch-up read it'() {
+    given: 'deleted and created again during the copy: the catch-up copied the new version'
+    def entries = [seed([id: 'x', t: 'seed', n: 0]),
+                   onOld(OpType.DELETE, null, 1500, true),
+                   onOld(OpType.CREATE, [id: 'x', t: 'again', n: 1], 1600),
+                   onOld(OpType.INDEX, [id: 'x', t: 'late', n: 3], 2500, true),
+                   onNew(OpType.UPDATE, [n: 2], 3100)]
+
+    expect:
+    compare([x: entries], [x: [id: 'x', t: 'seed', n: 2]]).violations()[Violation.DIFFERING] == 1
+  }
+
+  def 'a late create deleted through the alias before the reconcile and brought back is documented'() {
+    given:
+    def created = [id: 'x', t: 'late']
+    def entries = [onOld(OpType.CREATE, created, 2500), onNew(OpType.DELETE, null, 3100, false)]
+
+    expect:
+    compare([x: entries], [x: created]).anomalies()[Anomaly.RESURRECTED_AFTER_DELETE] == 1
+  }
+
+  def 'the same with writes through the alias before the delete is documented too'() {
+    given: 'the new index never held it at the swap: the first write after it created it there'
+    def created = [id: 'x', t: 'late']
+    def entries = [seed([id: 'x', t: 'seed']),
+                   onOld(OpType.DELETE, null, 500, true),
+                   onOld(OpType.CREATE, created, 2500),
+                   onNew(OpType.INDEX, [id: 'x', t: 'new'], 3100, false),
+                   onNew(OpType.UPDATE, [n: 1], 3200),
+                   onNew(OpType.DELETE, null, 3300, true)]
+
+    expect:
+    compare([x: entries], [x: created]).anomalies()[Anomaly.RESURRECTED_AFTER_DELETE] == 1
+  }
+
+  def 'the same when the first delete through the alias found nothing and later writes followed'() {
+    given:
+    def created = [id: 'x', t: 'late']
+    def entries = [onOld(OpType.CREATE, created, 2500),
+                   onNew(OpType.DELETE, null, 3100, false),
+                   onNew(OpType.CREATE, [id: 'x', t: 'new'], 3200, false),
+                   onNew(OpType.DELETE, null, 3300, true)]
+
+    expect:
+    compare([x: entries], [x: created]).anomalies()[Anomaly.RESURRECTED_AFTER_DELETE] == 1
+  }
+
+  def 'a resurrection is a violation when #why'() {
+    expect:
+    compare([x: entries], [x: [id: 'x', t: 'late']]).violations()[Violation.EXTRA] == 1
+
+    where:
+    why                                            | entries
+    'the create was sent before the catch-up'      | [onOld(OpType.CREATE, [id: 'x', t: 'late'], 1500),
+                                                      onNew(OpType.DELETE, null, 3100, false)]
+    'the new index held the document at the swap'  | [onOld(OpType.CREATE, [id: 'x', t: 'late'], 2500),
+                                                      onNew(OpType.DELETE, null, 3100, true)]
+    'the first write after the swap found it'      | [onOld(OpType.CREATE, [id: 'x', t: 'late'], 2500),
+                                                      onNew(OpType.INDEX, [id: 'x', t: 'n'], 3100, true),
+                                                      onNew(OpType.DELETE, null, 3200, true)]
+  }
+
+  def 'without a zero-downtime timeline nothing is documented'() {
+    given:
+    def entries = [seed([id: 'x', t: 'seed', n: 0]),
+                   onOld(OpType.INDEX, [id: 'x', t: 'late', n: 1], 2500, true),
+                   onNew(OpType.UPDATE, [n: 2], 3100)]
+
+    expect:
+    compare([x: entries], [x: [id: 'x', t: 'seed', n: 2]], STRICT).violations()[Violation.DIFFERING] == 1
+  }
+
+  def 'write failures are documented by mode, phase and history'() {
+    given:
+    def late = [onOld(OpType.CREATE, [id: 'x'], 2500)]
+    def early = [onOld(OpType.CREATE, [id: 'x'], 1500)]
+
+    def retriedOk = [onNew(OpType.INDEX, [id: 'x'], 3600)]
+
+    expect: 'a straggler: sent before the swap, blocked after it, then retried successfully'
+    WriteFailures.documented(failure('BLOCKED', 'INDEX', 2990, 3500, true), Mode.ZERO_DOWNTIME, ZD,
+        retriedOk) == 'BLOCKED_AFTER_SWAP'
+    WriteFailures.documented(failure('BLOCKED', 'INDEX', 2990, 3500, false), Mode.ZERO_DOWNTIME, ZD,
+        []) == 'BLOCKED_AFTER_SWAP'
+
+    and: 'a block of a write sent after the swap means the new index is blocked'
+    WriteFailures.documented(failure('BLOCKED', 'INDEX', 60000), Mode.ZERO_DOWNTIME, ZD, []) == null
+    WriteFailures.documented(failure('BLOCKED', 'INDEX', 3500), Mode.ZERO_DOWNTIME, ZD, []) == null
+
+    and: 'a straggler whose retry never succeeded, and a block before the swap'
+    WriteFailures.documented(failure('BLOCKED', 'INDEX', 2990, 3500, true), Mode.ZERO_DOWNTIME, ZD,
+        []) == null
+    WriteFailures.documented(failure('BLOCKED', 'INDEX', 2900), Mode.ZERO_DOWNTIME, ZD, []) == null
+
+    and: 'a 404 of a late document between the swap and the reconcile bound'
+    WriteFailures.documented(failure('NOT_FOUND', 'UPDATE', 3500), Mode.ZERO_DOWNTIME, ZD, late) ==
+        'UPDATE_404_BEFORE_RECONCILE'
+    WriteFailures.documented(failure('NOT_FOUND', 'UPDATE', 3500), Mode.ZERO_DOWNTIME, ZD, early) == null
+    WriteFailures.documented(failure('NOT_FOUND', 'UPDATE', 2850), Mode.ZERO_DOWNTIME, ZD, late) == null
+
+    and: 'a 404 between the snapshot and the SWAPPED report: the swap was already done'
+    WriteFailures.documented(failure('NOT_FOUND', 'UPDATE', 2950), Mode.ZERO_DOWNTIME, ZD, late) ==
+        'UPDATE_404_BEFORE_RECONCILE'
+    WriteFailures.documented(failure('NOT_FOUND', 'UPDATE', 60000), Mode.ZERO_DOWNTIME, ZD, late) == null
+    WriteFailures.documented(failure('CONFLICT', 'UPDATE', 3500), Mode.ZERO_DOWNTIME, ZD, late) == null
+
+    and: 'blocking: only writes sent before the swap'
+    WriteFailures.documented(failure('BLOCKED', 'DELETE', 1500), Mode.BLOCKING, STRICT, []) ==
+        'BLOCKING_WRITE_BLOCK'
+    WriteFailures.documented(failure('BLOCKED', 'DELETE', 60000), Mode.BLOCKING, STRICT, []) == null
+    WriteFailures.documented(failure('NOT_FOUND', 'UPDATE', 1500), Mode.BLOCKING, STRICT, []) == null
+    WriteFailures.documented(failure('CONFLICT', 'UPDATE', 1500), Mode.BACKFILL, STRICT, []) == null
+  }
+
+  def 'the summary counts failures by phase, operation and kind and lists violations'() {
+    given:
+    def failures = new WriteFailures()
+    failures.add(failure('BLOCKED', 'INDEX', 2990, 3500, false))
+    failures.add(failure('BLOCKED', 'INDEX', 2900))
+
+    when:
+    def summary = failures.summarize(Mode.ZERO_DOWNTIME, ZD, [:], 5)
+
+    then:
+    summary.attemptsFailed == 2L
+    summary.byPhaseOpKind == ['P/INDEX/BLOCKED': 2L]
+    summary.byClass == [BLOCKED_AFTER_SWAP: 1L, VIOLATION: 1L]
+    summary.violations == 1L
+    summary.violationSamples.size() == 1
+  }
+
+  def 'the log tracks in-flight writes for readers'() {
+    given:
+    def log = new OpLog()
+    log.ack('x', seed([id: 'x']))
+
+    when:
+    def view = log.view('x')
+
+    then:
+    view.expected() == [id: 'x']
+    !log.changedSince('x', view)
+
+    when:
+    log.begin('x')
+
+    then:
+    log.view('x') == null
+    log.changedSince('x', view)
+
+    when:
+    log.unknown('x')
+
+    then:
+    log.view('x') == null
+    log.uncertainIds() == ['x'] as Set
+  }
+
+  def 'H1: a resurrection by a resumed reconcile is not documented (the w2-43 shape)'() {
+    given: 'documented once, then written and deleted through the alias long after the reconcile'
+    def created = [id: 'x', t: 'late']
+    def entries = [onOld(OpType.CREATE, created, 2500),
+                   onNew(OpType.DELETE, null, 4000, false),
+                   onNew(OpType.CREATE, [id: 'x', t: 'new'], 33000, true),
+                   onNew(OpType.DELETE, null, 34000, true)]
+
+    expect:
+    compare([x: entries], [x: created]).violations()[Violation.EXTRA] == 1
+  }
+
+  def 'H1: a stale partial update long after the reconcile is a violation'() {
+    given:
+    def entries = [seed([id: 'x', t: 'seed', n: 0]),
+                   onOld(OpType.INDEX, [id: 'x', t: 'late', n: 1], 2500, true),
+                   onNew(OpType.UPDATE, [n: 2], 60000)]
+
+    expect:
+    compare([x: entries], [x: [id: 'x', t: 'seed', n: 2]]).violations()[Violation.DIFFERING] == 1
+  }
+
+  def 'H1: a document the reconcile had already created again is not documented when created twice'() {
+    given: 'all within the bound (a dead reconcile, then the resumed one): the second delete found'
+    def created = [id: 'x', t: 'late']
+    def entries = [onOld(OpType.CREATE, created, 2500),
+                   onNew(OpType.DELETE, null, 3100, false),
+                   onNew(OpType.DELETE, null, 4000, true)]
+
+    expect: 'the log held it deleted, yet the second delete found it: it had been created once'
+    compare([x: entries], [x: created]).violations()[Violation.EXTRA] == 1
+  }
+
+  def 'H1: the w2-43 shape is a violation even inside the bound'() {
+    given:
+    def created = [id: 'x', t: 'late']
+    def entries = [onOld(OpType.CREATE, created, 2500),
+                   onNew(OpType.DELETE, null, 3100, false),
+                   onNew(OpType.CREATE, [id: 'x', t: 'new'], 4000, true),
+                   onNew(OpType.DELETE, null, 4500, true)]
+
+    expect:
+    compare([x: entries], [x: created]).violations()[Violation.EXTRA] == 1
+  }
+
+  def 'M2: a ghost base may be a version acknowledged after PREPARED was reported'() {
+    given: 'the first copy scroll opens after the PREPARED report (refresh, count), so it read the'
+    // version written 6 ms after PREPARED (s-0002298, OS 3.9.0, kill at SWEPT)
+    def entries = [seed([id: 'x', t: 'seed', n: 0]),
+                   onOld(OpType.DELETE, null, 1000, true),
+                   onOld(OpType.CREATE, [id: 'x', t: 'copy', n: 9], 1006),
+                   onOld(OpType.DELETE, null, 1032, true),
+                   onOld(OpType.CREATE, [id: 'x', t: 'again', n: 1], 2500),
+                   onNew(OpType.UPDATE, [n: 2], 3100)]
+
+    expect:
+    compare([x: entries], [x: [id: 'x', t: 'copy', n: 2]])
+        .anomalies()[Anomaly.STALE_PARTIAL_UPDATE_ON_GHOST] == 1
+
+    and: 'a base no copy pass held is still a violation'
+    compare([x: entries], [x: [id: 'x', t: 'other', n: 2]]).violations()[Violation.DIFFERING] == 1
+  }
+
+  def 'stale reads are classified by window, ghost and anomaly'() {
+    given:
+    def late = [seed([id: 'x', t: 'seed']), onOld(OpType.INDEX, [id: 'x', t: 'late'], 2500, true)]
+    def ghost = [seed([id: 'g', t: 'seed']), onOld(OpType.DELETE, null, 1500, true)]
+    def zd = Mode.ZERO_DOWNTIME
+
+    expect: 'before the swap nothing is documented'
+    TransientChecks.read(zd, ZD, 2950, 2000, 2100, late, [id: 'x', t: 'seed']) == 'VIOLATION'
+
+    and: 'the new index lacks a late write until the reconcile'
+    TransientChecks.read(zd, ZD, 2950, 3100, 3110, late, [id: 'x', t: 'seed']) == 'RECONCILE_WINDOW'
+    TransientChecks.read(zd, ZD, 2950, 6500, 6510, late, [id: 'x', t: 'seed']) == 'VIOLATION'
+
+    and: 'a document deleted during the copy is visible until the sweep'
+    TransientChecks.read(zd, ZD, 2950, 6500, 6510, ghost, [id: 'g', t: 'seed']) == 'GHOST_BEFORE_SWEEP'
+    TransientChecks.read(zd, ZD, 2950, 7500, 7510, ghost, [id: 'g', t: 'seed']) == 'VIOLATION'
+
+    and: 'blocking and backfill document no stale read'
+    TransientChecks.read(Mode.BLOCKING, STRICT, 1000, 3100, 3110, late, [id: 'x', t: 'seed']) ==
+        'VIOLATION'
+    TransientChecks.read(Mode.BACKFILL, STRICT, -1, 3100, 3110, late, [id: 'x', t: 'seed']) ==
+        'VIOLATION'
+  }
+
+  def 'a ghost read may show a version the catch-up read, not one written after it'() {
+    given: 'created as the catch-up started (acknowledged after COPIED), deleted after the catch-up'
+    def caught = [onOld(OpType.CREATE, [id: 'c', t: 'caught'], 2050), onOld(OpType.DELETE, null, 2600, true)]
+    def tooLate = [onOld(OpType.CREATE, [id: 'c', t: 'late'], 2500), onOld(OpType.DELETE, null, 2600, true)]
+
+    expect:
+    TransientChecks.read(Mode.ZERO_DOWNTIME, ZD, 2950, 6500, 6510, caught, [id: 'c', t: 'caught']) ==
+        'GHOST_BEFORE_SWEEP'
+    TransientChecks.read(Mode.ZERO_DOWNTIME, ZD, 2950, 6500, 6510, tooLate, [id: 'c', t: 'late']) ==
+        'VIOLATION'
+  }
+
+  def 'a stale read after the reconcile of a document left in a documented anomaly is documented'() {
+    given:
+    def created = [id: 'x', t: 'late']
+    def history = [onOld(OpType.CREATE, created, 2500), onNew(OpType.DELETE, null, 3100, false)]
+
+    expect:
+    TransientChecks.read(Mode.ZERO_DOWNTIME, ZD, 2950, 8000, 8010, history, created) ==
+        'RESURRECTED_AFTER_DELETE'
+  }
+
+  def 'observations are classified like reads'() {
+    given:
+    def zd = Mode.ZERO_DOWNTIME
+    def resurrectedBefore = [onOld(OpType.CREATE, [id: 'x', t: 'late'], 2500),
+                             onNew(OpType.DELETE, null, 3100, false)]
+    def ghostBefore = [seed([id: 'g']), onOld(OpType.DELETE, null, 1500, true)]
+    def plainBefore = [seed([id: 'p']), onNew(OpType.DELETE, null, 3100, true)]
+
+    expect:
+    TransientChecks.observation(zd, ZD, 2950, observed('createFoundExisting', 3200, plainBefore)) ==
+        'RECONCILE_WINDOW'
+    TransientChecks.observation(zd, ZD, 2950, observed('createFoundExisting', 9000,
+        resurrectedBefore)) == 'RESURRECTED_AFTER_DELETE'
+    TransientChecks.observation(zd, ZD, 2950, observed('createFoundExisting', 6500, ghostBefore)) ==
+        'GHOST_BEFORE_SWEEP'
+    TransientChecks.observation(zd, ZD, 2950, observed('createFoundExisting', 9000, plainBefore)) ==
+        'VIOLATION'
+    TransientChecks.observation(zd, ZD, 2950, observed('deleteFoundMissing', 9000, plainBefore)) ==
+        'VIOLATION'
+    TransientChecks.observation(zd, ZD, 2950, observed('createFoundExisting', 2000, plainBefore)) ==
+        'VIOLATION'
+    TransientChecks.observation(Mode.BLOCKING, STRICT, 1000, observed('indexFoundMissing', 3200,
+        plainBefore)) == 'VIOLATION'
+  }
+
+  def 'a second creation is the replay residual only when the marker puts the id in it'() {
+    given: 'created late, created by the killed reconcile (the delete found it), created again'
+    def created = [id: 'x', t: 'late']
+    def entries = [onOld(OpType.CREATE, created, 2500),
+                   onNew(OpType.DELETE, null, 4000, true)]
+    def accepting = ZD.withReplayResidual({ it == 'x' } as java.util.function.Predicate)
+
+    expect:
+    compare([x: entries], [x: created], accepting).anomalies()[Anomaly.RESURRECTED_BY_RESUME_REPLAY] == 1
+    compare([x: entries], [x: created]).violations()[Violation.EXTRA] == 1
+
+    and: 'the residual does not stretch past the reconcile bound'
+    def late = [onOld(OpType.CREATE, created, 2500), onNew(OpType.DELETE, null, 6500, true)]
+    compare([x: late], [x: created], accepting).violations()[Violation.EXTRA] == 1
+
+    and: 'nor to a document the old index created before the catch-up'
+    def early = [onOld(OpType.CREATE, created, 1500), onNew(OpType.DELETE, null, 4000, true)]
+    compare([x: early], [x: created], accepting).violations()[Violation.EXTRA] == 1
+
+    and: 'reads and observations of it are classified the same way'
+    TransientChecks.read('x', Mode.ZERO_DOWNTIME, accepting, 2950, 8000, 8010, entries, created) ==
+        'RESURRECTED_BY_RESUME_REPLAY'
+    TransientChecks.read('x', Mode.ZERO_DOWNTIME, ZD, 2950, 8000, 8010, entries, created) ==
+        'VIOLATION'
+    TransientChecks.observation(Mode.ZERO_DOWNTIME, accepting, 2950,
+        new Writers.Observation('x', 'createFoundExisting', 'P', 8995, 9000, entries)) ==
+        'RESURRECTED_BY_RESUME_REPLAY'
+  }
+
+  def 'the replay residual is decided from the marker at the kill: #why'() {
+    expect:
+    ReplayResidual.decide(marker, records, 'x', seqNo, { long base -> rank as long } as java.util.function.LongUnaryOperator)
+        .residual == residual
+
+    where:
+    why                                        | records | marker                                    | seqNo | rank | residual
+    'after the hot cursor, within four pages'  | true    | [checkpoint: 10, progress: [done: [], cursors: [hot: [seq_no: 100, ids: ['a']]]]] | 150 | 50 | true
+    'at the cursor, not among its ids'         | true    | [checkpoint: 10, progress: [done: [], cursors: [hot: [seq_no: 100, ids: ['a']]]]] | 100 | 1 | true
+    'at the cursor and among its ids'          | true    | [checkpoint: 10, progress: [done: [], cursors: [hot: [seq_no: 100, ids: ['x']]]]] | 100 | 1 | false
+    'before the cursor'                        | true    | [checkpoint: 10, progress: [done: [], cursors: [hot: [seq_no: 100, ids: []]]]] | 99 | 0 | false
+    'more than four pages after the cursor'    | true    | [checkpoint: 10, progress: [done: [], cursors: [hot: [seq_no: 100, ids: []]]]] | 9000 | 4001 | false
+    'no record yet, within four pages'         | true    | [checkpoint: 10]                          | 50    | 40   | true
+    'the hot pass recorded done'               | true    | [checkpoint: 10, progress: [done: ['hot'], cursors: [:]]] | 150 | 1 | false
+    'a library that records no progress'       | false   | [checkpoint: 10]                          | 50    | 40   | false
+    'not in the old index'                     | true    | [checkpoint: 10]                          | null  | 0    | false
+    'no marker at the kill'                    | true    | [:]                                       | 50    | 0    | false
+  }
+
+  def 'kill points: named mid-phase kills and AFTER_<PHASE>_<n>MS'() {
+    given:
+    def options = SoakOptions.parse(['elasticsearch', 'http://x', 'kill'] as String[])
+
+    expect:
+    KillScenario.MidKill.of('MID_RECONCILE', options) == new KillScenario.MidKill('FROZEN', 300)
+    KillScenario.MidKill.of('AFTER_FROZEN_20MS', options) == new KillScenario.MidKill('FROZEN', 20)
+    KillScenario.MidKill.of('AFTER_BACKFILL_MARKED_150MS', options) ==
+        new KillScenario.MidKill('BACKFILL_MARKED', 150)
+    KillScenario.MidKill.of('SWAPPED', options) == null
+  }
+
+  static Writers.Observation observed(String kind, long at, List<Entry> before) {
+    new Writers.Observation('x', kind, 'P', at - 5, at, before)
+  }
+
+  static Failure failure(String kind, String op, long at) {
+    new Failure('x', op, kind, 0, 'm', at - 5, at, 'P', false)
+  }
+
+  static Failure failure(String kind, String op, long startedAt, long at, boolean retried) {
+    new Failure('x', op, kind, 0, 'm', startedAt, at, 'P', retried)
+  }
+}

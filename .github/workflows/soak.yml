@@ -1,0 +1,118 @@
+name: Soak
+
+# Manual only: the soak scenarios take minutes per engine and are evidence for a release candidate,
+# not a gate on every change. See docs/soak.md.
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Scenario to run
+        type: choice
+        options: [ all, live, kill, bootstrap ]
+        default: all
+      docs:
+        description: Seeded documents (empty for the per-scenario defaults)
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: soak-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    name: soak (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: elasticsearch
+            label: es-8.19.23
+            version: '8.19.23'
+            image: docker.elastic.co/elasticsearch/elasticsearch:8.19.23
+            security: -e xpack.security.enabled=false -e "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+          - engine: elasticsearch
+            label: es-9.5.5
+            version: '9.5.5'
+            image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5
+            security: -e xpack.security.enabled=false -e "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+          - engine: opensearch
+            label: os-2.19.7
+            version: '2.19.7'
+            image: opensearchproject/opensearch:2.19.7
+            security: -e DISABLE_SECURITY_PLUGIN=true -e DISABLE_INSTALL_DEMO_CONFIG=true -e "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
+          - engine: opensearch
+            label: os-3.9.0
+            version: '3.9.0'
+            image: opensearchproject/opensearch:3.9.0
+            security: -e DISABLE_SECURITY_PLUGIN=true -e DISABLE_INSTALL_DEMO_CONFIG=true -e "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: true
+
+      - name: Raise vm.max_map_count for the search engine container
+        run: sudo sysctl -w vm.max_map_count=262144
+
+      # Disk watermarks off: a flood-stage read-only block would show up as BLOCKED writes.
+      - name: Start ${{ matrix.label }}
+        run: |
+          docker run -d --name soak-engine -p 9200:9200 \
+            -e discovery.type=single-node \
+            -e cluster.routing.allocation.disk.threshold_enabled=false \
+            ${{ matrix.security }} \
+            ${{ matrix.image }}
+          for _ in $(seq 1 90); do
+            if curl -fs 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s'; then
+              echo
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs soak-engine | tail -100
+          exit 1
+
+      - name: Soak
+        env:
+          SCENARIO: ${{ inputs.scenario }}
+          DOCS: ${{ inputs.docs }}
+        run: |
+          args="${{ matrix.engine }} http://localhost:9200 ${SCENARIO} --label ${{ matrix.label }} --expect-version ${{ matrix.version }}"
+          if [ -n "${DOCS}" ]; then
+            case "${DOCS}" in
+              *[!0-9]*) echo "docs must be a number: ${DOCS}"; exit 2 ;;
+            esac
+            args="${args} --docs ${DOCS}"
+          fi
+          ./gradlew :elastic-protos-testkit:soak --args="${args}"
+
+      - name: Upload soak reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: soak-${{ matrix.label }}
+          path: elastic-protos-testkit/build/soak/
+          if-no-files-found: warn
+
+      - name: Engine log on failure
+        if: failure()
+        run: docker logs soak-engine 2>&1 | tail -200
+
+      - name: Stop the engine
+        if: always()
+        run: docker rm -f soak-engine
