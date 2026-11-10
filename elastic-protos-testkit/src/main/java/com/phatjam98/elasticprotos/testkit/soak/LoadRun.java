@@ -65,13 +65,16 @@ final class LoadRun {
       return Timeline.strict(oldIndex, swappedAt);
     }
     long copiedAt = swappedAt > 0 ? clock.lastBefore("COPIED", swappedAt) : -1;
+    long caughtUpAt = swappedAt > 0 ? clock.lastBefore("CAUGHT_UP", swappedAt) : -1;
+    long snapshotAt = swappedAt > 0 ? clock.lastBefore("SNAPSHOT", swappedAt) : -1;
     // a ghost (a document deleted during a copy) can date from the first copy into a reused index
     long preparedAt = swappedAt > 0 ? clock.first("PREPARED") : -1;
     // the first reconcile that completed; when a run died while reconciling, the resumed one
     long bound = clock.first("RECONCILED");
     long sweptAt = clock.first("SWEPT");
     return new Timeline(oldIndex, preparedAt < 0 ? Long.MAX_VALUE : preparedAt,
-        copiedAt < 0 ? Long.MAX_VALUE : copiedAt, swappedAt,
+        copiedAt < 0 ? Long.MAX_VALUE : copiedAt, caughtUpAt < 0 ? Long.MAX_VALUE : caughtUpAt,
+        snapshotAt < 0 ? swappedAt : snapshotAt, swappedAt,
         bound < 0 ? Long.MAX_VALUE : bound, sweptAt < 0 ? Long.MAX_VALUE : sweptAt, true);
   }
 
@@ -93,8 +96,7 @@ final class LoadRun {
     long swapNotBefore;
     switch (mode) {
       case ZERO_DOWNTIME:
-        swapNotBefore = timeline.swappedAt() > 0
-            ? clock.lastBefore("SNAPSHOT", timeline.swappedAt()) : -1;
+        swapNotBefore = timeline.swappedAt() > 0 ? timeline.snapshotAt() : -1;
         break;
       case BLOCKING:
         swapNotBefore = clock.last("COPIED");

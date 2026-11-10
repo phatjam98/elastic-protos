@@ -12,8 +12,9 @@ import spock.lang.Specification
 class LogComparisonSpec extends Specification {
 
   // copy starts after 1000, the catch-up after 2000, the alias moves at 3000
-  // the first reconcile completes at 6000, the first sweep at 7000
-  static final Timeline ZD = new Timeline('old', 1000, 2000, 3000, 6000, 7000, true)
+  // the catch-up ends at 2400, the first reconcile completes at 6000, the first sweep at 7000
+  // the snapshot is reported at 2900
+  static final Timeline ZD = new Timeline('old', 1000, 2000, 2400, 2900, 3000, 6000, 7000, true)
   static final Timeline STRICT = Timeline.strict('old', 3000)
 
   static Entry seed(Map doc) { new Entry(OpType.SEED, doc, 0, 1, 'old', false) }
@@ -225,7 +226,11 @@ class LogComparisonSpec extends Specification {
     WriteFailures.documented(failure('NOT_FOUND', 'UPDATE', 3500), Mode.ZERO_DOWNTIME, ZD, late) ==
         'UPDATE_404_BEFORE_RECONCILE'
     WriteFailures.documented(failure('NOT_FOUND', 'UPDATE', 3500), Mode.ZERO_DOWNTIME, ZD, early) == null
-    WriteFailures.documented(failure('NOT_FOUND', 'UPDATE', 2900), Mode.ZERO_DOWNTIME, ZD, late) == null
+    WriteFailures.documented(failure('NOT_FOUND', 'UPDATE', 2850), Mode.ZERO_DOWNTIME, ZD, late) == null
+
+    and: 'a 404 between the snapshot and the SWAPPED report: the swap was already done'
+    WriteFailures.documented(failure('NOT_FOUND', 'UPDATE', 2950), Mode.ZERO_DOWNTIME, ZD, late) ==
+        'UPDATE_404_BEFORE_RECONCILE'
     WriteFailures.documented(failure('NOT_FOUND', 'UPDATE', 60000), Mode.ZERO_DOWNTIME, ZD, late) == null
     WriteFailures.documented(failure('CONFLICT', 'UPDATE', 3500), Mode.ZERO_DOWNTIME, ZD, late) == null
 
@@ -359,6 +364,18 @@ class LogComparisonSpec extends Specification {
     TransientChecks.read(Mode.BLOCKING, STRICT, 1000, 3100, 3110, late, [id: 'x', t: 'seed']) ==
         'VIOLATION'
     TransientChecks.read(Mode.BACKFILL, STRICT, -1, 3100, 3110, late, [id: 'x', t: 'seed']) ==
+        'VIOLATION'
+  }
+
+  def 'a ghost read may show a version the catch-up read, not one written after it'() {
+    given: 'created as the catch-up started (acknowledged after COPIED), deleted after the catch-up'
+    def caught = [onOld(OpType.CREATE, [id: 'c', t: 'caught'], 2050), onOld(OpType.DELETE, null, 2600, true)]
+    def tooLate = [onOld(OpType.CREATE, [id: 'c', t: 'late'], 2500), onOld(OpType.DELETE, null, 2600, true)]
+
+    expect:
+    TransientChecks.read(Mode.ZERO_DOWNTIME, ZD, 2950, 6500, 6510, caught, [id: 'c', t: 'caught']) ==
+        'GHOST_BEFORE_SWEEP'
+    TransientChecks.read(Mode.ZERO_DOWNTIME, ZD, 2950, 6500, 6510, tooLate, [id: 'c', t: 'late']) ==
         'VIOLATION'
   }
 

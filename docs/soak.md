@@ -169,17 +169,18 @@ Documented behaviour, counted apart:
 | Class | Mode | What |
 |---|---|---|
 | `BLOCKED_AFTER_SWAP` | zero downtime | a write sent before the swap and blocked after it (a straggler that resolved the alias to the old index) whose retry then succeeded |
-| `UPDATE_404_BEFORE_RECONCILE` | zero downtime | a partial update sent after the swap and before the reconcile bound, of a document the old index created after the catch-up |
+| `UPDATE_404_BEFORE_RECONCILE` | zero downtime | a partial update failing after the snapshot phase (the swap request follows it, and only the new index can answer 404 for a document the old index holds), sent before the reconcile bound, of a document the old index created after the catch-up |
 | `STALE_PARTIAL_UPDATE` | zero downtime | the first write of an id after the swap is a partial update sent before the reconcile bound, and the document equals that update applied to an earlier state, every write in between having gone to the old index after the catch-up |
 | `STALE_PARTIAL_UPDATE_ON_GHOST` | zero downtime | the same, where the stale copy is the one the first copy read (its base acknowledged before the copy start): the document was deleted from the old index during the copy and absent when the catch-up read it |
 | `RESURRECTED_AFTER_DELETE` | zero downtime | the old index created the document after the catch-up; every write of the new index was sent before the reconcile bound, the first found nothing there, none found it while the log held it deleted, and the last deleted it; the alias holds the old index's version |
 | `RECONCILE_WINDOW` (reads, observations) | zero downtime | stale reads, and writes that found the new index stale, sent between the swap and the reconcile bound |
-| `GHOST_BEFORE_SWEEP` (reads, observations) | zero downtime | a document deleted from the old index during the copy, read or found in the new index before the sweep |
+| `GHOST_BEFORE_SWEEP` (reads, observations) | zero downtime | a document deleted from the old index after a copy pass read it (a version acknowledged before the last `CAUGHT_UP`), read or found in the new index before the sweep |
 | `BLOCKING_WRITE_BLOCK` | blocking | a write sent before the swap and blocked by the write block |
 
 The ghost classes are not in the README or ADR 0007 yet: the catch-up copies no deletes and the
-sweep removes them after the swap, so until the sweep reads return documents deleted during the
-copy, and a partial update can land on such a copy and bring its deleted fields back (the
+sweep removes them after the swap, so until the sweep reads return documents deleted from the old
+index after a copy pass read them (the README only says the new index can lack writes until the
+reconcile, not that it shows deleted documents until the sweep), and a partial update can land on such a copy and bring its deleted fields back (the
 reconcile keeps the update). They are kept as separately named classes until documented.
 
 Everything else is a genuine violation: any other failed write; a stale read or an observation

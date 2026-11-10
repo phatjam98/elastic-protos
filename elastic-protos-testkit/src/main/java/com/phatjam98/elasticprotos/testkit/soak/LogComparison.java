@@ -69,6 +69,10 @@ public final class LogComparison {
    *     reported, epoch millis: the first copy starts right after it
    * @param copiedAt when the last {@code COPIED} phase before the effective swap was reported,
    *     epoch millis: writes sent after it may have missed the catch-up pass
+   * @param caughtUpAt when the last {@code CAUGHT_UP} before the effective swap was reported: a
+   *     version acknowledged after it was read by no copy pass
+   * @param snapshotAt when the last {@code SNAPSHOT} before the effective swap was reported: the
+   *     alias swap request is sent after it, so before it the alias surely pointed at the old index
    * @param swappedAt when the effective {@code SWAPPED} phase was reported, epoch millis, or 0
    * @param reconcileBound the first {@code RECONCILED}: after it the reconcile has reached every
    *     document (when a run died while reconciling, this is the resumed run's); {@link
@@ -77,18 +81,21 @@ public final class LogComparison {
    *     the copy) are gone from the new index after it; {@link Long#MAX_VALUE} when none
    * @param zeroDowntime whether the documented anomalies of the zero-downtime reindex apply
    */
-  public record Timeline(String oldIndex, long preparedAt, long copiedAt, long swappedAt,
-      long reconcileBound, long sweptAt, boolean zeroDowntime) {
+  public record Timeline(String oldIndex, long preparedAt, long copiedAt, long caughtUpAt,
+      long snapshotAt, long swappedAt, long reconcileBound, long sweptAt, boolean zeroDowntime) {
 
     /** A timeline without documented anomalies (blocking reindex, backfill, no migration). */
     public static Timeline strict(String oldIndex) {
-      return new Timeline(oldIndex, Long.MAX_VALUE, Long.MAX_VALUE, 0, Long.MAX_VALUE,
+      return new Timeline(oldIndex, Long.MAX_VALUE, Long.MAX_VALUE, Long.MAX_VALUE, 0, 0,
+          Long.MAX_VALUE,
           Long.MAX_VALUE, false);
     }
 
     /** A strict timeline that knows when the alias moved (blocking reindex). */
     public static Timeline strict(String oldIndex, long swappedAt) {
-      return new Timeline(oldIndex, Long.MAX_VALUE, Long.MAX_VALUE, swappedAt, Long.MAX_VALUE,
+      return new Timeline(oldIndex, Long.MAX_VALUE, Long.MAX_VALUE, Long.MAX_VALUE, swappedAt,
+          swappedAt,
+          Long.MAX_VALUE,
           Long.MAX_VALUE, false);
     }
   }
@@ -244,8 +251,8 @@ public final class LogComparison {
 
   /**
    * Whether a read that found {@code actual} where the log holds the document as deleted saw a
-   * ghost: a version the copy or the catch-up read from the old index (acknowledged before the
-   * last {@code COPIED}), deleted from the old index afterwards, with no write of the new index
+   * ghost: a version a copy pass could have read from the old index (acknowledged before the last
+   * {@code CAUGHT_UP}), deleted from the old index afterwards, with no write of the new index
    * since. The sweep removes such documents; until then reads return them.
    */
   public static boolean ghost(List<Entry> entries, Map<String, Object> actual,
@@ -259,7 +266,7 @@ public final class LogComparison {
       }
     }
     for (int i = 0; i < entries.size(); i++) {
-      if (entries.get(i).ackedAt() < timeline.copiedAt()
+      if (entries.get(i).ackedAt() < timeline.caughtUpAt()
           && same(OpLog.replay(entries.subList(0, i + 1)), actual)) {
         return true;
       }
@@ -269,8 +276,8 @@ public final class LogComparison {
 
   /**
    * Whether the log of an id that it holds as deleted could leave a ghost in the new index: only
-   * the old index wrote it, and a version existed that the copy or the catch-up read (acknowledged
-   * before the last {@code COPIED}).
+   * the old index wrote it, and a version existed that a copy pass could have read (acknowledged
+   * before the last {@code CAUGHT_UP}).
    */
   public static boolean ghostPossible(List<Entry> entries, Timeline timeline) {
     if (OpLog.replay(entries) != null) {
@@ -282,7 +289,7 @@ public final class LogComparison {
       }
     }
     for (int i = 0; i < entries.size(); i++) {
-      if (entries.get(i).ackedAt() < timeline.copiedAt()
+      if (entries.get(i).ackedAt() < timeline.caughtUpAt()
           && OpLog.replay(entries.subList(0, i + 1)) != null) {
         return true;
       }

@@ -57,10 +57,10 @@ public final class WriteFailures {
    *   <li>{@code BLOCKED_AFTER_SWAP} (zero downtime): a straggler that resolved the alias to the
    *       old index before the swap (sent before it) and was blocked after it, whose retry against
    *       the alias then succeeded (README "Limitations");
-   *   <li>{@code UPDATE_404_BEFORE_RECONCILE} (zero downtime): a partial update sent after the
-   *       swap and before the reconcile bound, of a document the old index acknowledged after the
-   *       catch-up began, which the new index lacks until the reconcile creates it (README
-   *       "Zero-downtime reindex");
+   *   <li>{@code UPDATE_404_BEFORE_RECONCILE} (zero downtime): a partial update failing after the
+   *       snapshot phase (the swap request follows it), sent before the reconcile bound, of a
+   *       document the old index acknowledged after the catch-up began, which the new index lacks
+   *       until the reconcile creates it (README "Zero-downtime reindex");
    *   <li>{@code BLOCKING_WRITE_BLOCK} (blocking reindex): a write sent before the swap, during
    *       the write block.
    * </ul>
@@ -80,7 +80,10 @@ public final class WriteFailures {
             && failure.startedAt() < timeline.swappedAt() && retriedOk(failure, history)) {
           return "BLOCKED_AFTER_SWAP";
         }
-        if ("NOT_FOUND".equals(failure.kind()) && "UPDATE".equals(failure.op()) && swapped
+        // a 404 of a document the old index holds can only come from the new index, so once the
+        // swap request may have been sent (after SNAPSHOT) it needs no later bound
+        if ("NOT_FOUND".equals(failure.kind()) && "UPDATE".equals(failure.op())
+            && timeline.swappedAt() > 0 && failure.at() >= timeline.snapshotAt()
             && failure.startedAt() < timeline.reconcileBound()
             && createdLateOnOld(failure, timeline, history)) {
           return "UPDATE_404_BEFORE_RECONCILE";
