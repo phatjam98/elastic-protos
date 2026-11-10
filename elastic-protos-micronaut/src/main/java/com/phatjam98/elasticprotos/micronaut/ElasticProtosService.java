@@ -20,6 +20,7 @@ import com.phatjam98.elasticprotos.proto.Pagination;
 import com.phatjam98.elasticprotos.proto.SearchCriteria;
 import com.phatjam98.elasticprotos.query.AggregationResults;
 import com.phatjam98.elasticprotos.query.CompiledSearch;
+import com.phatjam98.elasticprotos.query.CompositePager;
 import com.phatjam98.elasticprotos.query.PaginationSupport;
 import com.phatjam98.elasticprotos.query.QueryCompiler;
 import com.phatjam98.elasticprotos.query.SearchPager;
@@ -232,6 +233,33 @@ public class ElasticProtosService {
     SearchResult result = engine.search(List.of(definition.alias()), compiled.body());
     return new AggregationPage(AggregationResults.of(result), result.total(),
         compiled.warnings());
+  }
+
+  /**
+   * Returns a pager over every bucket of a composite aggregation of the criteria, one page of
+   * buckets per request; each request runs only that aggregation, without hits or highlights.
+   * Only that request is compiled, so other aggregations of the criteria are neither checked nor
+   * reported; its compiler warnings are logged once, when the pager is created.
+   *
+   * @param criteria what to aggregate; it must hold a top-level composite aggregation named
+   *     {@code name}
+   * @param type the generated message class whose alias is searched
+   * @param name the name of the composite aggregation
+   * @return the pager; nothing is requested before its first {@code hasNext()}
+   * @throws IllegalArgumentException when the criteria have no such composite aggregation, or a
+   *     lenient compiler skipped it
+   * @throws com.phatjam98.elasticprotos.query.QueryCompileException when the request does not fit
+   *     the index
+   */
+  public CompositePager composite(SearchCriteria criteria, Class<? extends Message> type,
+      String name) {
+    IndexDefinition definition = definition(type);
+    CompositePager pager = CompositePager.open(engine, compiler, List.of(definition.alias()),
+        criteria, definition, name);
+    if (!pager.warnings().isEmpty() && LOG.isWarnEnabled()) {
+      LOG.warn("Search on {}: {}", definition.alias(), String.join("; ", pager.warnings()));
+    }
+    return pager;
   }
 
   private static void logWarnings(IndexDefinition definition, CompiledSearch compiled) {

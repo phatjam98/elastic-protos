@@ -260,6 +260,17 @@ public final class Criteria {
   }
 
   /**
+   * Returns the conditions the criteria would build, one per branch, criteria-wide predicates such
+   * as {@link #fullText} included: the OR of ANDs of {@code SearchCriteria.search_condition}, for
+   * the condition of a filter or filters aggregation ({@link Aggs#filter}).
+   *
+   * @return the conditions; empty when there are no predicates
+   */
+  public List<SearchCondition> conditions() {
+    return build().getSearchConditionList();
+  }
+
+  /**
    * Builds the criteria.
    *
    * @return the {@link SearchCriteria}
@@ -386,6 +397,17 @@ public final class Criteria {
      */
     public SearchCriteria build() {
       return parent.build();
+    }
+
+    /**
+     * Returns the conditions of the whole criteria this branch belongs to ({@link
+     * Criteria#conditions()}), every branch included, so that a fluent chain with {@code or()}
+     * keeps all of them.
+     *
+     * @return the conditions, OR-ed
+     */
+    public List<SearchCondition> conditions() {
+      return parent.conditions();
     }
 
     private Branch add(String field, SearchOperationType operation, FlatValue value,

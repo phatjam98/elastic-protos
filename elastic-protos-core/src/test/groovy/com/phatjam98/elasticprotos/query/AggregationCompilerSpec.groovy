@@ -21,6 +21,7 @@ import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
 import com.phatjam98.elasticprotos.proto.example.TypedMaps
 import com.phatjam98.elasticprotos.proto.test.Geo
+import com.phatjam98.elasticprotos.proto.test.Library
 import spock.lang.Shared
 import spock.lang.Specification
 import spock.lang.Unroll
@@ -32,6 +33,7 @@ class AggregationCompilerSpec extends Specification {
   @Shared IndexDefinition firm = mapper.map(Firm)
   @Shared IndexDefinition geo = mapper.map(Geo)
   @Shared IndexDefinition typedMaps = mapper.map(TypedMaps)
+  @Shared IndexDefinition library = mapper.map(Library)
   @Shared QueryCompiler strict = QueryCompiler.withDefaults()
   @Shared QueryCompiler lenient = QueryCompiler.of(QueryCompilerConfig.standard().withLenient(true))
 
@@ -113,12 +115,109 @@ class AggregationCompilerSpec extends Specification {
     error(document, Aggregation.newBuilder().setName('x').setMetric(MetricAggregation.newBuilder().setType(MetricType.MAX))).contains('needs a field')
   }
 
-  def "metrics take no sub-aggregations and sub-aggregations take none of their own"() {
+  def "metrics take no sub-aggregations, and aggregations nest down to maxAggregationDepth levels"() {
     expect:
     error(document, Aggs.sub(Aggs.max('m', 'size_bytes'), Aggs.min('n', 'size_bytes')))
         .contains("Metric aggregation 'm' cannot have sub-aggregations")
-    error(document, Aggs.sub(Aggs.terms('a', 'type'),
-        Aggs.sub(Aggs.terms('b', 'tags'), Aggs.max('c', 'size_bytes')))).contains('only one level is supported')
+
+    and: 'three levels by default'
+    aggs(document, Aggs.sub(Aggs.terms('a', 'type'),
+        Aggs.sub(Aggs.terms('b', 'tags'), Aggs.max('c', 'size_bytes')))).a.aggs.b.aggs.c == [max: [field: 'size_bytes']]
+    error(document, Aggs.sub(Aggs.terms('a', 'type'), Aggs.sub(Aggs.terms('b', 'tags'),
+        Aggs.sub(Aggs.terms('c', 'firm_id'), Aggs.max('d', 'size_bytes')))))
+        .contains("Aggregation 'c' is on level 3 and cannot have sub-aggregations: at most 3 levels are allowed (QueryCompilerConfig.maxAggregationDepth)")
+  }
+
+  def "maxAggregationDepth is configurable, down to no sub-aggregations at all"() {
+    given:
+    def flat = QueryCompiler.of(QueryCompilerConfig.standard().withMaxAggregationDepth(1))
+    def deep = QueryCompiler.of(QueryCompilerConfig.standard().withMaxAggregationDepth(4))
+    def fourLevels = Aggs.sub(Aggs.terms('a', 'type'), Aggs.sub(Aggs.terms('b', 'tags'),
+        Aggs.sub(Aggs.terms('c', 'firm_id'), Aggs.max('d', 'size_bytes'))))
+
+    when:
+    compile(flat, document, Aggs.sub(Aggs.terms('a', 'type'), Aggs.max('m', 'size_bytes')))
+
+    then:
+    def e = thrown(QueryCompileException)
+    e.message.contains("Aggregation 'a' is on level 1 and cannot have sub-aggregations: at most 1 level is allowed")
+
+    expect:
+    compile(flat, document, Aggs.terms('a', 'type')).body().aggs.a == [terms: [field: 'type']]
+    compile(deep, document, fourLevels).body().aggs.a.aggs.b.aggs.c.aggs.d == [max: [field: 'size_bytes']]
+  }
+
+  def "the wrappers, their names and BY_METRIC order paths work at every level"() {
+    when: 'type > nested role (ordered by a reverse-nested metric) > reverse-nested cardinality'
+    def a = aggs(document, Aggs.sub(Aggs.terms('by_type', 'type'),
+        Aggs.sub(terms('roles', 'parties.role') { addOrder(order(TermsOrderBy.BY_METRIC, 'firms')) },
+            Aggs.cardinality('firms', 'firm_id'), Aggs.count('emails', 'parties.email'))))
+
+    then:
+    a.by_type.aggs.keySet() == ['roles__nested'] as Set
+    a.by_type.aggs.roles__nested == [nested: [path: 'parties'], aggs: [roles: [
+        terms: [field: 'parties.role', order: ['firms__reverse>firms': 'desc']],
+        aggs: [emails: [value_count: [field: 'parties.email']],
+               firms__reverse: [reverse_nested: [:], aggs: [firms: [cardinality: [field: 'firm_id']]]]]]]]
+
+    when: 'two nested levels below a nested bucket, then back up to the root'
+    def lib = aggs(library, Aggs.sub(Aggs.terms('labels', 'shelves.label'),
+        Aggs.sub(Aggs.terms('books', 'shelves.books.name'), Aggs.terms('cities', 'city'))))
+
+    then:
+    lib.labels__nested.aggs.labels.aggs.books__nested.aggs.books.aggs ==
+        [cities__reverse: [reverse_nested: [:], aggs: [cities: [terms: [field: 'city']]]]]
+  }
+
+  def "maxAggregationBuckets refuses paths whose requested bucket counts multiply beyond it"() {
+    given:
+    def guarded = QueryCompiler.of(QueryCompilerConfig.standard().withMaxAggregationBuckets(1000))
+
+    when: '100 x 10 (terms default) = 1000 passes'
+    compile(guarded, document, Aggs.sub(terms('a', 'type') { size = 100 }, Aggs.terms('b', 'tags')))
+
+    then:
+    noExceptionThrown()
+
+    when: '100 x 11 does not'
+    compile(guarded, document, Aggs.sub(terms('a', 'type') { size = 100 }, terms('b', 'tags') { size = 11 }))
+
+    then:
+    def e = thrown(QueryCompileException)
+    e.message.contains("Aggregations 'a>b' ask for up to 1100 buckets (the product of their sizes), more than the maximum of 1000 (QueryCompilerConfig.maxAggregationBuckets)")
+
+    when: 'ranges and filters count their buckets, histograms, filter and nested wrappers count one'
+    compile(QueryCompiler.of(guarded.config().withMaxAggregationDepth(4)), document, Aggs.sub(Aggs.range('r', 'size_bytes', Aggs.bucket(null, 1d, 2d), Aggs.bucket(null, 2d, 3d)),
+        Aggs.sub(Aggs.histogram('h', 'size_bytes', 10), Aggs.sub(Aggs.filters('f',
+            Aggs.keyed('x', Criteria.where('type').equalTo('A')), Aggs.keyed('y', Criteria.where('type').equalTo('B')))
+            .tap { filtersBuilder.setOtherBucketKey('rest') }, terms('t', 'tags') { size = 200 }))))
+
+    then: '2 x 1 x 3 x 200 = 1200'
+    def e2 = thrown(QueryCompileException)
+    e2.message.contains("'r>h>f>t' ask for up to 1200 buckets")
+
+    when: 'a nested path is reported without its wrappers'
+    compile(guarded, document, Aggs.sub(terms('a', 'type') { size = 100 }, terms('r', 'parties.role') { size = 11 }))
+
+    then:
+    def e3 = thrown(QueryCompileException)
+    e3.message.contains("Aggregations 'a>r' ask for up to 1100 buckets")
+
+    when: 'validation comes first, and aggregations lenient mode skipped do not count'
+    compile(guarded, document, Aggs.sub(terms('a__x', 'type') { size = 100 }, terms('b', 'tags') { size = 11 }))
+
+    then:
+    def e4 = thrown(QueryCompileException)
+    e4.message.contains("must not contain '__'")
+
+    expect:
+    compile(QueryCompiler.of(guarded.config().withLenient(true)), document,
+        Aggs.sub(terms('a', 'type') { size = 100 }, terms('b', 'nope') { size = 11 })).warnings() ==
+        ["Skipped aggregation 'b' on unknown field 'nope'"]
+
+    and: 'the guard is off by default'
+    compile(strict, document, Aggs.sub(terms('a', 'type') { size = 1000 }, terms('b', 'tags') { size = 1000 }))
+        .body().aggs.a.aggs.b.terms.size == 1000
   }
 
   // ---- unknown fields ----------------------------------------------------------------------

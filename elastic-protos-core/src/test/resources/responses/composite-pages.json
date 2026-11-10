@@ -1,0 +1,95 @@
+{
+  "page1": {
+    "pairs": {
+      "after_key": {
+        "firm": "firm-2",
+        "month": "2024-03",
+        "relevance": null
+      },
+      "buckets": [
+        {
+          "key": {
+            "firm": "firm-1",
+            "month": "2024-01",
+            "relevance": null
+          },
+          "doc_count": 1,
+          "total": {
+            "value": 120000.0
+          }
+        },
+        {
+          "key": {
+            "firm": "firm-1",
+            "month": "2024-05",
+            "relevance": null
+          },
+          "doc_count": 1,
+          "total": {
+            "value": 250000.0
+          }
+        },
+        {
+          "key": {
+            "firm": "firm-2",
+            "month": "2024-02",
+            "relevance": null
+          },
+          "doc_count": 1,
+          "total": {
+            "value": 45000.0
+          }
+        },
+        {
+          "key": {
+            "firm": "firm-2",
+            "month": "2024-03",
+            "relevance": null
+          },
+          "doc_count": 1,
+          "total": {
+            "value": 30000.0
+          }
+        }
+      ]
+    }
+  },
+  "page2": {
+    "pairs": {
+      "after_key": {
+        "firm": "firm-3",
+        "month": "2024-06",
+        "relevance": 0.75
+      },
+      "buckets": [
+        {
+          "key": {
+            "firm": "firm-3",
+            "month": "2024-04",
+            "relevance": null
+          },
+          "doc_count": 1,
+          "total": {
+            "value": 8000.0
+          }
+        },
+        {
+          "key": {
+            "firm": "firm-3",
+            "month": "2024-06",
+            "relevance": 0.75
+          },
+          "doc_count": 1,
+          "total": {
+            "value": 2500000.0
+          }
+        }
+      ]
+    }
+  },
+  "page3": {
+    "pairs": {
+      "buckets": []
+    }
+  }
+}

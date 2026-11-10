@@ -1,0 +1,46 @@
+{
+  "aggs" : {
+    "roles__nested" : {
+      "aggs" : {
+        "roles" : {
+          "aggs" : {
+            "docs__reverse" : {
+              "aggs" : {
+                "docs" : {
+                  "cardinality" : {
+                    "field" : "id"
+                  }
+                }
+              },
+              "reverse_nested" : { }
+            }
+          },
+          "composite" : {
+            "sources" : [ {
+              "role" : {
+                "terms" : {
+                  "field" : "parties.role"
+                }
+              }
+            }, {
+              "name" : {
+                "terms" : {
+                  "field" : "parties.name.keyword"
+                }
+              }
+            } ]
+          }
+        }
+      },
+      "nested" : {
+        "path" : "parties"
+      }
+    }
+  },
+  "from" : 0,
+  "query" : {
+    "match_all" : { }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

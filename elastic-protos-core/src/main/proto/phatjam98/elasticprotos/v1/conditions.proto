@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package phatjam98.elasticprotos.v1;
+
+import "phatjam98/elasticprotos/v1/flat_struct.proto";
+
+option java_package = "com.phatjam98.elasticprotos.proto";
+option java_multiple_files = true;
+option java_outer_classname = "ConditionProtos";
+
+// The predicates of a search: SearchCondition and FieldCondition with their options. They are
+// used by SearchCriteria (search_criteria.proto, which imports this file publicly) and by the
+// filter and filters aggregations (aggregations.proto). They lived in search_criteria.proto
+// before 1.0.0; the full names, field numbers and generated Java classes are unchanged.
+
+// A conjunction: (FieldCondition1 AND FieldCondition2 AND ...).
+message SearchCondition {
+  repeated FieldCondition field_condition = 1;
+}
+
+// One predicate on one field. For FULL_TEXT the field may be empty to search every
+// full-text field of the index, or full_text.fields may list fields with boosts.
+message FieldCondition {
+  string field = 1;
+  SearchOperationType operation = 2;
+  FlatValue value = 3;
+  bool negate = 4;               // wrap the predicate in must_not
+  FullTextOptions full_text = 5; // only read for FULL_TEXT
+}
+
+// Options for FULL_TEXT (multi_match) queries.
+message FullTextOptions {
+  repeated FieldBoost fields = 1;
+  FullTextOperator operator = 2;
+  string fuzziness = 3;              // "", "AUTO", "0", "1", "2"
+  FullTextType type = 4;
+  int32 minimum_should_match_pct = 5; // 0 means engine default
+}
+
+message FieldBoost {
+  string field = 1;
+  float boost = 2;  // 0 means 1.0
+}
+
+enum FullTextOperator {
+  OPERATOR_OR = 0;
+  OPERATOR_AND = 1;
+}
+
+enum FullTextType {
+  BEST_FIELDS = 0;
+  MOST_FIELDS = 1;
+  CROSS_FIELDS = 2;
+  PHRASE = 3;
+  PHRASE_PREFIX = 4;
+  BOOL_PREFIX = 5;
+}
+
+// The predicate to apply. Operations are validated against the field's mapped type.
+enum SearchOperationType {
+  reserved 2, 41;                     // NOT (use FieldCondition.negate) and SET_INCLUDES (use ANY_IN)
+  reserved "NOT", "SET_INCLUDES";
+
+  SEARCH_UNSUPPORTED = 0;
+  EQUALS = 1;        // term; text fields use their keyword sub-field
+  EXISTS = 3;        // exists
+
+  TEXT_MATCHES = 11; // match on a text field
+  TEXT_CONTAINS = 12;// match_phrase on text, wildcard on keyword
+  TEXT_PREFIX = 13;  // prefix on a keyword field
+  TEXT_SUFFIX = 14;  // leading-wildcard on a keyword field; disabled unless allowed by the compiler
+  TEXT_REGEX = 15;   // regexp on a keyword field; needs QueryCompilerConfig.allowRegex
+
+  NUM_RANGE = 21;    // range on numeric or date fields
+
+  GEO_INTERSECTS = 31;   // geo_shape relation intersects
+  GEO_CONTAINS = 32;     // geo_shape relation contains
+  GEO_CONTAINED = 33;    // geo_shape relation within
+  GEO_DISTANCE = 34;     // geo_distance on a geo_point
+  GEO_BOUNDING_BOX = 35; // geo_bounding_box on a geo_point
+
+  ANY_IN = 51;       // terms
+
+  FULL_TEXT = 61;    // multi_match across full-text fields
+}

@@ -185,13 +185,14 @@ class ConfigTypesSpec extends Specification {
         .allowLeadingWildcards(true).lenient(true).trackTotalHits(TrackTotalHits.upTo(500))
         .maxResultWindow(50_000).defaultSize(25).defaultKeepAlive(Duration.ofMinutes(5))
         .groupNested(false).shardDocTiebreaker(false).allowScriptSort(true).allowRegex(true)
-        .maxPageSize(1_000).maxTermsSize(50).build()
+        .maxPageSize(1_000).maxTermsSize(50).maxAggregationDepth(5).maxAggregationBuckets(9_000).build()
     def copied = QueryCompilerConfig.standard()
         .withAllowLeadingWildcards(true).withLenient(true)
         .withTrackTotalHits(TrackTotalHits.upTo(500)).withMaxResultWindow(50_000)
         .withDefaultSize(25).withDefaultKeepAlive(Duration.ofMinutes(5)).withGroupNested(false)
         .withShardDocTiebreaker(false).withAllowScriptSort(true).withAllowRegex(true)
-        .withMaxPageSize(1_000).withMaxTermsSize(50)
+        .withMaxPageSize(1_000).withMaxTermsSize(50).withMaxAggregationDepth(5)
+        .withMaxAggregationBuckets(9_000)
 
     expect:
     QueryCompilerConfig.builder().build() == QueryCompilerConfig.standard()
@@ -204,7 +205,12 @@ class ConfigTypesSpec extends Specification {
     built.toString() == 'QueryCompilerConfig[allowLeadingWildcards=true, lenient=true,' +
         ' trackTotalHits=500, maxResultWindow=50000, defaultSize=25, defaultKeepAlive=PT5M,' +
         ' groupNested=false, shardDocTiebreaker=false, allowScriptSort=true, allowRegex=true,' +
-        ' maxPageSize=1000, maxTermsSize=50]'
+        ' maxPageSize=1000, maxTermsSize=50, maxAggregationDepth=5, maxAggregationBuckets=9000]'
+    built.maxAggregationDepth() == 5
+    built.maxAggregationBuckets() == 9_000L
+    QueryCompilerConfig.standard().maxAggregationDepth() == QueryCompilerConfig.DEFAULT_MAX_AGGREGATION_DEPTH
+    QueryCompilerConfig.standard().maxAggregationDepth() == 3
+    QueryCompilerConfig.standard().maxAggregationBuckets() == 0L
     !built.equals('x')
   }
 
@@ -233,6 +239,8 @@ class ConfigTypesSpec extends Specification {
     'allowRegex'            | { it.withAllowRegex(true) }
     'maxPageSize'           | { it.withMaxPageSize(11) }
     'maxTermsSize'          | { it.withMaxTermsSize(11) }
+    'maxAggregationDepth'   | { it.withMaxAggregationDepth(2) }
+    'maxAggregationBuckets' | { it.withMaxAggregationBuckets(100) }
   }
 
   @Unroll
@@ -250,6 +258,8 @@ class ConfigTypesSpec extends Specification {
     'negative size'    | { it.defaultSize(-1) }                             || IllegalArgumentException | 'defaultSize must not be negative: -1'
     'zero page cap'    | { it.maxPageSize(0) }                              || IllegalArgumentException | 'maxPageSize must be positive: 0'
     'zero terms cap'   | { it.maxTermsSize(0) }                             || IllegalArgumentException | 'maxTermsSize must be positive: 0'
+    'zero depth'       | { it.maxAggregationDepth(0) }                      || IllegalArgumentException | 'maxAggregationDepth must be positive: 0'
+    'neg. buckets'     | { it.maxAggregationBuckets(-1) }                   || IllegalArgumentException | 'maxAggregationBuckets must not be negative: -1'
     'size above cap'   | { it.maxPageSize(9) }                              || IllegalArgumentException | 'defaultSize 10 must not exceed maxPageSize 9'
     'null keep-alive'  | { it.defaultKeepAlive(null) }                      || NullPointerException     | 'defaultKeepAlive'
     'zero keep-alive'  | { it.defaultKeepAlive(Duration.ZERO) }             || IllegalArgumentException | 'defaultKeepAlive must be positive: PT0S'

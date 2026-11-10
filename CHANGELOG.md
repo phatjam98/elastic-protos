@@ -20,6 +20,42 @@ requires Java 17. It is not API-compatible with the pre-1.0 `com.phatjam98.elast
 packages, and the private geobuf dependency is gone. The `1.0.0-rc.1`, `1.0.0-rc.2` and
 `1.0.0-rc.3` pre-releases precede it.
 
+### Since 1.0.0-rc.3
+
+#### Added
+
+- Filter, filters and composite aggregations and deeper sub-aggregations
+  ([ADR 0012](docs/adr/0012-filter-composite-and-deeper-aggregations.md)): `Aggregation.filter`
+  (`FilterAggregation`), `filters` (`FiltersAggregation`, `KeyedFilter`, `other_bucket_key`) and
+  `composite` (`CompositeAggregation` with terms, date histogram and histogram `CompositeSource`s,
+  `order`, `missing_bucket`, `size` and an `after` key). Filter conditions are `repeated
+  SearchCondition`, an OR of ANDs compiled like the query's conditions; in lenient mode a filter
+  (or filters) aggregation whose condition names an unknown field is skipped whole. With a nested
+  path as `Aggregation.field` a filter counts the nested objects at that path. Composite is
+  top-level only, its sources in one nested context. `Aggs.filter`, `filters`, `keyed`,
+  `composite`, `termsSource`, `dateHistogramSource`, `histogramSource` and `after`;
+  `Criteria.conditions()` and `Criteria.Branch.conditions()` (every branch).
+- `AggregationResults.bucket(name)` (single-bucket results), `afterKey(name)` and
+  `Bucket.compositeKey()`; `CompositePager` pages through every bucket of a composite (and
+  throws if the engine repeats an after key); `ElasticProtosService.composite(criteria, type,
+  name)`.
+- `QueryCompilerConfig.maxAggregationDepth` (default 3, top level included) and
+  `maxAggregationBuckets` (default 0, off), with the Micronaut properties
+  `elastic-protos.query.max-aggregation-depth` and `max-aggregation-buckets`.
+- `InMemorySearchEngine` (testkit) runs `filter` and `filters` aggregations and sub-aggregations
+  at any depth; `composite` fails with `BAD_REQUEST`.
+
+#### Changed
+
+- Sub-aggregations may nest down to `maxAggregationDepth` levels instead of one.
+- `SearchCondition`, `FieldCondition`, `FullTextOptions`, `FieldBoost` and the enums
+  `FullTextOperator`, `FullTextType` and `SearchOperationType` moved from `search_criteria.proto`
+  to the new `conditions.proto`, which `search_criteria.proto` imports publicly. Names, field
+  numbers, encodings and Java classes are unchanged; their descriptors now belong to
+  `ConditionProtos`. Consumers running `buf breaking` at `FILE` level against 1.0.0-rc.3 see this
+  as a deletion from `search_criteria.proto` and need a one-time exception; `PACKAGE` and
+  `WIRE_JSON` are clean.
+
 ### Since 1.0.0-rc.2
 
 #### Added

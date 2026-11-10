@@ -63,8 +63,8 @@ unchanged and be compiled on the server against the index definition.
   types, 64-bit integers and timestamps.
 - `QueryCompiler`: `SearchCriteria` to a search body, validated against the mapped field types, with
   full-text search, negation, automatic `nested` wrapping, sorting, from/size and point-in-time paging,
-  aggregations (terms, histograms, ranges, metrics) read back through typed `AggregationResults`, and
-  highlighting.
+  aggregations (terms, histograms, ranges, filters, composite with paging, metrics; several levels
+  deep) read back through typed `AggregationResults`, and highlighting.
 - One `SearchEngine` SPI over plain JSON maps, with adapters for Elasticsearch 8.x/9.x and OpenSearch
   2.x/3.x, and a thread-safe `BulkBuffer`.
 - Optional Micronaut 4 module: configuration properties, bean factories, startup bootstrap and a
@@ -914,7 +914,8 @@ after differ until they are rewritten.
 ## Query DSL
 
 `SearchCriteria` (in `search_criteria.proto`) is an OR of `SearchCondition`s, each an AND of
-`FieldCondition`s, plus sorting, pagination, [aggregations](#aggregations) and
+`FieldCondition`s (both in `conditions.proto`, which `search_criteria.proto` imports publicly), plus
+sorting, pagination, [aggregations](#aggregations) and
 [highlighting](#highlighting). Build it with the generated builders or with the
 fluent `Criteria` helper, and compile it against an `IndexDefinition`:
 
@@ -1098,6 +1099,9 @@ SearchCriteria criteria = Criteria.where("type").equalTo("FILING").end()
 | `metric` | `min`, `max` | numeric, date | `min` / `max` |
 | | `avg`, `sum` | numeric | `avg` / `sum` |
 | | `count`, `cardinality` | any exact-match field, including keys of flattened fields | `value_count` / `cardinality` on the exact-match path |
+| `filter` | `filter(name, condition)`, `filter(name, nestedPath, condition)` | none, or a nested path | `filter` with the condition compiled like a query condition (see [Filter and filters](#filter-and-filters)) |
+| `filters` | `filters(name, keyed(key, condition)...)` | none, or a nested path | `filters` with one query per key, and `other_bucket_key` |
+| `composite` | `composite(name, termsSource(...), dateHistogramSource(...), histogramSource(...))` | none; the sources name theirs | `composite` with `sources`, `size` (at most `maxTermsSize`) and `after` (see [Composite and paging](#composite-and-paging)) |
 
 Metrics are `MetricAggregation { type }` messages (`Aggs.min(...)` and the like build them).
 `cardinality` is approximate: the engines count with HyperLogLog++, exactly only below the precision
@@ -1117,8 +1121,13 @@ when lenient):
   be a key of the engines' bucket objects (`key`, `key_as_string`, `doc_count`, `buckets`, `value`,
   `value_as_string`, `from`, `to`, `from_as_string`, `to_as_string`, `sum_other_doc_count`,
   `doc_count_error_upper_bound`, `meta`).
-- **One level of sub-aggregations**: bucket aggregations take sub-aggregations, which take none of
-  their own; metrics take none.
+- **Depth**: bucket aggregations take sub-aggregations down to
+  `QueryCompilerConfig.maxAggregationDepth` levels, the top level included (default 3:
+  `elastic-protos.query.max-aggregation-depth`); metrics take none. When
+  `maxAggregationBuckets` is positive (default 0, off; `max-aggregation-buckets`), a path of
+  aggregations whose requested bucket counts multiply beyond it is refused: terms and composite
+  `size` (10 when unset), range buckets and filters count, histograms count one since their bucket
+  count depends on the data.
 - **Text** fields aggregate through their `.keyword` sub-field; text without one is refused with a
   pointer to `keyword_subfield`. Whole `flattened` fields, objects, nested paths, geo and binary
   fields are refused.
@@ -1174,6 +1183,93 @@ response would exceed `search.max_buckets` (65,536 by default) even when every `
 Nested paths inside the values of a typed map are refused: the engines have no `ignore_unmapped`
 for `nested` aggregations, and such paths are mapped only once a key is used.
 
+#### Filter and filters
+
+A `filter` aggregation is one bucket of what matches its condition; `filters` has one keyed bucket
+per condition, plus an optional bucket (`other_bucket_key`) for what matches none. A condition is
+`repeated SearchCondition`, an OR of ANDs exactly like `SearchCriteria.search_condition`, compiled
+by the query compiler: typed, through `.keyword` sub-fields, with nested fields wrapped in `nested`
+queries. At least one `SearchCondition` is required; one without field conditions matches
+everything. A `Criteria` (or any of its branches) passed to `Aggs.filter` or `Aggs.keyed`
+contributes every branch, `or()` included (`Criteria.conditions()`). In lenient mode a filter whose
+condition names an unknown field is skipped as a whole, with a warning, instead of counting more
+than asked; so is a `filters` aggregation if any of its conditions does, since a missing bucket
+would change the other bucket:
+
+```java
+Aggs.sub(Aggs.filter("filings", Criteria.where("type").equalTo("FILING")
+        .and("parties.role").equalTo("PLAINTIFF")),            // documents with a plaintiff
+    Aggs.sum("total", "size_bytes"));
+
+Aggregation.Builder kinds = Aggs.filters("kinds",
+    Aggs.keyed("filings", Criteria.where("type").equalTo("FILING")),
+    Aggs.keyed("acme", Criteria.where("parties.name").matches("acme")));
+kinds.getFiltersBuilder().setOtherBucketKey("rest");          // what matches neither
+
+Aggs.sub(Aggs.filter("plaintiffs", "parties",                  // the plaintiff parties themselves
+        Criteria.where("parties.role").equalTo("PLAINTIFF")),
+    Aggs.terms("names", "parties.name"),
+    Aggs.cardinality("docs", "id"));                           // ... and their documents
+
+Aggs.filter("decided", Criteria.where("type").equalTo("ORDER")
+    .or().where("tags").equalTo("closed"));                    // an OR of two conditions
+```
+
+A filter runs in the nested context of its parent, like any aggregation: at the top level it tests
+documents, and a condition on `parties.role` asks whether a document has such a party. With a
+nested path as `field` (`Aggs.filter(name, nestedPath, condition)`, or `setField` on `filters`), it
+is wrapped in `<name>__nested` and tests the nested objects one by one. Under a bucket of a nested
+field (such as terms on `parties.role`), a filter already runs on the parties. In a nested context,
+fields of that context are tested directly, deeper nested fields get `nested` queries for the
+remaining levels, and fields outside the context are refused: the engines cannot test them there
+(and a `nested` query on the path already entered returns wrong counts). `FULL_TEXT` without fields
+searches the full-text fields inside the context, and `EXISTS` on a nested path the context has
+entered is always true. Sub-aggregations of a filter run in its context. Testing root fields from
+inside a nested context (a `reverse_nested` filter) is not supported yet; it can be added later as
+a new field of `FilterAggregation` and `FiltersAggregation` (see ADR 0012).
+
+#### Composite and paging
+
+A `composite` aggregation returns buckets for every combination of the values of its sources, in
+the order of the sources, a page at a time. Sources are `terms` (text through `.keyword`, keys of
+flattened fields allowed), `date_histogram` (calendar or fixed interval, `time_zone`, `format`) and
+`histogram`, each with an `order` and `missing_bucket` (documents without the field get a `null`
+key). Each page returns an `after_key`, to send as `after` for the next page:
+
+```java
+Aggregation.Builder pairs = Aggs.composite("pairs",
+    Aggs.termsSource("firm", "firm_id"),
+    Aggs.dateHistogramSource("month", "filed_at", CalendarInterval.MONTH),
+    Aggs.termsSource("relevance", "relevance").setMissingBucket(true));
+pairs.getCompositeBuilder().setSize(500);
+SearchCriteria criteria = Criteria.builder()
+    .aggregate(Aggs.sub(pairs, Aggs.sum("total", "size_bytes")))
+    .build();
+
+CompositePager.forEachBucket(engine, compiler, List.of(documents.alias()), criteria, documents,
+    "pairs", bucket -> {
+      Map<String, Object> key = bucket.compositeKey();   // {firm=firm-1, month=..., relevance=null}
+      Double total = bucket.sub().metric("total").value();   // null when no document had it
+    });
+```
+
+`CompositePager` compiles the request once, when it is opened (invalid criteria, or a composite a
+lenient compiler skipped, fail there), and sends only the named composite (no hits, no hit count,
+no highlighting) with the criteria's conditions. It passes each `after_key` on and stops at the
+first page without buckets or `after_key`; a short page is not taken as the last one, since the
+engines do not promise that. An engine that returns the after key it was sent makes it throw.
+Each page is a separate search: no point in time holds the data still. `pager.afterKey()` resumes
+later (`Aggs.after(composite, key)`), and `ElasticProtosService.composite(criteria, type, name)`
+returns a pager for a message type. To page by hand, check that the page has buckets (a page
+without them is the last), then read `aggs.afterKey("pairs")` and set it with `Aggs.after`. In
+proto3 JSON, a null (missing bucket) value of `after` is written `{}`.
+
+A composite must be a top-level aggregation (the engines accept it only there or directly under
+`nested`). When its sources are inside nested objects it is wrapped in `<name>__nested`, and all
+its sources must then share their nested path; its sub-aggregations run in that context. Its
+`size` is at most `maxTermsSize` (raise it to page in larger steps; the engines allow up to
+`search.max_buckets`). Source names follow the character rules of aggregation names.
+
 #### Reading the results
 
 `AggregationResults` looks results up by the names in the criteria and unwraps the
@@ -1198,15 +1294,22 @@ long firms = aggs.metric("firms").asLong();
 date terms and for date histograms (epoch millis), a `Long` `1` or `0` for boolean terms (with
 `keyAsString` `"true"` / `"false"`), a `Double` for histograms and floating-point terms),
 `keyAsString` (dates in the form `2024-06-30T08:00:00.000Z`), `docCount`, `from`/`to` and their `*AsString` forms for range buckets, and
-`sub`, the results inside the bucket. `MetricValue` has `value()` (null when no document had the
-field), `valueAsString()`, `isPresent()` and `asLong()`. Keyed (object-shaped) buckets are read too.
-An unknown name throws `NoSuchElementException` listing the names present; `buckets` on a metric or
-`metric` on a bucket aggregation throws `IllegalStateException`. `names()`, `has(name)` and `raw()`
-inspect the response.
+`sub`, the results inside the bucket, read the same way at any depth. Filters buckets have their
+key as `key`; composite buckets have a `Map` of source name to value (`compositeKey()`; boolean
+terms are `Boolean`s, a missing bucket `null`). `bucket(name)` reads the single bucket of a filter
+(its key is null, and `keyString()` too), and `afterKey(name)` the `after_key` of a composite page
+with buckets (empty when the engine returned none; a page without buckets, the last one, cannot be
+told from an empty histogram and throws). The adapters parse responses into key-sorted maps, so keyed buckets (filters, the
+other bucket included) come sorted by key and composite keys by source name. `MetricValue` has
+`value()` (null when no document had the field), `valueAsString()`, `isPresent()` and `asLong()`.
+Keyed (object-shaped) buckets are read too. An unknown name throws `NoSuchElementException`
+listing the names present; `buckets` on a metric or a filter, `bucket` on a metric or a
+multi-bucket aggregation, `metric` on a bucket aggregation and `afterKey` on anything but a
+composite throw `IllegalStateException`. `names()`, `has(name)` and `raw()` inspect the response.
 
 `SearchPager` sends the aggregations with the first page only (they cover every match) and
-highlighting with every page. Pipeline, filter, composite and other aggregations not listed here
-still go into a copy of the body by hand.
+highlighting with every page. Pipeline aggregations and other kinds not listed here still go into a
+copy of the body by hand.
 
 ### Highlighting
 
@@ -1497,7 +1600,8 @@ the total, the `next` pagination, the compiler warnings and the `aggregations` o
 (`AggregationResults`, empty when there are none). `aggregate(criteria, type)` runs only the
 aggregations, with no hits or highlights, and returns an `AggregationPage` with the `results`, the
 `total` of matching documents (`-1` when totals are not tracked) and the compiler `warnings`. Both
-methods log compiler warnings at `WARN`.
+methods log compiler warnings at `WARN`. `composite(criteria, type, name)` returns a
+`CompositePager` over every bucket of a composite aggregation.
 
 ```java
 AggregationPage perType = elastic.aggregate(
@@ -1557,7 +1661,9 @@ that do not fit together such as a `max-page-size` below `default-size`, abort
 | `elastic-protos.query.allow-script-sort` | `false` | Accept script sorts; callers then run Painless on the cluster |
 | `elastic-protos.query.allow-regex` | `false` | Accept `TEXT_REGEX` (a pattern without a literal prefix also needs `allow-leading-wildcards`) |
 | `elastic-protos.query.max-page-size` | `10000` | Largest page size, with or without a point in time |
-| `elastic-protos.query.max-terms-size` | `1000` | Largest `size` of a terms aggregation |
+| `elastic-protos.query.max-terms-size` | `1000` | Largest `size` of a terms or composite aggregation |
+| `elastic-protos.query.max-aggregation-depth` | `3` | Levels of aggregations, the top level included |
+| `elastic-protos.query.max-aggregation-buckets` | `0` (off) | Largest product of requested bucket counts along a path of aggregations |
 | `elastic-protos.bulk.actions` | `500` | `bulkBuffer(...)` sends a batch at this many operations |
 | `elastic-protos.bulk.flush-interval` | `1s` | Also send at this interval; `0s` disables |
 | `elastic-protos.bulk.max-bytes` | `5MB` | Send a batch at about this size |
@@ -1586,12 +1692,15 @@ before 3.3); `pager(...)` always adapts.
   stay untyped. Keys of typed maps must not be blank or contain dots, and every distinct key adds
   fields that count toward `index.mapping.total_fields.limit` (and nested fields in the values
   toward `index.mapping.nested_fields.limit`) at index time (see [Mapping](#default-rules)).
-- The aggregation DSL covers terms, date histograms, histograms, ranges and single-value metrics
-  with one level of sub-aggregations; pipeline, filter, composite and other aggregations go into a
-  copy of the body by hand. Aggregations and sorts on nested paths inside typed map values are
-  refused. Highlighting covers text fields outside nested objects (nested fields would need `inner_hits`).
-  `InMemorySearchEngine` (testkit) runs only terms, the six metrics, `nested` and `reverse_nested`
-  aggregations, and ignores `highlight`.
+- The aggregation DSL covers terms, date histograms, histograms, ranges, filter, filters,
+  composite and single-value metrics, nested down to `maxAggregationDepth` levels; pipeline,
+  multi-value metric (stats, percentiles, top hits) and other aggregations go into a copy of the
+  body by hand. Composite is top-level only, with its sources in one nested context; a filter in a
+  nested context cannot test fields outside it; terms order `BY_METRIC` only by a direct metric
+  sub-aggregation. Aggregations and sorts on nested paths inside typed map values are refused.
+  Highlighting covers text fields outside nested objects (nested fields would need `inner_hits`).
+  `InMemorySearchEngine` (testkit) runs only terms, filter, filters, the six metrics, `nested` and
+  `reverse_nested` aggregations, and ignores `highlight`.
 - The migration lock compares the holder's `expires_at` with the reader's clock, so the clocks of
   the instances must agree to well within `lockTtl`; it uses no fencing tokens (see
   [Running from several instances](#running-from-several-instances)).

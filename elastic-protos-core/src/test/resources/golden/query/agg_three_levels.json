@@ -1,0 +1,44 @@
+{
+  "aggs" : {
+    "by_type" : {
+      "aggs" : {
+        "roles__nested" : {
+          "aggs" : {
+            "roles" : {
+              "aggs" : {
+                "firms__reverse" : {
+                  "aggs" : {
+                    "firms" : {
+                      "cardinality" : {
+                        "field" : "firm_id"
+                      }
+                    }
+                  },
+                  "reverse_nested" : { }
+                }
+              },
+              "terms" : {
+                "field" : "parties.role",
+                "order" : {
+                  "firms__reverse>firms" : "desc"
+                }
+              }
+            }
+          },
+          "nested" : {
+            "path" : "parties"
+          }
+        }
+      },
+      "terms" : {
+        "field" : "type"
+      }
+    }
+  },
+  "from" : 0,
+  "query" : {
+    "match_all" : { }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

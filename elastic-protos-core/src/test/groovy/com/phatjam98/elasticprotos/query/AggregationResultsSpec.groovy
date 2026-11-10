@@ -206,4 +206,195 @@ class AggregationResultsSpec extends Specification {
     then:
     thrown(UnsupportedOperationException)
   }
+
+  // ---- filter, filters, composite and three levels ------------------------------------------
+
+  /**
+   * The aggregations of one search over the testkit sample documents (golden-equivalent criteria:
+   * filters 'kinds' with other bucket 'rest' and a max, filter 'filings' with a nested condition,
+   * filter 'plaintiffs' over the nested parties, terms 'by_type' > nested terms 'roles' >
+   * reverse-nested cardinality 'firms', a nested composite 'roles_by_name' and filters
+   * 'none_matched'). Recorded from Elasticsearch 8.19.23 and 9.5.5 and OpenSearch 2.19.7 and
+   * 3.9.0: their aggregations were identical once keys were sorted, and the keyed buckets came in
+   * the same order on all four; the file keeps Elasticsearch 9.5.5's key order.
+   */
+  static AggregationResults recorded() {
+    AggregationResults.of(Json.parseObject(
+        new File('src/test/resources/responses/aggregations-filters-composite.json').text))
+  }
+
+  /** The three pages of composite 'pairs' (size 4), recorded like {@link #recorded()}. */
+  static Map<String, AggregationResults> pages() {
+    Json.parseObject(new File('src/test/resources/responses/composite-pages.json').text)
+        .collectEntries { name, aggs -> [(name): AggregationResults.of((Map) aggs)] }
+  }
+
+  def "filters buckets are keyed, and come sorted by key"() {
+    when:
+    def kinds = recorded().buckets('kinds')
+
+    then:
+    kinds*.key() == ['acme', 'filings', 'rest']
+    kinds*.docCount() == [2L, 3L, 2L]
+    kinds*.sub()*.metric('latest')*.valueAsString() ==
+        ['2024-02-20T14:00:00.000Z', '2024-06-30T08:00:00.000Z', '2024-04-05T16:45:00.000Z']
+    recorded().buckets('none_matched')[0].sub().buckets('tags')*.key() == ['civil', 'urgent']
+  }
+
+  def "a filter is a single bucket, also over nested objects behind the wrapper"() {
+    when:
+    def aggs = recorded()
+
+    then:
+    aggs.bucket('filings').key() == null
+    aggs.bucket('filings').docCount() == 1L
+    aggs.bucket('filings').sub().metric('total').value() == 120_000d
+
+    and: 'three plaintiff parties, in three documents'
+    aggs.has('plaintiffs')
+    aggs.raw().containsKey('plaintiffs__nested')
+    aggs.bucket('plaintiffs').docCount() == 3L
+    aggs.bucket('plaintiffs').sub().buckets('names')*.key() == ['Acme Corp', 'Initech LLC', 'Jane Doe']
+    aggs.bucket('plaintiffs').sub().metric('docs').asLong() == 3L
+  }
+
+  def "three levels: type > nested roles > reverse-nested firm count, unwrapped at every level"() {
+    when:
+    def byType = recorded().buckets('by_type')
+
+    then:
+    byType*.key() == ['FILING', 'MOTION', 'NOTICE', 'ORDER']
+    byType[0].sub().names() == ['roles'] as Set
+    byType[0].sub().buckets('roles')*.key() == ['DEFENDANT', 'PLAINTIFF']
+    byType[0].sub().buckets('roles')*.docCount() == [2L, 1L]
+    byType[0].sub().buckets('roles')*.sub()*.metric('firms')*.asLong() == [2L, 1L]
+    byType[2].sub().buckets('roles')*.key() == ['COUNSEL']
+  }
+
+  def "composite buckets have map keys (sorted by source name, as the adapters parse them), and the after key resumes"() {
+    when:
+    def aggs = recorded()
+    def buckets = aggs.buckets('roles_by_name')
+
+    then: 'a nested composite, unwrapped'
+    buckets.size() == 7
+    buckets[0].key() == [role: 'COUNSEL', name: 'Saul Goodman']
+    buckets[0].compositeKey().keySet() as List == ['name', 'role']
+    buckets[0].keyString() == '{name=Saul Goodman, role=COUNSEL}'
+    buckets[2].docCount() == 2L
+    buckets[2].sub().metric('docs').asLong() == 2L
+    aggs.afterKey('roles_by_name') == Optional.of([role: 'PLAINTIFF', name: 'Jane Doe'])
+
+    when: 'the pages of a composite with a missing bucket'
+    def pages = pages()
+
+    then:
+    pages.page1.buckets('pairs')*.key() == [
+        [firm: 'firm-1', month: '2024-01', relevance: null], [firm: 'firm-1', month: '2024-05', relevance: null],
+        [firm: 'firm-2', month: '2024-02', relevance: null], [firm: 'firm-2', month: '2024-03', relevance: null]]
+    pages.page1.afterKey('pairs').get() == [firm: 'firm-2', month: '2024-03', relevance: null]
+    pages.page2.buckets('pairs')*.key()*.relevance == [null, 0.75d]
+    pages.page2.buckets('pairs')[1].sub().metric('total').asLong() == 2_500_000L
+    pages.page2.afterKey('pairs').get() == [firm: 'firm-3', month: '2024-06', relevance: 0.75d]
+
+    and: 'the last page has neither buckets nor an after key'
+    pages.page3.buckets('pairs').isEmpty()
+    when: 'a page without buckets cannot be told from an empty histogram, so it has no after key to read'
+    pages.page3.afterKey('pairs')
+
+    then:
+    thrown(IllegalStateException)
+  }
+
+  def "composite keys are unmodifiable and normalized like other keys"() {
+    given:
+    def bucket = AggregationResults.of([c: [buckets: [[key: [a: 1, b: 2.5d, c: true, d: null], doc_count: 1]]]])
+        .buckets('c')[0]
+
+    when:
+    bucket.compositeKey().put('x', 1)
+
+    then:
+    thrown(UnsupportedOperationException)
+    bucket.compositeKey() == [a: 1L, b: 2.5d, c: true, d: null]
+    bucket.compositeKey().a instanceof Long
+  }
+
+  def "kind mismatches for single-bucket and composite aggregations"() {
+    given:
+    def aggs = recorded()
+
+    when:
+    aggs.buckets('filings')
+
+    then:
+    def single = thrown(IllegalStateException)
+    single.message == "Aggregation 'filings' has no buckets; it is a single-bucket aggregation, read it with bucket(\"filings\")"
+
+    when:
+    aggs.metric('filings')
+
+    then:
+    def singleMetric = thrown(IllegalStateException)
+    singleMetric.message.contains('it is a single-bucket aggregation, read it with bucket("filings")')
+
+    when:
+    aggs.bucket('kinds')
+
+    then:
+    def multi = thrown(IllegalStateException)
+    multi.message == "Aggregation 'kinds' has several buckets; read them with buckets(\"kinds\")"
+
+    when:
+    sample().bucket('counted')
+
+    then:
+    def metric = thrown(IllegalStateException)
+    metric.message.contains('it is a metric, read it with metric("counted")')
+
+    when:
+    aggs.afterKey('by_type')
+
+    then:
+    def notComposite = thrown(IllegalStateException)
+    notComposite.message == "Aggregation 'by_type' is not a composite aggregation with buckets; only composite aggregations have an after key, and a composite page without buckets (the last one) has none"
+
+    when:
+    AggregationResults.of([h: [buckets: []]]).afterKey('h')
+
+    then:
+    thrown(IllegalStateException)
+
+    expect: 'a filter bucket has no key string'
+    aggs.bucket('filings').keyString() == null
+
+    when:
+    sample().afterKey('bands')
+
+    then:
+    thrown(IllegalStateException)
+
+    when:
+    aggs.afterKey('filings')
+
+    then:
+    thrown(IllegalStateException)
+
+    when:
+    aggs.bucket('nope')
+
+    then:
+    def missing = thrown(NoSuchElementException)
+    missing.message.contains("No aggregation named 'nope'; present: [")
+
+    when:
+    buckets(aggs)[0].compositeKey()
+
+    then:
+    thrown(IllegalStateException)
+  }
+
+  private static List<AggregationResults.Bucket> buckets(AggregationResults aggs) {
+    aggs.buckets('by_type')
+  }
 }

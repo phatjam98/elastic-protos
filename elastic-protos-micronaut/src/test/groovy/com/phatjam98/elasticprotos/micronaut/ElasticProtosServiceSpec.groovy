@@ -202,6 +202,65 @@ class ElasticProtosServiceSpec extends Specification {
         ["Skipped EQUALS on unknown field 'nope'"]
   }
 
+  def "aggregate reads filter, filters and three-level aggregations"() {
+    given:
+    service.bulkIndex(SampleData.documents())
+
+    when:
+    def page = service.aggregate(Criteria.builder().aggregate(
+        Aggs.filters('kinds', Aggs.keyed('filings', Criteria.where('type').equalTo('FILING')),
+            Aggs.keyed('motions', Criteria.where('type').equalTo('MOTION'))),
+        Aggs.sub(Aggs.filter('plaintiffs', 'parties', Criteria.where('parties.role').equalTo('PLAINTIFF')),
+            Aggs.cardinality('docs', 'id')),
+        Aggs.sub(Aggs.terms('by_type', 'type'), Aggs.sub(Aggs.terms('roles', 'parties.role'),
+            Aggs.cardinality('firms', 'firm_id')))).build(), Document)
+
+    then:
+    page.results().buckets('kinds').collectEntries { [(it.key()): it.docCount()] } == [filings: 3L, motions: 1L]
+    page.results().bucket('plaintiffs').sub().metric('docs').asLong() == 3L
+    page.results().buckets('by_type')[0].sub().buckets('roles')*.sub()*.metric('firms')*.asLong() == [2L, 1L]
+  }
+
+  def "composite returns a pager that runs only that aggregation, page by page"() {
+    given:
+    com.phatjam98.elasticprotos.engine.SearchEngine fake = Mock()
+    def paging = new ElasticProtosService(fake, service.codec(), QueryCompiler.withDefaults(), null, null)
+    def criteria = Criteria.where('type').equalTo('FILING').end()
+        .aggregate(Aggs.composite('pairs', Aggs.termsSource('firm', 'firm_id')), Aggs.terms('t', 'tags')).build()
+    List<Map> bodies = []
+
+    when:
+    def pager = paging.composite(criteria, Document, 'pairs')
+    def keys = []
+    pager.forEachRemaining { page -> keys.addAll(page*.key()) }
+
+    then:
+    2 * fake.search(['documents'], _) >> { args ->
+      bodies << args[1]
+      bodies.size() == 1
+          ? new com.phatjam98.elasticprotos.engine.SearchResult(3, true, [], null,
+              [pairs: [after_key: [firm: 'firm-3'], buckets: [[key: [firm: 'firm-1'], doc_count: 2], [key: [firm: 'firm-3'], doc_count: 1]]]], 1)
+          : new com.phatjam98.elasticprotos.engine.SearchResult(3, true, [], null, [pairs: [buckets: []]], 1)
+    }
+    keys == [[firm: 'firm-1'], [firm: 'firm-3']]
+    bodies*.aggs*.keySet() == [['pairs'] as Set, ['pairs'] as Set]
+    bodies[1].aggs.pairs.composite.after == [firm: 'firm-3']
+    pager.afterKey() == Optional.of([firm: 'firm-3'])
+
+    when: 'the in-memory engine refuses composite aggregations, like other unsupported kinds'
+    service.composite(criteria, Document, 'pairs').hasNext()
+
+    then:
+    def e = thrown(EngineException)
+    e.kind == EngineException.Kind.BAD_REQUEST
+
+    when:
+    service.composite(criteria, Document, 't')
+
+    then:
+    thrown(IllegalArgumentException)
+  }
+
   def "the six-component SearchPage constructor supplies empty aggregations"() {
     expect:
     new SearchPage([], [], 0, true, null, []).aggregations() == AggregationResults.empty()

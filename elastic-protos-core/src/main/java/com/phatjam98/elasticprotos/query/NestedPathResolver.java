@@ -79,6 +79,8 @@ public final class NestedPathResolver {
 
   private final IndexDefinition index;
   private final boolean groupNested;
+  private final List<String> context;
+  private final String contextOwner;
 
   /**
    * Creates a resolver.
@@ -87,13 +89,72 @@ public final class NestedPathResolver {
    * @param groupNested whether to group clauses that share their innermost nested path
    */
   public NestedPathResolver(IndexDefinition index, boolean groupNested) {
-    this.index = Objects.requireNonNull(index, "index");
-    this.groupNested = groupNested;
+    this(index, groupNested, List.of(), null);
   }
 
-  /** Returns the nested paths enclosing a field, outermost first. */
+  /**
+   * Creates a resolver for clauses that run inside nested objects, as the condition of a filter
+   * aggregation in a nested context does: the nested paths of the context are already entered, so
+   * they are not wrapped again, and fields outside the context are refused.
+   *
+   * @param index the index whose nested paths apply
+   * @param groupNested whether to group clauses that share their innermost nested path
+   * @param context the nested paths already entered, outermost first; empty for root documents
+   * @param contextOwner what runs in the context, for error messages, such as {@code "filter
+   *     aggregation 'x'"}; may be null when the context is empty
+   */
+  public NestedPathResolver(IndexDefinition index, boolean groupNested, List<String> context,
+      String contextOwner) {
+    this.index = Objects.requireNonNull(index, "index");
+    this.groupNested = groupNested;
+    this.context = List.copyOf(context);
+    this.contextOwner = contextOwner;
+  }
+
+  /** Returns whether the resolver runs inside nested objects. */
+  public boolean hasContext() {
+    return !context.isEmpty();
+  }
+
+  /** Returns the innermost nested path of the context, or null without a context. */
+  public String contextPath() {
+    return context.isEmpty() ? null : context.get(context.size() - 1);
+  }
+
+  /** Returns what runs in the context, for error messages; null without a context. */
+  public String contextOwner() {
+    return contextOwner;
+  }
+
+  /** Returns whether a path is one of the nested paths the context has entered. */
+  public boolean entered(String path) {
+    return context.contains(path);
+  }
+
+  /** Returns whether a field is inside the context (always true without a context). */
+  public boolean inContext(String fieldPath) {
+    List<String> all = index.nestedAncestors(fieldPath);
+    return all.size() >= context.size() && all.subList(0, context.size()).equals(context);
+  }
+
+  /**
+   * Returns the nested paths enclosing a field, outermost first, without the paths of the context.
+   *
+   * @throws QueryCompileException when the field is outside the context
+   */
   public List<String> ancestors(String fieldPath) {
-    return index.nestedAncestors(fieldPath);
+    List<String> all = index.nestedAncestors(fieldPath);
+    if (context.isEmpty()) {
+      return all;
+    }
+    if (!inContext(fieldPath)) {
+      String path = context.get(context.size() - 1);
+      throw new QueryCompileException("Field '" + fieldPath + "' is outside nested path '" + path
+          + "', which " + contextOwner + " runs in; a condition on nested objects can only test"
+          + " fields inside them (filter the documents instead, outside the nested context)",
+          fieldPath);
+    }
+    return all.subList(context.size(), all.size());
   }
 
   /** Returns the innermost nested path enclosing a field, or null when it is top-level. */

@@ -226,4 +226,18 @@ class CriteriaSpec extends Specification {
     built.toBuilder().setPagination(Pagination.newBuilder().setSize(1)).build().pagination.size == 1
     built.getSearchCondition(0).getFieldCondition(0) instanceof FieldCondition
   }
+
+  def "conditions returns every branch of the criteria, criteria-wide predicates included, from any branch"() {
+    given:
+    def criteria = Criteria.builder().fullText('merger')
+    def first = criteria.condition().where('type').equalTo('MOTION').and('tags').not().anyOf('x')
+    def second = first.or().where('type').equalTo('ORDER')
+
+    expect:
+    second.conditions() == criteria.build().searchConditionList
+    first.conditions() == second.conditions()
+    second.conditions()*.fieldConditionList*.collect { it.field } == [['type', 'tags', ''], ['type', '']]
+    second.conditions()[0].getFieldCondition(1).negate
+    Criteria.builder().conditions().isEmpty()
+  }
 }

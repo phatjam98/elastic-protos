@@ -124,6 +124,8 @@ class ConfigurationDefaultsSpec extends Specification {
     !config.query.allowRegex
     config.query.maxPageSize == 10000
     config.query.maxTermsSize == 1000
+    config.query.maxAggregationDepth == 3
+    config.query.maxAggregationBuckets == 0L
     config.query.trackTotalHits == TrackTotalHits.exact()
     config.bulk.actions == 500
     config.bulk.flushInterval == Duration.ofSeconds(1)

@@ -1,0 +1,47 @@
+{
+  "aggs" : {
+    "kinds" : {
+      "aggs" : {
+        "latest" : {
+          "max" : {
+            "field" : "filed_at"
+          }
+        }
+      },
+      "filters" : {
+        "filters" : {
+          "acme" : {
+            "bool" : {
+              "must" : [ {
+                "nested" : {
+                  "path" : "parties",
+                  "query" : {
+                    "match" : {
+                      "parties.name" : "acme"
+                    }
+                  }
+                }
+              } ]
+            }
+          },
+          "filings" : {
+            "bool" : {
+              "filter" : [ {
+                "term" : {
+                  "type" : "FILING"
+                }
+              } ]
+            }
+          }
+        },
+        "other_bucket_key" : "rest"
+      }
+    }
+  },
+  "from" : 0,
+  "query" : {
+    "match_all" : { }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

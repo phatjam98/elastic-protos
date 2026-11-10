@@ -76,6 +76,7 @@ import com.phatjam98.elasticprotos.proto.example.TypedMapLevel
 import com.phatjam98.elasticprotos.proto.example.TypedMaps
 import com.phatjam98.elasticprotos.query.AggregationResults
 import com.phatjam98.elasticprotos.query.Aggs
+import com.phatjam98.elasticprotos.query.CompositePager
 import com.phatjam98.elasticprotos.query.Criteria
 import com.phatjam98.elasticprotos.query.QueryCompiler
 import com.phatjam98.elasticprotos.query.QueryCompilerConfig
@@ -585,6 +586,99 @@ abstract class EngineIntegrationSpec extends Specification {
     then:
     aggs.buckets('tiers').collectEntries { [(it.key()): it.docCount()] } == [gold: 1L]
     aggs.metric('tier_count').asLong() == 1L
+  }
+
+  def "filter and filters aggregations count documents, and nested objects behind a nested path"() {
+    when: 'verified on Elasticsearch 8.19 and 9.5 and OpenSearch 2.19 and 3.9'
+    def aggs = aggregate(documents, Criteria.builder().aggregate(
+        Aggs.sub(Aggs.filters('kinds', Aggs.keyed('filings', Criteria.where('type').equalTo('FILING')),
+            Aggs.keyed('acme', Criteria.where('parties.name').matches('acme')))
+            .tap { filtersBuilder.setOtherBucketKey('rest') }, Aggs.max('latest', 'filed_at')),
+        Aggs.sub(Aggs.filter('filings', Criteria.where('type').equalTo('FILING').and('parties.role').equalTo('PLAINTIFF')),
+            Aggs.sum('total', 'size_bytes')),
+        Aggs.sub(Aggs.filter('plaintiffs', 'parties', Criteria.where('parties.role').equalTo('PLAINTIFF')),
+            Aggs.terms('names', 'parties.name'), Aggs.cardinality('docs', 'id')),
+        Aggs.sub(Aggs.terms('roles', 'parties.role'),
+            Aggs.filter('with_email', Criteria.where('parties.email').startsWith('legal@'))),
+        Aggs.filter('filings_or_orders', Criteria.where('type').equalTo('FILING').or().where('type').equalTo('ORDER'))))
+
+    then: 'keyed buckets come sorted by key; a document falls into every bucket it matches'
+    aggs.buckets('kinds')*.key() == ['acme', 'filings', 'rest']
+    aggs.buckets('kinds')*.docCount() == [2L, 3L, 2L]
+    aggs.buckets('kinds')[2].sub().metric('latest').valueAsString().startsWith('2024-04-05')
+
+    and: 'a nested condition at the top level counts documents'
+    aggs.bucket('filings').docCount() == 1L
+    aggs.bucket('filings').sub().metric('total').asLong() == 120_000L
+
+    and: 'a filter over the parties counts parties, and steps out to count their documents'
+    aggs.bucket('plaintiffs').docCount() == 3L
+    aggs.bucket('plaintiffs').sub().buckets('names')*.key() == ['Acme Corp', 'Initech LLC', 'Jane Doe']
+    aggs.bucket('plaintiffs').sub().metric('docs').asLong() == 3L
+
+    and: 'OR branches of a filter are all kept'
+    aggs.bucket('filings_or_orders').docCount() == 4L
+
+    and: 'under a nested bucket the condition tests the same party'
+    aggs.buckets('roles').collectEntries { [(it.key()): it.sub().bucket('with_email').docCount()] } ==
+        [DEFENDANT: 1L, PLAINTIFF: 1L, COUNSEL: 0L]
+  }
+
+  def "a composite aggregation pages through every bucket, with a missing bucket, a nested source and its after key"() {
+    given:
+    def pairs = Aggs.composite('pairs', Aggs.termsSource('firm', 'firm_id'),
+        Aggs.dateHistogramSource('month', 'filed_at', CalendarInterval.MONTH).tap { dateHistogramBuilder.setFormat('yyyy-MM') },
+        Aggs.termsSource('relevance', 'relevance').setMissingBucket(true))
+    pairs.compositeBuilder.setSize(4)
+    def criteria = Criteria.builder().aggregate(Aggs.sub(pairs, Aggs.sum('total', 'size_bytes'))).build()
+
+    when: 'verified on Elasticsearch 8.19 and 9.5 and OpenSearch 2.19 and 3.9'
+    def pager = CompositePager.open(engine, compiler, [documents.alias()], criteria, documents, 'pairs')
+    List<List<AggregationResults.Bucket>> pages = []
+    while (pager.hasNext()) {
+      pages << pager.next()
+    }
+
+    then: 'two pages, the second one short, then an empty one ends it'
+    pages*.size() == [4, 2]
+    pages.flatten()*.compositeKey() == [
+        [firm: 'firm-1', month: '2024-01', relevance: null], [firm: 'firm-1', month: '2024-05', relevance: null],
+        [firm: 'firm-2', month: '2024-02', relevance: null], [firm: 'firm-2', month: '2024-03', relevance: null],
+        [firm: 'firm-3', month: '2024-04', relevance: null], [firm: 'firm-3', month: '2024-06', relevance: 0.75d]]
+    pages.flatten()*.sub()*.metric('total')*.asLong() == [120_000L, 250_000L, 45_000L, 30_000L, 8_000L, 2_500_000L]
+    pager.afterKey() == Optional.of([firm: 'firm-3', month: '2024-06', relevance: 0.75d])
+
+    when: 'a nested composite, read one page at a time with the after key'
+    def roles = Aggs.composite('roles', Aggs.termsSource('role', 'parties.role'), Aggs.termsSource('name', 'parties.name'))
+    roles.compositeBuilder.setSize(5)
+    def first = aggregate(documents, Criteria.builder().aggregate(Aggs.sub(roles, Aggs.cardinality('docs', 'id'))))
+    // Aggs.sub added 'docs' to the builder already
+    def second = aggregate(documents, Criteria.builder().aggregate(
+        Aggs.after(roles.clone(), first.afterKey('roles').get())))
+
+    then:
+    first.buckets('roles')*.compositeKey()*.role == ['COUNSEL', 'DEFENDANT', 'DEFENDANT', 'DEFENDANT', 'PLAINTIFF']
+    first.buckets('roles')[2].compositeKey() == [name: 'Globex Corp', role: 'DEFENDANT']
+    first.buckets('roles')[2].docCount() == 2L
+    first.buckets('roles')[2].sub().metric('docs').asLong() == 2L
+    second.buckets('roles')*.compositeKey() == [[name: 'Initech LLC', role: 'PLAINTIFF'], [name: 'Jane Doe', role: 'PLAINTIFF']]
+  }
+
+  def "a three-level aggregation: type, then nested role, then a reverse-nested count of firms"() {
+    when: 'verified on Elasticsearch 8.19 and 9.5 and OpenSearch 2.19 and 3.9'
+    def aggs = aggregate(documents, Criteria.builder().aggregate(Aggs.sub(Aggs.terms('by_type', 'type'),
+        Aggs.sub(Aggs.terms('roles', 'parties.role').setTerms(TermsAggregation.newBuilder()
+            .addOrder(TermsOrder.newBuilder().setBy(TermsOrderBy.BY_METRIC).setMetric('firms'))),
+            Aggs.cardinality('firms', 'firm_id'), Aggs.max('latest', 'filed_at')))))
+
+    then:
+    aggs.buckets('by_type')*.key() == ['FILING', 'MOTION', 'NOTICE', 'ORDER']
+    aggs.buckets('by_type').collectEntries { type ->
+      [(type.key()): type.sub().buckets('roles').collectEntries { [(it.key()): it.sub().metric('firms').asLong()] }]
+    } == [FILING: [DEFENDANT: 2L, PLAINTIFF: 1L], MOTION: [DEFENDANT: 1L, PLAINTIFF: 1L],
+          NOTICE: [COUNSEL: 1L], ORDER: [DEFENDANT: 1L, PLAINTIFF: 1L]]
+    aggs.buckets('by_type')[0].sub().buckets('roles')*.docCount() == [2L, 1L]
+    aggs.buckets('by_type')[0].sub().buckets('roles')[0].sub().metric('latest').valueAsString().startsWith('2024-06-30')
   }
 
   def "highlighting marks the matched terms of text fields"() {

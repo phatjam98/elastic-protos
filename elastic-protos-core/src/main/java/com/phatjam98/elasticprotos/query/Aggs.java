@@ -3,14 +3,27 @@ package com.phatjam98.elasticprotos.query;
 import com.google.protobuf.Timestamp;
 import com.phatjam98.elasticprotos.proto.Aggregation;
 import com.phatjam98.elasticprotos.proto.CalendarInterval;
+import com.phatjam98.elasticprotos.proto.CompositeAggregation;
+import com.phatjam98.elasticprotos.proto.CompositeDateHistogramSource;
+import com.phatjam98.elasticprotos.proto.CompositeHistogramSource;
+import com.phatjam98.elasticprotos.proto.CompositeSource;
+import com.phatjam98.elasticprotos.proto.CompositeTermsSource;
 import com.phatjam98.elasticprotos.proto.DateHistogramAggregation;
+import com.phatjam98.elasticprotos.proto.FilterAggregation;
+import com.phatjam98.elasticprotos.proto.FiltersAggregation;
 import com.phatjam98.elasticprotos.proto.HistogramAggregation;
+import com.phatjam98.elasticprotos.proto.KeyedFilter;
 import com.phatjam98.elasticprotos.proto.MetricAggregation;
 import com.phatjam98.elasticprotos.proto.MetricType;
+import com.phatjam98.elasticprotos.proto.PrimitiveValue;
 import com.phatjam98.elasticprotos.proto.RangeAggregation;
 import com.phatjam98.elasticprotos.proto.RangeBucket;
+import com.phatjam98.elasticprotos.proto.SearchCondition;
 import com.phatjam98.elasticprotos.proto.TermsAggregation;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -159,6 +172,182 @@ public final class Aggs {
   public static Aggregation.Builder metric(String name, String field, MetricType type) {
     return named(name, field).setMetric(
         MetricAggregation.newBuilder().setType(Objects.requireNonNull(type, "type")));
+  }
+
+  /**
+   * Starts a filter aggregation: one bucket of the documents that match any of the conditions
+   * (each an AND of field conditions), in the context of its parent (the root documents at the top
+   * level).
+   *
+   * @param name the aggregation name
+   * @param conditions the conditions, OR-ed and compiled like the conditions of the query
+   * @return the builder
+   */
+  public static Aggregation.Builder filter(String name, SearchCondition... conditions) {
+    return Aggregation.newBuilder().setName(Objects.requireNonNull(name, "name"))
+        .setFilter(FilterAggregation.newBuilder().addAllCondition(list(conditions)));
+  }
+
+  /**
+   * Starts a filter aggregation from a criteria, such as {@code
+   * Criteria.where("type").equalTo("FILING").or().where("type").equalTo("ORDER")}: every branch
+   * of the criteria the branch belongs to is OR-ed ({@link Criteria.Branch#conditions()}).
+   *
+   * @param name the aggregation name
+   * @param criteria any branch of the criteria whose conditions form the filter
+   * @return the builder
+   */
+  public static Aggregation.Builder filter(String name, Criteria.Branch criteria) {
+    return filter(name, Objects.requireNonNull(criteria, "criteria").conditions()
+        .toArray(new SearchCondition[0]));
+  }
+
+  /**
+   * Starts a filter aggregation from every branch of a criteria ({@link Criteria#conditions()}).
+   *
+   * @param name the aggregation name
+   * @param criteria the criteria whose conditions form the filter
+   * @return the builder
+   */
+  public static Aggregation.Builder filter(String name, Criteria criteria) {
+    return filter(name, Objects.requireNonNull(criteria, "criteria").conditions()
+        .toArray(new SearchCondition[0]));
+  }
+
+  /**
+   * Starts a filter aggregation over the nested objects at a nested path: one bucket of the
+   * objects that match the conditions, whose fields must be inside that path.
+   *
+   * @param name the aggregation name
+   * @param nestedPath a field mapped as nested, such as {@code "parties"}
+   * @param criteria any branch of the criteria whose conditions form the filter
+   * @return the builder
+   */
+  public static Aggregation.Builder filter(String name, String nestedPath,
+      Criteria.Branch criteria) {
+    return filter(name, criteria).setField(Objects.requireNonNull(nestedPath, "nestedPath"));
+  }
+
+  /**
+   * Starts a filters aggregation: one named bucket per condition. Over nested objects, set the
+   * nested path with {@code setField}.
+   *
+   * @param name the aggregation name
+   * @param filters the buckets, from {@link #keyed}
+   * @return the builder
+   */
+  public static Aggregation.Builder filters(String name, KeyedFilter... filters) {
+    FiltersAggregation.Builder builder = FiltersAggregation.newBuilder();
+    for (KeyedFilter filter : filters) {
+      builder.addFilters(Objects.requireNonNull(filter, "filter"));
+    }
+    return Aggregation.newBuilder().setName(Objects.requireNonNull(name, "name"))
+        .setFilters(builder);
+  }
+
+  /**
+   * Returns one named bucket of a filters aggregation: what matches any of the conditions.
+   *
+   * @param key the bucket key
+   * @param conditions the conditions, OR-ed
+   * @return the keyed filter
+   */
+  public static KeyedFilter keyed(String key, SearchCondition... conditions) {
+    return KeyedFilter.newBuilder().setKey(Objects.requireNonNull(key, "key"))
+        .addAllCondition(list(conditions)).build();
+  }
+
+  /**
+   * Returns one named bucket of a filters aggregation from every branch of a criteria.
+   *
+   * @param key the bucket key
+   * @param criteria any branch of the criteria whose conditions form the bucket
+   * @return the keyed filter
+   */
+  public static KeyedFilter keyed(String key, Criteria.Branch criteria) {
+    return keyed(key, Objects.requireNonNull(criteria, "criteria").conditions()
+        .toArray(new SearchCondition[0]));
+  }
+
+  private static List<SearchCondition> list(SearchCondition... conditions) {
+    List<SearchCondition> list = new ArrayList<>();
+    for (SearchCondition condition : conditions) {
+      list.add(Objects.requireNonNull(condition, "condition"));
+    }
+    return list;
+  }
+
+  /**
+   * Starts a composite aggregation over the given sources; set the page size with {@code
+   * getCompositeBuilder().setSize(n)} and page with {@link #after} or {@link CompositePager}.
+   *
+   * @param name the aggregation name
+   * @param sources the sources, in key order
+   * @return the builder
+   */
+  public static Aggregation.Builder composite(String name, CompositeSource.Builder... sources) {
+    CompositeAggregation.Builder composite = CompositeAggregation.newBuilder();
+    for (CompositeSource.Builder source : sources) {
+      composite.addSources(Objects.requireNonNull(source, "source"));
+    }
+    return Aggregation.newBuilder().setName(Objects.requireNonNull(name, "name"))
+        .setComposite(composite);
+  }
+
+  /**
+   * Starts a terms source of a composite aggregation; set {@code setOrder} or {@code
+   * setMissingBucket} on it as needed.
+   *
+   * @param name the source name in the bucket keys
+   * @param field the field
+   * @return the builder
+   */
+  public static CompositeSource.Builder termsSource(String name, String field) {
+    return source(name, field).setTerms(CompositeTermsSource.getDefaultInstance());
+  }
+
+  /** Starts a date histogram source of a composite aggregation with a calendar interval. */
+  public static CompositeSource.Builder dateHistogramSource(String name, String field,
+      CalendarInterval interval) {
+    return source(name, field).setDateHistogram(CompositeDateHistogramSource.newBuilder()
+        .setCalendarInterval(Objects.requireNonNull(interval, "interval")));
+  }
+
+  /** Starts a date histogram source of a composite aggregation with a fixed interval. */
+  public static CompositeSource.Builder dateHistogramSource(String name, String field,
+      String fixedInterval) {
+    return source(name, field).setDateHistogram(CompositeDateHistogramSource.newBuilder()
+        .setFixedInterval(Objects.requireNonNull(fixedInterval, "fixedInterval")));
+  }
+
+  /** Starts a histogram source of a composite aggregation. */
+  public static CompositeSource.Builder histogramSource(String name, String field,
+      double interval) {
+    return source(name, field).setHistogram(CompositeHistogramSource.newBuilder()
+        .setInterval(interval));
+  }
+
+  private static CompositeSource.Builder source(String name, String field) {
+    return CompositeSource.newBuilder().setName(Objects.requireNonNull(name, "name"))
+        .setField(Objects.requireNonNull(field, "field"));
+  }
+
+  /**
+   * Sets the after key of a composite aggregation, to request the page after the one that
+   * returned it ({@link AggregationResults#afterKey}).
+   *
+   * @param composite a composite aggregation builder
+   * @param afterKey source name to value: strings, numbers, booleans, or null for a missing
+   *     bucket; empty starts again at the first page
+   * @return {@code composite}
+   * @throws IllegalArgumentException when a value is of another type
+   */
+  public static Aggregation.Builder after(Aggregation.Builder composite,
+      Map<String, ?> afterKey) {
+    CompositeAggregation.Builder builder = composite.getCompositeBuilder().clearAfter();
+    afterKey.forEach((source, value) -> builder.putAfter(source,
+        value == null ? PrimitiveValue.getDefaultInstance() : Values.primitive(value)));
+    return composite;
   }
 
   /**

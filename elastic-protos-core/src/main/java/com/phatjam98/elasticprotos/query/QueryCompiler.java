@@ -32,9 +32,10 @@ import java.util.TreeMap;
  * QueryCompileException} in strict and lenient mode alike.
  *
  * <p>Aggregations ({@code SearchCriteria.aggregation}) compile into {@code aggs}, checked against
- * the mapped type of each field: terms, date histograms, histograms, ranges and single-value
- * metrics, with one level of sub-aggregations. Aggregations on fields inside nested objects are
- * wrapped in {@code nested} aggregations named {@code <name>__nested} (then {@code
+ * the mapped type of each field: terms, date histograms, histograms, ranges, filter, filters,
+ * composite and single-value metrics, with sub-aggregations down to {@link
+ * QueryCompilerConfig#maxAggregationDepth()} levels. Aggregations on fields inside nested objects
+ * are wrapped in {@code nested} aggregations named {@code <name>__nested} (then {@code
  * <name>__nested2}, ...) and, to step out of a nested bucket, a {@code reverse_nested} named
  * {@code <name>__reverse}; names therefore must not contain {@code __}. {@link
  * AggregationResults} unwraps them. Highlighting ({@code SearchCriteria.highlight}) compiles into
@@ -133,23 +134,11 @@ public final class QueryCompiler {
   private Map<String, Object> query(SearchCriteria criteria, IndexDefinition index,
       List<String> warnings) {
     Objects.requireNonNull(index, "index");
-    ConditionCompiler conditions = new ConditionCompiler(config, index, warnings);
-    List<Object> compiled = new ArrayList<>();
-    for (SearchCondition condition : criteria.getSearchConditionList()) {
-      compiled.add(conditions.compile(condition));
-    }
-    if (compiled.isEmpty()) {
+    if (criteria.getSearchConditionCount() == 0) {
       return object("match_all", new TreeMap<>());
     }
-    if (compiled.size() == 1) {
-      @SuppressWarnings("unchecked")
-      Map<String, Object> single = (Map<String, Object>) compiled.get(0);
-      return single;
-    }
-    Map<String, Object> bool = new TreeMap<>();
-    bool.put("should", compiled);
-    bool.put("minimum_should_match", 1);
-    return object("bool", bool);
+    return new ConditionCompiler(config, index, warnings)
+        .compileAny(criteria.getSearchConditionList());
   }
 
   private boolean paging(SearchCriteria criteria, List<Object> sort, Map<String, Object> body,
