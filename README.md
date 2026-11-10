@@ -107,6 +107,8 @@ All modules share one version (lockstep). Import the BOM, then add the core and 
 | `com.phatjam98:elastic-protos-opensearch` | Adapter for OpenSearch 2.x and 3.x |
 | `com.phatjam98:elastic-protos-micronaut` | Optional Micronaut 4 integration |
 
+`1.0.0-rc.3` is the current pre-release: the coordinates and option names are final, and `1.0.0` follows once the release candidate has been exercised. See [Maven Central](https://central.sonatype.com/artifact/com.phatjam98/elastic-protos-core) for the latest version.
+
 ### Gradle
 
 ```groovy
@@ -116,7 +118,7 @@ plugins {
 }
 
 dependencies {
-    implementation platform('com.phatjam98:elastic-protos-bom:1.0.0')
+    implementation platform('com.phatjam98:elastic-protos-bom:1.0.0-rc.3')
     implementation 'com.phatjam98:elastic-protos-core'
     implementation 'com.phatjam98:elastic-protos-elasticsearch'   // or elastic-protos-opensearch
 }
@@ -142,7 +144,7 @@ Use a protoc version no newer than the protobuf-java runtime on your classpath (
     <dependency>
       <groupId>com.phatjam98</groupId>
       <artifactId>elastic-protos-bom</artifactId>
-      <version>1.0.0</version>
+      <version>1.0.0-rc.3</version>
       <type>pom</type>
       <scope>import</scope>
     </dependency>
@@ -1346,7 +1348,7 @@ Handled in core, so mappings, hashes and tests are identical on both engines:
 
 ```groovy
 dependencies {
-    implementation platform('com.phatjam98:elastic-protos-bom:1.0.0')
+    implementation platform('com.phatjam98:elastic-protos-bom:1.0.0-rc.3')
     implementation 'com.phatjam98:elastic-protos-micronaut'
     implementation 'com.phatjam98:elastic-protos-elasticsearch'   // or elastic-protos-opensearch
 }
