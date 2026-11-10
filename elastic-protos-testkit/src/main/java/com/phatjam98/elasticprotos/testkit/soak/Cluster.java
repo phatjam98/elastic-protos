@@ -4,6 +4,7 @@ import com.phatjam98.elasticprotos.elasticsearch.ElasticsearchEngine;
 import com.phatjam98.elasticprotos.engine.BulkOp;
 import com.phatjam98.elasticprotos.engine.BulkResult;
 import com.phatjam98.elasticprotos.engine.Hit;
+import com.phatjam98.elasticprotos.engine.Pit;
 import com.phatjam98.elasticprotos.engine.SearchEngine;
 import com.phatjam98.elasticprotos.engine.SearchResult;
 import com.phatjam98.elasticprotos.mapping.IndexNamingStrategy;
@@ -11,6 +12,7 @@ import com.phatjam98.elasticprotos.mapping.ProtoMapper;
 import com.phatjam98.elasticprotos.opensearch.OpenSearchEngine;
 import com.phatjam98.elasticprotos.testkit.soak.OpLog.Entry;
 import com.phatjam98.elasticprotos.testkit.soak.OpLog.OpType;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -147,36 +149,63 @@ public final class Cluster {
   }
 
   /**
-   * Reads every document behind an alias, sorted by the {@code id} field with {@code
-   * search_after}. Call it once writes have stopped.
+   * Reads every document behind an alias under a point in time, sorted by {@code _shard_doc}
+   * where the engine supports it and by {@code _id} otherwise (so nothing depends on a document
+   * field), and cross-checks the number read with an exact count. Call it once writes have
+   * stopped.
    *
    * @param engine the engine
    * @param alias the alias
    * @return the documents by {@code _id}
+   * @throws IllegalStateException when a document comes back twice or the count differs
    */
   public static Map<String, Map<String, Object>> scan(SearchEngine engine, String alias) {
     engine.refresh(alias);
+    long counted = engine.count(alias);
     Map<String, Map<String, Object>> docs = new HashMap<>();
-    List<Object> after = null;
-    while (true) {
-      Map<String, Object> body = new LinkedHashMap<>();
-      body.put("size", 5000);
-      body.put("sort", List.of(Map.of("id", "asc")));
-      body.put("track_total_hits", false);
-      if (after != null) {
-        body.put("search_after", after);
-      }
-      SearchResult result = engine.search(List.of(alias), body);
-      for (Hit hit : result.hits()) {
-        if (docs.put(hit.id(), hit.source()) != null) {
-          throw new IllegalStateException("document " + hit.id() + " returned twice");
+    Object sortField = engine.info().supportsShardDoc() ? "_shard_doc" : "_id";
+    Pit pit = engine.openPit(List.of(alias), Duration.ofMinutes(10));
+    try {
+      List<Object> after = null;
+      while (true) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("pit", Map.of("id", pit.id(), "keep_alive", "10m"));
+        body.put("size", 5000);
+        body.put("sort", List.of(Map.of(sortField, "asc")));
+        body.put("track_total_hits", false);
+        if (after != null) {
+          body.put("search_after", after);
         }
+        SearchResult result = engine.search(List.of(), body);
+        for (Hit hit : result.hits()) {
+          if (docs.put(hit.id(), hit.source()) != null) {
+            throw new IllegalStateException("document " + hit.id() + " returned twice");
+          }
+        }
+        if (result.hits().size() < 5000) {
+          break;
+        }
+        after = result.lastSort();
       }
-      if (result.hits().size() < 5000) {
-        return docs;
+    } finally {
+      try {
+        engine.closePit(pit);
+      } catch (RuntimeException e) {
+        // it expires on its own
       }
-      after = result.lastSort();
     }
+    if (docs.size() != counted) {
+      throw new IllegalStateException("scan of " + alias + " read " + docs.size()
+          + " documents but the count is " + counted);
+    }
+    return docs;
+  }
+
+  /** Returns whether an index has {@code index.blocks.write} set. */
+  public static boolean writeBlocked(SearchEngine engine, String index) {
+    Object write = map(map(map(engine.getSettings(index).get("index")).get("blocks")))
+        .get("write");
+    return "true".equals(String.valueOf(write));
   }
 
   @SuppressWarnings("unchecked")

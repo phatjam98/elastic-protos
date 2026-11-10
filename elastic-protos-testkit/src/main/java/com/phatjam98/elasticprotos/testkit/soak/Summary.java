@@ -37,13 +37,12 @@ final class Summary {
         + " acknowledged; failed attempts " + failures.get("attemptsFailed") + " by class "
         + failures.get("byClass"));
     out.println("   failures by phase/op/kind: " + failures.get("byPhaseOpKind"));
-    out.println("   reads: " + reads.get("reads") + ", stale " + reads.get("stale")
-        + " (before swap " + reads.get("staleBeforeSwap") + ", of ids that still differ at the"
-        + " end " + reads.get("staleOfPersistentIds") + ", after reconcile "
-        + reads.get("staleAfterReconcile") + ", after sweep " + reads.get("staleAfterSweep")
-        + "); transient stale window " + reads.get("firstStaleAfterSwapMs") + ".."
-        + reads.get("lastStaleAfterSwapMs") + " ms after the swap, swap->reconciled "
-        + reads.get("swapToReconciledMs") + " ms");
+    out.println("   reads: " + reads.get("reads") + ", stale " + reads.get("stale") + " by class "
+        + reads.get("byClass") + "; documented stale window " + reads.get("firstStaleAfterSwapMs")
+        + ".." + reads.get("lastStaleAfterSwapMs") + " ms after the swap (reconcile bound "
+        + reads.get("swapToReconcileBoundMs") + " ms, swept " + reads.get("swapToSweptMs")
+        + " ms)");
+    out.println("   observations: " + Cluster.map(report.get("observations")).get("byClass"));
     out.println("   comparison: checked " + comparison.get("checked") + ", matched "
         + comparison.get("matched") + ", uncertain " + comparison.get("uncertainSkipped")
         + ", violations " + comparison.get("violations") + ", documented anomalies "

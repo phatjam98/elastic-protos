@@ -16,18 +16,25 @@ import java.util.TreeSet;
  * documented anomaly of the zero-downtime reindex or a genuine violation.
  *
  * <p>Documented anomalies (README "Zero-downtime reindex", ADR 0007), recognised only when the
- * timeline is a zero-downtime reindex:
+ * timeline is a zero-downtime reindex, and only when the write that caused them was sent before
+ * the reconcile could have reached the document ({@link Timeline#reconcileBound()}): the README
+ * documents each of them "before the reconcile reached it". The same symptom produced later (for
+ * example by a resumed reconcile) is a violation.
  *
  * <ul>
  *   <li>{@link Anomaly#STALE_PARTIAL_UPDATE}: the first write of the id the new index acknowledged
- *       is a partial update, and the document equals the replay of the writes after it onto an
- *       earlier state of the log, every write skipped in between having been acknowledged by the
- *       old index and sent after the catch-up pass started. The update applied to the stale copy
- *       and the reconcile kept it (409).
- *   <li>{@link Anomaly#RESURRECTED_AFTER_DELETE}: the log ends with a delete that the new index
- *       acknowledged as not found, the document equals the state before that delete, and the write
- *       that last created it, and every write after that, were acknowledged by the old index and
- *       sent after the catch-up pass started. The reconcile created it again.
+ *       is a partial update sent before the reconcile bound, and the document equals the replay of
+ *       the writes after it onto an earlier state of the log, every write skipped in between having
+ *       been acknowledged by the old index and sent after the catch-up pass started. The update
+ *       applied to the stale copy and the reconcile kept it (409).
+ *   <li>{@link Anomaly#STALE_PARTIAL_UPDATE_ON_GHOST}: the same, where the stale copy is the one
+ *       the first copy took (the base write acknowledged before the first {@code PREPARED}),
+ *       because the document was deleted from the old index before the catch-up read it (deletes
+ *       reach the new index only at the sweep). Not in the README yet; named apart.
+ *   <li>{@link Anomaly#RESURRECTED_AFTER_DELETE}: the old index last created the document after
+ *       the catch-up began, every write of the new index was sent before the reconcile bound and
+ *       the first of them found nothing there, the last is a delete, and the alias holds the old
+ *       index's final version: the reconcile created it again.
  * </ul>
  *
  * <p>Everything else that differs is a violation: missing (the log has it, the alias does not),
@@ -63,14 +70,26 @@ public final class LogComparison {
    * @param copiedAt when the last {@code COPIED} phase before the effective swap was reported,
    *     epoch millis: writes sent after it may have missed the catch-up pass
    * @param swappedAt when the effective {@code SWAPPED} phase was reported, epoch millis, or 0
+   * @param reconcileBound the first {@code RECONCILED}: after it the reconcile has reached every
+   *     document (when a run died while reconciling, this is the resumed run's); {@link
+   *     Long#MAX_VALUE} when no reconcile completed
+   * @param sweptAt the first {@code SWEPT}: ghosts (documents deleted from the old index during
+   *     the copy) are gone from the new index after it; {@link Long#MAX_VALUE} when none
    * @param zeroDowntime whether the documented anomalies of the zero-downtime reindex apply
    */
   public record Timeline(String oldIndex, long preparedAt, long copiedAt, long swappedAt,
-      boolean zeroDowntime) {
+      long reconcileBound, long sweptAt, boolean zeroDowntime) {
 
     /** A timeline without documented anomalies (blocking reindex, backfill, no migration). */
     public static Timeline strict(String oldIndex) {
-      return new Timeline(oldIndex, Long.MAX_VALUE, Long.MAX_VALUE, 0, false);
+      return new Timeline(oldIndex, Long.MAX_VALUE, Long.MAX_VALUE, 0, Long.MAX_VALUE,
+          Long.MAX_VALUE, false);
+    }
+
+    /** A strict timeline that knows when the alias moved (blocking reindex). */
+    public static Timeline strict(String oldIndex, long swappedAt) {
+      return new Timeline(oldIndex, Long.MAX_VALUE, Long.MAX_VALUE, swappedAt, Long.MAX_VALUE,
+          Long.MAX_VALUE, false);
     }
   }
 
@@ -205,15 +224,90 @@ public final class LogComparison {
     return new Result(checked, matched, skipped, violations, anomalies, findings, differing);
   }
 
-  /** Returns the documented anomaly that explains a difference, or null. */
-  static Anomaly explain(List<Entry> entries, Map<String, Object> actual, Timeline timeline) {
+  /**
+   * Returns the documented anomaly that explains why {@code actual} differs from the replay of
+   * {@code entries}, or null.
+   */
+  public static Anomaly explain(List<Entry> entries, Map<String, Object> actual,
+      Timeline timeline) {
     if (actual == null) {
+      return null;
+    }
+    if (!timeline.zeroDowntime()) {
       return null;
     }
     if (resurrected(entries, actual, timeline)) {
       return Anomaly.RESURRECTED_AFTER_DELETE;
     }
     return staleUpdate(entries, actual, timeline);
+  }
+
+  /**
+   * Whether a read that found {@code actual} where the log holds the document as deleted saw a
+   * ghost: a version the copy or the catch-up read from the old index (acknowledged before the
+   * last {@code COPIED}), deleted from the old index afterwards, with no write of the new index
+   * since. The sweep removes such documents; until then reads return them.
+   */
+  public static boolean ghost(List<Entry> entries, Map<String, Object> actual,
+      Timeline timeline) {
+    if (actual == null || OpLog.replay(entries) != null) {
+      return false;
+    }
+    for (Entry entry : entries) {
+      if (onNew(entry, timeline)) {
+        return false;
+      }
+    }
+    for (int i = 0; i < entries.size(); i++) {
+      if (entries.get(i).ackedAt() < timeline.copiedAt()
+          && same(OpLog.replay(entries.subList(0, i + 1)), actual)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Whether the log of an id that it holds as deleted could leave a ghost in the new index: only
+   * the old index wrote it, and a version existed that the copy or the catch-up read (acknowledged
+   * before the last {@code COPIED}).
+   */
+  public static boolean ghostPossible(List<Entry> entries, Timeline timeline) {
+    if (OpLog.replay(entries) != null) {
+      return false;
+    }
+    for (Entry entry : entries) {
+      if (onNew(entry, timeline)) {
+        return false;
+      }
+    }
+    for (int i = 0; i < entries.size(); i++) {
+      if (entries.get(i).ackedAt() < timeline.copiedAt()
+          && OpLog.replay(entries.subList(0, i + 1)) != null) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Whether the log of an id it holds as deleted has the shape of a documented resurrection
+   * ({@link Anomaly#RESURRECTED_AFTER_DELETE}): the reconcile created the old index's final
+   * version again.
+   */
+  public static boolean resurrectedShape(List<Entry> entries, Timeline timeline) {
+    if (!timeline.zeroDowntime()) {
+      return false;
+    }
+    List<Entry> onOld = new ArrayList<>();
+    for (Entry entry : entries) {
+      if (onNew(entry, timeline)) {
+        break;
+      }
+      onOld.add(entry);
+    }
+    Map<String, Object> last = OpLog.replay(onOld);
+    return last != null && resurrected(entries, last, timeline);
   }
 
   /** Whether a write was acknowledged by the old index and sent after the catch-up began. */
@@ -247,7 +341,9 @@ public final class LogComparison {
       first++;
     }
     for (int i = first; i < n; i++) {
-      if (!onNew(entries.get(i), timeline)) {
+      // every write after the swap went to the new index before the reconcile could reach it
+      if (!onNew(entries.get(i), timeline)
+          || entries.get(i).startedAt() >= timeline.reconcileBound()) {
         return false;
       }
     }
@@ -259,6 +355,17 @@ public final class LogComparison {
     Entry firstNew = entries.get(first);
     if (firstNew.type() == OpType.UPDATE || firstNew.found()) {
       return false;
+    }
+    // the reconcile creates the document once, after the last of these writes: a write of the new
+    // index that found it while the log held it deleted shows it had already been created again,
+    // so a later creation is a second one (for example by a resumed reconcile)
+    Map<String, Object> logState = OpLog.replay(entries.subList(0, first + 1));
+    for (int i = first + 1; i < n; i++) {
+      Entry entry = entries.get(i);
+      if (logState == null && entry.found()) {
+        return false;
+      }
+      logState = OpLog.replay(logState, List.of(entry));
     }
     Map<String, Object> state = null;
     int creation = -1;
@@ -295,7 +402,8 @@ public final class LogComparison {
         break;
       }
     }
-    if (k < 1 || entries.get(k).type() != OpType.UPDATE) {
+    if (k < 1 || entries.get(k).type() != OpType.UPDATE
+        || entries.get(k).startedAt() >= timeline.reconcileBound()) {
       return null;
     }
     List<Entry> after = entries.subList(k, entries.size());
@@ -320,7 +428,9 @@ public final class LogComparison {
           beforeCatchUp.add(entry);
         }
       }
-      if (OpLog.replay(beforeCatchUp) == null) {
+      // and the base is what the first copy read: acknowledged before it started
+      if (OpLog.replay(beforeCatchUp) == null && i >= 0
+          && entries.get(i).ackedAt() < timeline.preparedAt()) {
         return Anomaly.STALE_PARTIAL_UPDATE_ON_GHOST;
       }
     }
@@ -335,7 +445,8 @@ public final class LogComparison {
     return Json.canonical(a).equals(Json.canonical(b));
   }
 
-  private static List<String> describe(List<Entry> entries, Timeline timeline) {
+  /** Describes the writes of an id, one line each, times relative to the swap and the copy. */
+  public static List<String> describe(List<Entry> entries, Timeline timeline) {
     List<String> lines = new ArrayList<>();
     for (Entry entry : entries) {
       String where = entry.index() == null ? "?"

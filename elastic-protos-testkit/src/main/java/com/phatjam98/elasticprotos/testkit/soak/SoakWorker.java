@@ -34,10 +34,10 @@ import java.util.Map;
  * </ul>
  *
  * <pre>
- * SoakWorker &lt;engine&gt; &lt;url&gt; migrate prefix=P version=reindex|backfill killAt=PHASE
- *     lockTtlMs=N [swapGraceMs=N]
- * SoakWorker &lt;engine&gt; &lt;url&gt; bootstrap prefix=P version=base|reindex startAt=MILLIS
- *     lockWaitMs=N lockTtlMs=N
+ * SoakWorker &lt;engine&gt; &lt;url&gt; migrate prefix=P version=reindex|backfill|scripted
+ *     shards=N killAt=PHASE|NONE lockTtlMs=N [swapGraceMs=N]
+ * SoakWorker &lt;engine&gt; &lt;url&gt; bootstrap prefix=P version=base|reindex shards=N
+ *     startAt=MILLIS lockWaitMs=N lockTtlMs=N
  * </pre>
  */
 public final class SoakWorker {
@@ -83,7 +83,9 @@ public final class SoakWorker {
       options.swapGrace(Duration.ofMillis(Long.parseLong(params.get("swapGraceMs"))));
     }
     IndexMigrator migrator = IndexMigrator.builder().engine(engine)
-        .mapper(SoakSchema.mapper(params.get("version"), prefix))
+        .mapper(SoakSchema.mapper(params.get("version"), prefix,
+            Integer.parseInt(params.get("shards"))))
+        .scriptProvider(SoakSchema.scripts(params.get("version")))
         .options(options.build())
         .listener((alias, phase) -> {
           send("PHASE " + phase + " " + System.currentTimeMillis());
@@ -112,7 +114,9 @@ public final class SoakWorker {
         .lockTtl(Duration.ofMillis(Long.parseLong(params.get("lockTtlMs"))))
         .build();
     final IndexMigrator migrator = IndexMigrator.builder().engine(engine)
-        .mapper(SoakSchema.mapper(params.get("version"), prefix))
+        .mapper(SoakSchema.mapper(params.get("version"), prefix,
+            Integer.parseInt(params.get("shards"))))
+        .scriptProvider(SoakSchema.scripts(params.get("version")))
         .options(options)
         .build();
     engine.info();
@@ -122,6 +126,8 @@ public final class SoakWorker {
       Thread.sleep(wait);
     }
     long started = System.currentTimeMillis();
+    // a JVM that was not ready before the start instant ran late: the parent checks this
+    final boolean late = wait <= 0;
     send("START " + started);
     MigrationPlan plan = migrator.plan(Document.class, Firm.class, InboxItem.class,
         TypedMaps.class);
@@ -129,6 +135,7 @@ public final class SoakWorker {
     Map<String, Object> report = new LinkedHashMap<>();
     report.put("pid", ProcessHandle.current().pid());
     report.put("startedAt", started);
+    report.put("late", late);
     report.put("finishedAt", System.currentTimeMillis());
     report.put("outcomes", outcomes(result));
     send("RESULT " + Json.canonical(report));

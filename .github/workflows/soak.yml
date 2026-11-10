@@ -33,18 +33,22 @@ jobs:
         include:
           - engine: elasticsearch
             label: es-8.19.23
+            version: '8.19.23'
             image: docker.elastic.co/elasticsearch/elasticsearch:8.19.23
             security: -e xpack.security.enabled=false -e "ES_JAVA_OPTS=-Xms1g -Xmx1g"
           - engine: elasticsearch
             label: es-9.5.5
+            version: '9.5.5'
             image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5
             security: -e xpack.security.enabled=false -e "ES_JAVA_OPTS=-Xms1g -Xmx1g"
           - engine: opensearch
             label: os-2.19.7
+            version: '2.19.7'
             image: opensearchproject/opensearch:2.19.7
             security: -e DISABLE_SECURITY_PLUGIN=true -e DISABLE_INSTALL_DEMO_CONFIG=true -e "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
           - engine: opensearch
             label: os-3.9.0
+            version: '3.9.0'
             image: opensearchproject/opensearch:3.9.0
             security: -e DISABLE_SECURITY_PLUGIN=true -e DISABLE_INSTALL_DEMO_CONFIG=true -e "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
     steps:
@@ -88,7 +92,7 @@ jobs:
           SCENARIO: ${{ inputs.scenario }}
           DOCS: ${{ inputs.docs }}
         run: |
-          args="${{ matrix.engine }} http://localhost:9200 ${SCENARIO} --label ${{ matrix.label }}"
+          args="${{ matrix.engine }} http://localhost:9200 ${SCENARIO} --label ${{ matrix.label }} --expect-version ${{ matrix.version }}"
           if [ -n "${DOCS}" ]; then
             case "${DOCS}" in
               *[!0-9]*) echo "docs must be a number: ${DOCS}"; exit 2 ;;

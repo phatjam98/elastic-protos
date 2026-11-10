@@ -9,18 +9,25 @@ import java.util.Locale;
 /** The command line of the soak tool. */
 public final class SoakOptions {
 
-  /** The zero-downtime phases a kill scenario stops at by default, then the backfill ones. */
+  /**
+   * The kill points of the kill scenario by default: at every zero-downtime and backfill phase
+   * boundary, in the middle of the copy, catch-up, freeze, reconcile, sweep and backfill, and two
+   * with a migration script ({@code SCRIPTED_} prefix).
+   */
   public static final List<String> DEFAULT_PHASES = List.of("PREPARED", "COPIED", "CAUGHT_UP",
       "SNAPSHOT", "SWAPPED", "FROZEN", "RECONCILED", "SWEPT", "FINISHED", "BACKFILL_MARKED",
-      "BACKFILLED");
+      "BACKFILLED", "MID_COPY", "MID_CATCHUP", "MID_FREEZE", "MID_RECONCILE", "MID_SWEEP",
+      "MID_BACKFILL", "SCRIPTED_SWAPPED", "SCRIPTED_MID_RECONCILE");
 
   String engine;
   String url;
   String scenario;
   Integer docs;
-  int writers = 4;
-  double rate = 50;
-  List<String> modes = List.of("zero-downtime", "blocking", "backfill");
+  int writers = 6;
+  double rate = 100;
+  int shards = 3;
+  String expectVersion;
+  List<String> modes = List.of("zero-downtime", "blocking", "backfill", "scripted");
   List<String> phases = DEFAULT_PHASES;
   int jvms = 5;
   Duration lockTtl = Duration.ofSeconds(15);
@@ -37,9 +44,10 @@ public final class SoakOptions {
   static final String USAGE = String.join("\n",
       "usage: soak <elasticsearch|opensearch> <url> <live|kill|bootstrap|all> [options]",
       "  --docs N           seeded documents (default: live 200000, kill 50000, bootstrap 10000)",
-      "  --writers N        writer threads (default 4)",
-      "  --rate R           operations per second per writer (default 50)",
-      "  --modes a,b        live: zero-downtime,blocking,backfill (default all three)",
+      "  --writers N        writer threads (default 6)",
+      "  --rate R           operations per second per writer (default 100)",
+      "  --shards N         number_of_shards of every soak index (default 3)",
+      "  --modes a,b        live: zero-downtime,blocking,backfill,scripted (default all four)",
       "  --phases A,B       kill: phases to kill at (default " + String.join(",", DEFAULT_PHASES)
           + ")",
       "  --jvms K           bootstrap: concurrent JVMs (default 5)",
@@ -49,6 +57,7 @@ public final class SoakOptions {
       "  --out DIR          report directory (default build/soak)",
       "  --label L          report file prefix (default <product>-<version>)",
       "  --seed N           random seed (default 42)",
+      "  --expect-version V refuse to run unless the cluster reports this version",
       "  --keep             keep the soak indices afterwards");
 
   private SoakOptions() {}
@@ -84,6 +93,12 @@ public final class SoakOptions {
       switch (name) {
         case "--docs":
           options.docs = Integer.parseInt(value);
+          break;
+        case "--shards":
+          options.shards = Integer.parseInt(value);
+          break;
+        case "--expect-version":
+          options.expectVersion = value;
           break;
         case "--writers":
           options.writers = Integer.parseInt(value);

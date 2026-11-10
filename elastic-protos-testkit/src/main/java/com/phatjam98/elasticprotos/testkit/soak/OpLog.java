@@ -102,8 +102,10 @@ public final class OpLog {
    * @param changes a counter that moves whenever a write starts or ends
    * @param expected the expected document, or null when absent
    * @param lastIndex the concrete index of the last acknowledged write, or null
+   * @param entries the acknowledged writes at the time of the view
    */
-  public record View(long changes, Map<String, Object> expected, String lastIndex) {}
+  public record View(long changes, Map<String, Object> expected, String lastIndex,
+      List<Entry> entries) {}
 
   private final Map<String, History> byId = new ConcurrentHashMap<>();
 
@@ -169,7 +171,8 @@ public final class OpLog {
       }
       String last = history.entries.isEmpty() ? null
           : history.entries.get(history.entries.size() - 1).index();
-      return new View(history.changes, replay(history.entries), last);
+      return new View(history.changes, replay(history.entries), last,
+          List.copyOf(history.entries));
     }
   }
 

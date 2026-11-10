@@ -63,14 +63,20 @@ public final class Soak {
   private static int run(SearchEngine engine, SoakOptions options, PrintStream out)
       throws Exception {
     EngineInfo info = engine.info();
-    String label = options.label != null ? options.label
+    final String label = options.label != null ? options.label
         : (info.product().name() + "-" + info.version()).toLowerCase(Locale.ROOT);
+    if (options.expectVersion != null && !options.expectVersion.equals(info.version())) {
+      out.println("refusing to run: " + options.url + " reports " + info
+          + ", expected version " + options.expectVersion);
+      return 2;
+    }
     Files.createDirectories(options.out);
     out.println("soak against " + info + " (" + options.url + "), reports in "
         + options.out.toAbsolutePath());
     List<String> scenarios = "all".equals(options.scenario)
         ? List.of("live", "kill", "bootstrap") : List.of(options.scenario);
     long violations = 0;
+    boolean harnessError = false;
     for (String scenario : scenarios) {
       Map<String, Object> report = new LinkedHashMap<>();
       report.put("scenario", scenario);
@@ -82,35 +88,46 @@ public final class Soak {
       settings.put("writers", options.writers);
       settings.put("ratePerWriter", options.rate);
       settings.put("seed", options.seed);
+      settings.put("shards", options.shards);
       report.put("settings", settings);
       List<Object> runs = new ArrayList<>();
-      long found;
-      switch (scenario) {
-        case "live":
-          found = LiveScenario.run(engine, options, out, runs);
-          break;
-        case "kill":
-          settings.put("lockTtlMs", options.lockTtl.toMillis());
-          found = KillScenario.run(engine, options, label, out, runs);
-          break;
-        default:
-          settings.put("jvms", options.jvms);
-          settings.put("lockTtlMs", options.lockTtl.toMillis());
-          found = BootstrapScenario.run(engine, options, label, out, runs);
-          break;
+      long found = 0;
+      String verdict;
+      try {
+        switch (scenario) {
+          case "live":
+            found = LiveScenario.run(engine, options, out, runs);
+            break;
+          case "kill":
+            settings.put("lockTtlMs", options.lockTtl.toMillis());
+            found = KillScenario.run(engine, options, label, out, runs);
+            break;
+          default:
+            settings.put("jvms", options.jvms);
+            settings.put("lockTtlMs", options.lockTtl.toMillis());
+            found = BootstrapScenario.run(engine, options, label, out, runs);
+            break;
+        }
+        verdict = found == 0 ? "PASS" : "VIOLATIONS";
+      } catch (Exception e) {
+        // keep the runs that finished, and go on with the other scenarios
+        e.printStackTrace(out);
+        harnessError = true;
+        verdict = "HARNESS_ERROR";
+        report.put("harnessError", String.valueOf(e));
       }
       report.put("finishedAt", Instant.now().toString());
       report.put("violations", found);
-      report.put("verdict", found == 0 ? "PASS" : "VIOLATIONS");
+      report.put("verdict", verdict);
       report.put("runs", runs);
       Path file = options.out.resolve(label + "-" + scenario + ".json");
       write(file, report);
       out.println();
-      out.println("== " + scenario + ": " + (found == 0 ? "PASS" : found + " VIOLATION(S)")
-          + " -> " + file.toAbsolutePath());
+      out.println("== " + scenario + ": " + verdict + (found == 0 ? "" : ", " + found
+          + " VIOLATION(S)") + " -> " + file.toAbsolutePath());
       violations += found;
     }
-    return violations == 0 ? 0 : 1;
+    return harnessError ? 3 : violations == 0 ? 0 : 1;
   }
 
   private static void write(Path file, Map<String, Object> report) throws IOException {

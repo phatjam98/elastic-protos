@@ -33,12 +33,12 @@ public final class StaleReader {
   private volatile boolean stopping;
   private final Map<String, long[]> byPhase = new TreeMap<>();
   private final List<StaleRead> stale = new ArrayList<>();
-  private final List<Object> samples = new ArrayList<>();
   private long discarded;
   private long errors;
 
-  /** A stale read. */
-  private record StaleRead(String id, long started, long at) {}
+  /** A stale read, with the id's writes when it was read. */
+  private record StaleRead(String id, long started, long at, String phase,
+      Map<String, Object> expected, Map<String, Object> actual, List<OpLog.Entry> history) {}
 
   /**
    * Creates a reader.
@@ -115,16 +115,8 @@ public final class StaleReader {
         counts[0]++;
         if (!fresh) {
           counts[1]++;
-          stale.add(new StaleRead(id, started, at));
-          if (samples.size() < 20) {
-            Map<String, Object> sample = new LinkedHashMap<>();
-            sample.put("id", id);
-            sample.put("phase", phase);
-            sample.put("at", at);
-            sample.put("expected", view.expected());
-            sample.put("actual", actual);
-            samples.add(sample);
-          }
+          stale.add(new StaleRead(id, started, at, phase, view.expected(), actual,
+              view.entries()));
         }
       }
       LockSupport.parkNanos(2_000_000L);
@@ -132,21 +124,17 @@ public final class StaleReader {
   }
 
   /**
-   * Summarises the reads.
+   * Summarises the reads and classifies every stale one ({@link TransientChecks#read}).
    *
-   * @param swapNotBefore a time before which the alias still pointed at the old index for sure
-   *     (the snapshot phase of a zero-downtime reindex, the copy of a blocking one), or -1 when the
-   *     alias never moves; stale reads that ended before it are counted as {@code
-   *     staleBeforeSwap}, which no documented behaviour explains
-   * @param swappedAt when the swap was reported, or -1
-   * @param reconciledAt when the reconcile was reported, or -1
-   * @param sweptAt when the sweep was reported, or -1
-   * @param persistent ids that still differ from the log at the end (documented anomalies or
-   *     violations); their stale reads are counted apart and left out of the window
-   * @return the summary
+   * @param mode the migration mode
+   * @param timeline the migration timeline
+   * @param swapNotBefore before this the alias pointed at the old index for sure (the snapshot
+   *     phase of a zero-downtime reindex, the copy of a blocking one), or -1 when it never moves
+   * @return the summary; {@code violations} counts the stale reads no documented behaviour
+   *     explains
    */
-  public synchronized Map<String, Object> summarize(long swapNotBefore, long swappedAt,
-      long reconciledAt, long sweptAt, java.util.Set<String> persistent) {
+  public synchronized Map<String, Object> summarize(WriteFailures.Mode mode,
+      LogComparison.Timeline timeline, long swapNotBefore) {
     Map<String, Object> summary = new LinkedHashMap<>();
     long reads = 0;
     long staleCount = 0;
@@ -157,27 +145,32 @@ public final class StaleReader {
       phases.put(entry.getKey(), Map.of("reads", entry.getValue()[0], "stale",
           entry.getValue()[1]));
     }
+    long swappedAt = timeline.swappedAt();
     long first = Long.MAX_VALUE;
     long last = Long.MIN_VALUE;
-    long beforeSwap = 0;
-    long afterReconcile = 0;
-    long afterSweep = 0;
-    long ofPersistent = 0;
+    Map<String, Long> byClass = new TreeMap<>();
+    Map<String, List<Object>> samples = new TreeMap<>();
+    long violations = 0;
     for (StaleRead read : stale) {
-      if (swapNotBefore < 0 || read.at() < swapNotBefore) {
-        beforeSwap++;
+      String kind = TransientChecks.read(mode, timeline, swapNotBefore, read.started(),
+          read.at(), read.history(), read.actual());
+      byClass.merge(kind, 1L, Long::sum);
+      if (TransientChecks.VIOLATION.equals(kind)) {
+        violations++;
+      } else if ("RECONCILE_WINDOW".equals(kind) || "GHOST_BEFORE_SWEEP".equals(kind)) {
+        first = Math.min(first, read.started());
+        last = Math.max(last, read.at());
       }
-      if (persistent.contains(read.id())) {
-        ofPersistent++;
-        continue;
-      }
-      first = Math.min(first, read.started());
-      last = Math.max(last, read.at());
-      if (reconciledAt >= 0 && read.started() > reconciledAt) {
-        afterReconcile++;
-      }
-      if (sweptAt >= 0 && read.started() > sweptAt) {
-        afterSweep++;
+      List<Object> list = samples.computeIfAbsent(kind, k -> new ArrayList<>());
+      if (list.size() < 10) {
+        Map<String, Object> sample = new LinkedHashMap<>();
+        sample.put("id", read.id());
+        sample.put("phase", read.phase());
+        sample.put("atSwapMs", swappedAt > 0 ? read.at() - swappedAt : null);
+        sample.put("expected", read.expected());
+        sample.put("actual", read.actual());
+        sample.put("history", LogComparison.describe(read.history(), timeline));
+        list.add(sample);
       }
     }
     summary.put("reads", reads);
@@ -185,17 +178,17 @@ public final class StaleReader {
     summary.put("errors", errors);
     summary.put("stale", staleCount);
     summary.put("byPhase", phases);
-    summary.put("staleBeforeSwap", beforeSwap);
-    summary.put("staleOfPersistentIds", ofPersistent);
-    summary.put("staleAfterReconcile", afterReconcile);
-    summary.put("staleAfterSweep", afterSweep);
+    summary.put("byClass", byClass);
+    summary.put("violations", violations);
     if (first != Long.MAX_VALUE && swappedAt > 0) {
       summary.put("firstStaleAfterSwapMs", first - swappedAt);
       summary.put("lastStaleAfterSwapMs", last - swappedAt);
-      summary.put("observedStaleWindowMs", last - first);
     }
-    if (swappedAt > 0 && reconciledAt > 0) {
-      summary.put("swapToReconciledMs", reconciledAt - swappedAt);
+    if (swappedAt > 0 && timeline.reconcileBound() != Long.MAX_VALUE) {
+      summary.put("swapToReconcileBoundMs", timeline.reconcileBound() - swappedAt);
+    }
+    if (swappedAt > 0 && timeline.sweptAt() != Long.MAX_VALUE) {
+      summary.put("swapToSweptMs", timeline.sweptAt() - swappedAt);
     }
     summary.put("samples", samples);
     return summary;

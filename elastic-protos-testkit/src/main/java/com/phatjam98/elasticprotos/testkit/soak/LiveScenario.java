@@ -19,8 +19,8 @@ import java.util.Map;
 
 /**
  * Scenario 1: seeds documents, starts writers and a stale reader, migrates the alias while they
- * run (a zero-downtime reindex, a blocking reindex, a backfill) and compares the alias with the
- * operation log.
+ * run (a zero-downtime reindex, a blocking reindex, a backfill, a zero-downtime reindex through a
+ * migration script) and compares the alias with the operation log.
  */
 final class LiveScenario {
 
@@ -40,15 +40,23 @@ final class LiveScenario {
   private static Map<String, Object> runMode(SearchEngine engine, SoakOptions options,
       PrintStream out, String modeName) throws Exception {
     Mode mode;
+    String version;
     switch (modeName) {
       case "zero-downtime":
         mode = Mode.ZERO_DOWNTIME;
+        version = "reindex";
+        break;
+      case "scripted":
+        mode = Mode.ZERO_DOWNTIME;
+        version = "scripted";
         break;
       case "blocking":
         mode = Mode.BLOCKING;
+        version = "reindex";
         break;
       case "backfill":
         mode = Mode.BACKFILL;
+        version = "backfill";
         break;
       default:
         throw new IllegalArgumentException("unknown mode " + modeName);
@@ -56,10 +64,10 @@ final class LiveScenario {
     String prefix = "soak-live-" + modeName;
     int docs = options.docs("live");
     out.println();
-    out.println("== live " + modeName + ": " + docs + " documents, " + options.writers
-        + " writers at " + options.rate + " ops/s each");
+    out.println("== live " + modeName + ": " + docs + " documents, " + options.shards
+        + " shards, " + options.writers + " writers at " + options.rate + " ops/s each");
     Cluster.clean(engine, prefix);
-    ProtoMapper base = SoakSchema.mapper("base", prefix);
+    ProtoMapper base = SoakSchema.mapper("base", prefix, options.shards);
     MigrationResult created = IndexMigrator.builder().engine(engine).mapper(base).build()
         .bootstrap(Document.class);
     if (!created.ok()) {
@@ -77,7 +85,8 @@ final class LiveScenario {
       migration.swapGrace(options.swapGrace);
     }
     IndexMigrator migrator = IndexMigrator.builder().engine(engine)
-        .mapper(SoakSchema.mapper(mode == Mode.BACKFILL ? "backfill" : "reindex", prefix))
+        .mapper(SoakSchema.mapper(version, prefix, options.shards))
+        .scriptProvider(SoakSchema.scripts(version))
         .options(migration.build())
         .listener((a, phase) -> {
           load.clock.mark(phase.name());
@@ -109,9 +118,8 @@ final class LiveScenario {
       checks.add("migration ended " + outcome.status() + ": " + outcome.error());
     }
     String holder = Cluster.holder(engine, alias);
-    if (!Cluster.pending(engine, holder).isEmpty()) {
-      checks.add(holder + " still carries a pending marker: " + Cluster.pending(engine, holder));
-    }
+    checks.addAll(endState(engine, migrator, holder, oldIndex, version,
+        mode == Mode.BACKFILL));
     long locks = Cluster.lockCount(engine, prefix);
     if (locks != 0) {
       checks.add("lock index holds " + locks + " documents");
@@ -120,6 +128,7 @@ final class LiveScenario {
     Map<String, Object> verified = load.verify(mode, origin);
     Map<String, Object> report = new LinkedHashMap<>();
     report.put("mode", modeName);
+    report.put("shards", options.shards);
     report.put("alias", alias);
     report.put("oldIndex", oldIndex);
     report.put("newIndex", holder);
@@ -134,5 +143,37 @@ final class LiveScenario {
       Cluster.clean(engine, prefix);
     }
     return report;
+  }
+
+  /**
+   * Checks the state a finished migration must leave: the alias on an index that takes writes,
+   * moved off the old index by a reindex (kept by a backfill), without a pending marker, with the
+   * target mapping in effect, and planning again {@code NO_OP}.
+   *
+   * @return the failed checks
+   */
+  static List<String> endState(SearchEngine engine, IndexMigrator migrator, String holder,
+      String oldIndex, String version, boolean inPlace) {
+    List<String> checks = new ArrayList<>();
+    if (Cluster.writeBlocked(engine, holder)) {
+      checks.add("the alias target " + holder + " is write-blocked");
+    }
+    if (inPlace ? !holder.equals(oldIndex) : holder.equals(oldIndex)) {
+      checks.add("the alias points at " + holder + (inPlace ? ", not at " + oldIndex
+          : ", still the old index"));
+    }
+    Map<String, Object> pending = Cluster.pending(engine, holder);
+    if (!pending.isEmpty()) {
+      checks.add(holder + " still carries a pending marker: " + pending);
+    }
+    String mapping = SoakSchema.mappingProblem(engine.getMappings(holder), version);
+    if (mapping != null) {
+      checks.add("the target mapping is not in effect on " + holder + ": " + mapping);
+    }
+    IndexPlan again = migrator.plan(Document.class).items().get(0);
+    if (again.action() != Action.NO_OP) {
+      checks.add("planning again gives " + again.action() + ": " + again.reason());
+    }
+    return checks;
   }
 }

@@ -54,6 +54,7 @@ final class BootstrapScenario {
     java.util.concurrent.CountDownLatch held = new java.util.concurrent.CountDownLatch(1);
     Child child = Child.start(SoakWorker.command(options.engine, options.url, "migrate",
         List.of("prefix=" + prefix, "version=reindex", "killAt=SWAPPED",
+            "shards=" + options.shards,
             "lockTtlMs=" + options.lockTtl.toMillis())),
         options.out.resolve(label + "-bootstrap-" + name + "-killed.log"),
         line -> {
@@ -78,7 +79,7 @@ final class BootstrapScenario {
     out.println();
     out.println("== bootstrap " + name + ": " + jvms + " JVMs at once");
     Cluster.clean(engine, prefix);
-    ProtoMapper base = SoakSchema.mapper("base", prefix);
+    ProtoMapper base = SoakSchema.mapper("base", prefix, options.shards);
     OpLog seeds = new OpLog();
     int docs = 0;
     String documents = base.map(Document.class).alias();
@@ -95,7 +96,7 @@ final class BootstrapScenario {
       interrupt(options, label, out, prefix, name);
     }
     String version = "create".equals(kind) ? "base" : "reindex";
-    ProtoMapper target = SoakSchema.mapper(version, prefix);
+    ProtoMapper target = SoakSchema.mapper(version, prefix, options.shards);
     Map<String, String> expected = new TreeMap<>();
     for (IndexPlan item : IndexMigrator.builder().engine(engine).mapper(target).build()
         .plan(Document.class, Firm.class, InboxItem.class, TypedMaps.class).items()) {
@@ -115,7 +116,7 @@ final class BootstrapScenario {
     List<Map<String, Object>> results = new ArrayList<>();
     for (int k = 0; k < jvms; k++) {
       List<String> params = List.of("prefix=" + prefix, "version=" + version,
-          "startAt=" + startAt, "lockWaitMs=" + lockWait,
+          "shards=" + options.shards, "startAt=" + startAt, "lockWaitMs=" + lockWait,
           "lockTtlMs=" + options.lockTtl.toMillis());
       children.add(Child.start(SoakWorker.command(options.engine, options.url, "bootstrap",
           params), options.out.resolve(label + "-bootstrap-" + name + "-" + k + ".log"),
@@ -144,10 +145,18 @@ final class BootstrapScenario {
       checks.add("only " + results.size() + " of " + jvms + " JVMs reported a result; exits "
           + exits);
     }
+    for (int k = 0; k < exits.size(); k++) {
+      if (exits.get(k) == null || exits.get(k) != 0) {
+        checks.add("JVM " + k + " exited with " + exits.get(k));
+      }
+    }
     long firstStart = Long.MAX_VALUE;
     long lastStart = Long.MIN_VALUE;
     Map<String, Map<String, Long>> statuses = new TreeMap<>();
     for (Map<String, Object> result : results) {
+      if (Boolean.TRUE.equals(result.get("late"))) {
+        checks.add("JVM " + result.get("pid") + " was not ready before the start instant");
+      }
       long started = ((Number) result.get("startedAt")).longValue();
       firstStart = Math.min(firstStart, started);
       lastStart = Math.max(lastStart, started);
@@ -156,6 +165,9 @@ final class BootstrapScenario {
         statuses.computeIfAbsent(String.valueOf(outcome.get("alias")), a -> new TreeMap<>())
             .merge(outcome.get("action") + "/" + outcome.get("status"), 1L, Long::sum);
       }
+    }
+    if (!results.isEmpty() && lastStart - firstStart > 500) {
+      checks.add("the JVMs started " + (lastStart - firstStart) + " ms apart, not at once");
     }
     Map<String, Object> aliases = new TreeMap<>();
     for (Map.Entry<String, String> entry : expected.entrySet()) {
@@ -195,6 +207,9 @@ final class BootstrapScenario {
             + indices);
       }
       for (String holder : holders) {
+        if (Cluster.writeBlocked(engine, holder)) {
+          checks.add("the alias target " + holder + " is write-blocked");
+        }
         Map<String, Object> pending = Cluster.pending(engine, holder);
         if (!pending.isEmpty()) {
           checks.add(holder + " carries a pending marker " + pending);

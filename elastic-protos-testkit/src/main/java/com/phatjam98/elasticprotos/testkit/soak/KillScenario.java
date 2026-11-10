@@ -35,6 +35,37 @@ final class KillScenario {
 
   private KillScenario() {}
 
+  /**
+   * A kill in the middle of a phase: {@code delayMs} after the child reported {@code after}.
+   *
+   * @param after the phase whose report starts the delay
+   * @param delayMs how long into the next phase to kill
+   */
+  record MidKill(String after, long delayMs) {
+
+    /** Returns the mid-phase kill of a kill point, or null for a phase boundary. */
+    static MidKill of(String point, SoakOptions options) {
+      long grace = options.swapGrace == null ? 5000 : options.swapGrace.toMillis();
+      switch (point) {
+        case "MID_COPY":
+          return new MidKill("PREPARED", 400);
+        case "MID_CATCHUP":
+          return new MidKill("COPIED", 150);
+        case "MID_FREEZE":
+          // after the grace, between the write block and the FROZEN marker
+          return new MidKill("SWAPPED", grace + 30);
+        case "MID_RECONCILE":
+          return new MidKill("FROZEN", 300);
+        case "MID_SWEEP":
+          return new MidKill("RECONCILED", 200);
+        case "MID_BACKFILL":
+          return new MidKill("BACKFILL_MARKED", 500);
+        default:
+          return null;
+      }
+    }
+  }
+
   static long run(SearchEngine engine, SoakOptions options, String label, PrintStream out,
       List<Object> runs) throws Exception {
     long violations = 0;
@@ -48,15 +79,19 @@ final class KillScenario {
 
   private static Map<String, Object> runPhase(SearchEngine engine, SoakOptions options,
       String label, PrintStream out, String killAt) throws Exception {
-    boolean backfill = killAt.startsWith("BACKFILL");
+    final boolean scripted = killAt.startsWith("SCRIPTED_");
+    final String point = scripted ? killAt.substring("SCRIPTED_".length()) : killAt;
+    final MidKill mid = MidKill.of(point, options);
+    boolean backfill = point.startsWith("BACKFILL") || point.equals("MID_BACKFILL");
     final Mode mode = backfill ? Mode.BACKFILL : Mode.ZERO_DOWNTIME;
-    final String version = backfill ? "backfill" : "reindex";
+    final String version = backfill ? "backfill" : scripted ? "scripted" : "reindex";
     String prefix = "soak-kill-" + killAt.toLowerCase(Locale.ROOT).replace('_', '-');
     int docs = options.docs("kill");
     out.println();
-    out.println("== kill at " + killAt + ": " + docs + " documents, lockTtl " + options.lockTtl);
+    out.println("== kill at " + killAt + ": " + docs + " documents, " + options.shards
+        + " shards, lockTtl " + options.lockTtl);
     Cluster.clean(engine, prefix);
-    ProtoMapper base = SoakSchema.mapper("base", prefix);
+    ProtoMapper base = SoakSchema.mapper("base", prefix, options.shards);
     MigrationResult created = IndexMigrator.builder().engine(engine).mapper(base).build()
         .bootstrap(Document.class);
     if (!created.ok()) {
@@ -79,7 +114,8 @@ final class KillScenario {
     load.clock.mark(PhaseClock.STARTED, origin, "parent");
     CountDownLatch held = new CountDownLatch(1);
     List<String> params = new ArrayList<>(List.of("prefix=" + prefix, "version=" + version,
-        "killAt=" + killAt, "lockTtlMs=" + options.lockTtl.toMillis()));
+        "shards=" + options.shards, "killAt=" + (mid == null ? point : "NONE"),
+        "lockTtlMs=" + options.lockTtl.toMillis()));
     if (options.swapGrace != null) {
       params.add("swapGraceMs=" + options.swapGrace.toMillis());
     }
@@ -91,11 +127,28 @@ final class KillScenario {
           if ("PHASE".equals(parts[0])) {
             load.clock.mark(parts[1], Long.parseLong(parts[2]), "child");
             out.println("  child phase " + parts[1]);
+            if (mid != null && mid.after().equals(parts[1])) {
+              // kill mid-phase: a fixed delay into the phase that follows
+              Thread timer = new Thread(() -> {
+                Soak.pause(java.time.Duration.ofMillis(mid.delayMs()));
+                held.countDown();
+              }, "soak-kill-timer");
+              timer.setDaemon(true);
+              timer.start();
+            }
           } else if ("HOLD".equals(parts[0])) {
             held.countDown();
           }
         });
-    boolean reached = held.await(30, TimeUnit.MINUTES);
+    // wait for the kill point, failing fast when the child exits without reaching it
+    boolean reached = false;
+    long deadline = System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(30);
+    while (!reached && System.currentTimeMillis() < deadline) {
+      reached = held.await(1, TimeUnit.SECONDS);
+      if (!reached && !child.alive()) {
+        break;
+      }
+    }
     final Optional<Hit> lockAtKill =
         reached ? Cluster.lock(engine, prefix, alias) : Optional.empty();
     child.kill();
@@ -105,6 +158,19 @@ final class KillScenario {
         : " (it never reached " + killAt + "; last output " + child.tail() + ")"));
     if (!reached) {
       checks.add("the child never reached " + killAt + ": " + child.tail());
+    }
+    if (mid != null) {
+      // where the kill landed: still inside the phase, or after the next one was reported
+      long triggered = load.clock.first(mid.after());
+      boolean midPhase = load.clock.events().stream().noneMatch(e -> e.at() > triggered
+          && e.at() <= killedAt && !"KILLED".equals(e.phase()));
+      Map<String, Object> landed = new LinkedHashMap<>();
+      landed.put("after", mid.after());
+      landed.put("delayMs", mid.delayMs());
+      landed.put("killedAfterTriggerMs", triggered < 0 ? null : killedAt - triggered);
+      landed.put("insidePhase", midPhase);
+      report.put("midPhaseKill", landed);
+      load.reconcileInterrupted = "MID_RECONCILE".equals(point) && midPhase;
     }
     final String childHolder = lockAtKill.map(h -> String.valueOf(h.source().get("holder")))
         .orElse(null);
@@ -153,7 +219,8 @@ final class KillScenario {
       migration.swapGrace(options.swapGrace);
     }
     IndexMigrator migrator = IndexMigrator.builder().engine(engine)
-        .mapper(SoakSchema.mapper(version, prefix))
+        .mapper(SoakSchema.mapper(version, prefix, options.shards))
+        .scriptProvider(SoakSchema.scripts(version))
         .options(migration.build())
         .listener((a, phase) -> {
           load.clock.mark(phase.name(), System.currentTimeMillis(), "resume");
@@ -226,17 +293,7 @@ final class KillScenario {
 
     String holder = Cluster.holder(engine, alias);
     report.put("newIndex", holder);
-    Map<String, Object> pending = Cluster.pending(engine, holder);
-    if (!pending.isEmpty()) {
-      checks.add(holder + " still carries a pending marker: " + pending);
-    }
-    if (!backfill && holder.equals(oldIndex)) {
-      checks.add("the alias still points at the old index " + oldIndex);
-    }
-    IndexPlan again = migrator.plan(Document.class).items().get(0);
-    if (again.action() != Action.NO_OP) {
-      checks.add("planning again gives " + again.action() + ": " + again.reason());
-    }
+    checks.addAll(LiveScenario.endState(engine, migrator, holder, oldIndex, version, backfill));
     report.put("indices", Cluster.indices(engine, prefix).keySet());
 
     Map<String, Object> verified = load.verify(mode, origin);

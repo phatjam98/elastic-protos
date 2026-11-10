@@ -17,9 +17,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
 import java.util.TreeMap;
-import java.util.concurrent.ConcurrentLinkedDeque;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.concurrent.locks.LockSupport;
 
 /**
@@ -54,9 +53,25 @@ public final class Writers {
   private final List<Thread> threads = new ArrayList<>();
   private volatile boolean stopping;
   private volatile String oldIndex;
-  private final ConcurrentLinkedDeque<String> late = new ConcurrentLinkedDeque<>();
-  private final AtomicInteger lateSize = new AtomicInteger();
+  private final AtomicReferenceArray<String> late = new AtomicReferenceArray<>(LATE_SAMPLE);
+  private final AtomicLong lateCount = new AtomicLong();
   private final Map<String, AtomicLong> counters = new TreeMap<>();
+  private final List<Observation> observations = new ArrayList<>();
+
+  /**
+   * A write whose result contradicted the log's view of the document: a create (the log held it
+   * as absent) that found it ({@code createFoundExisting}), an overwrite that created it ({@code
+   * indexFoundMissing}), or a delete that found nothing ({@code deleteFoundMissing}).
+   *
+   * @param id the document id
+   * @param kind which contradiction
+   * @param phase the phase label when it was acknowledged
+   * @param startedAt when it was sent
+   * @param at when it was acknowledged
+   * @param before the acknowledged writes of the id before this one
+   */
+  public record Observation(String id, String kind, String phase, long startedAt, long at,
+      List<Entry> before) {}
 
   /**
    * Creates writers.
@@ -115,17 +130,16 @@ public final class Writers {
 
   /** Returns a random id written to the old index after the copy began, or null. */
   public String lateId(Random random) {
-    int size = lateSize.get();
-    if (size == 0) {
+    long count = lateCount.get();
+    if (count == 0) {
       return null;
     }
-    int skip = random.nextInt(size);
-    for (String id : late) {
-      if (skip-- <= 0) {
-        return id;
-      }
-    }
-    return late.peekLast();
+    return late.get(random.nextInt((int) Math.min(count, LATE_SAMPLE)));
+  }
+
+  /** Returns the observations so far. */
+  public synchronized List<Observation> observations() {
+    return List.copyOf(observations);
   }
 
   /** Returns the counters: attempts, acknowledged writes by type, observations. */
@@ -227,13 +241,14 @@ public final class Writers {
         : type == OpType.DELETE ? null : SoakSchema.document(id, rev, random);
     while (true) {
       count("attempted." + type);
+      List<Entry> before = log.history(id).entries();
       log.begin(id);
       long started = System.currentTimeMillis();
       Outcome outcome = send(id, type, body, started);
       if (outcome.entry != null) {
         log.ack(id, outcome.entry);
         count("acked." + type);
-        observe(type, outcome.entry);
+        observe(id, type, outcome.entry, before);
         Entry entry = outcome.entry;
         if (type == OpType.DELETE) {
           owned.removeLive(id);
@@ -243,11 +258,7 @@ public final class Writers {
         }
         owned.touch(id);
         if (oldIndex != null && oldIndex.equals(entry.index()) && clock.seen("COPIED")) {
-          late.addLast(id);
-          if (lateSize.incrementAndGet() > LATE_SAMPLE) {
-            late.pollFirst();
-            lateSize.decrementAndGet();
-          }
+          late.set((int) (lateCount.getAndIncrement() % LATE_SAMPLE), id);
         }
         return;
       }
@@ -274,14 +285,19 @@ public final class Writers {
     }
   }
 
-  /** Counts writes whose result contradicts the log's view of the document, by phase. */
-  private void observe(OpType type, Entry entry) {
-    if (type == OpType.CREATE && entry.found()) {
-      count("observed.createFoundExisting." + clock.current());
-    } else if (type == OpType.INDEX && !entry.found()) {
-      count("observed.indexFoundMissing." + clock.current());
-    } else if (type == OpType.DELETE && !entry.found()) {
-      count("observed.deleteFoundMissing." + clock.current());
+  /** Records writes whose result contradicts the log's view of the document. */
+  private void observe(String id, OpType type, Entry entry, List<Entry> before) {
+    String kind = type == OpType.CREATE && entry.found() ? "createFoundExisting"
+        : type == OpType.INDEX && !entry.found() ? "indexFoundMissing"
+            : type == OpType.DELETE && !entry.found() ? "deleteFoundMissing" : null;
+    if (kind == null) {
+      return;
+    }
+    String phase = clock.current();
+    count("observed." + kind + "." + phase);
+    synchronized (this) {
+      observations.add(new Observation(id, kind, phase, entry.startedAt(), entry.ackedAt(),
+          before));
     }
   }
 

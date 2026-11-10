@@ -54,13 +54,15 @@ public final class WriteFailures {
    * Returns the documented class of a failure, or null when it is a genuine violation.
    *
    * <ul>
-   *   <li>{@code BLOCKED_AFTER_SWAP} (zero downtime): a write blocked after the alias swap, a
-   *       straggler that resolved the alias to the old index before it (README "Limitations");
-   *   <li>{@code UPDATE_404_BEFORE_RECONCILE} (zero downtime): a partial update after the swap of
-   *       a document the old index acknowledged after the catch-up began, which the new index
-   *       lacks until the reconcile creates it (README "Zero-downtime reindex");
-   *   <li>{@code BLOCKING_WRITE_BLOCK} (blocking reindex): writes fail from the write block until
-   *       the swap.
+   *   <li>{@code BLOCKED_AFTER_SWAP} (zero downtime): a straggler that resolved the alias to the
+   *       old index before the swap (sent before it) and was blocked after it, whose retry against
+   *       the alias then succeeded (README "Limitations");
+   *   <li>{@code UPDATE_404_BEFORE_RECONCILE} (zero downtime): a partial update sent after the
+   *       swap and before the reconcile bound, of a document the old index acknowledged after the
+   *       catch-up began, which the new index lacks until the reconcile creates it (README
+   *       "Zero-downtime reindex");
+   *   <li>{@code BLOCKING_WRITE_BLOCK} (blocking reindex): a write sent before the swap, during
+   *       the write block.
    * </ul>
    *
    * @param failure the failure
@@ -74,19 +76,35 @@ public final class WriteFailures {
     boolean swapped = timeline.swappedAt() > 0 && failure.at() >= timeline.swappedAt();
     switch (mode) {
       case ZERO_DOWNTIME:
-        if ("BLOCKED".equals(failure.kind()) && swapped) {
+        if ("BLOCKED".equals(failure.kind()) && swapped
+            && failure.startedAt() < timeline.swappedAt() && retriedOk(failure, history)) {
           return "BLOCKED_AFTER_SWAP";
         }
         if ("NOT_FOUND".equals(failure.kind()) && "UPDATE".equals(failure.op()) && swapped
+            && failure.startedAt() < timeline.reconcileBound()
             && createdLateOnOld(failure, timeline, history)) {
           return "UPDATE_404_BEFORE_RECONCILE";
         }
         return null;
       case BLOCKING:
-        return "BLOCKED".equals(failure.kind()) ? "BLOCKING_WRITE_BLOCK" : null;
+        return "BLOCKED".equals(failure.kind()) && timeline.swappedAt() > 0
+            && failure.startedAt() <= timeline.swappedAt() ? "BLOCKING_WRITE_BLOCK" : null;
       default:
         return null;
     }
+  }
+
+  /** Whether a retried write was later acknowledged, or the writer stopped instead of retrying. */
+  private static boolean retriedOk(Failure failure, List<Entry> history) {
+    if (!failure.retried()) {
+      return true;
+    }
+    for (Entry entry : history) {
+      if (entry.startedAt() >= failure.at()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
