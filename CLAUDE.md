@@ -135,11 +135,14 @@ Checkstyle, JaCoCo and Javadoc.
   and `HighlightCompiler`; nested/reverse_nested wrappers named `<name>__nested` / `<name>__reverse`.
   Sub-aggregations nest down to `QueryCompilerConfig.maxAggregationDepth` (default 3, top level
   included); `maxAggregationBuckets` (default 0, off) guards the product of requested bucket counts.
-  `filter` / `filters` / `composite` (ADR 0012): conditions are `SearchCondition`s compiled by
+  `filter` / `filters` / `composite` (ADR 0012): conditions are `repeated SearchCondition` (OR of
+  ANDs, `ConditionCompiler.compileAny`, as the query; lenient skip of a predicate skips the whole
+  filter/filters), compiled by
   `ConditionCompiler` with the aggregation's nested context entered (`NestedPathResolver` context:
   context paths not re-wrapped, fields outside refused); a filter with a nested path as `field`
   filters those nested objects. Composite is top level only, sources in one nested context, paged
-  by `CompositePager` (stops at a page without buckets or `after_key`). The condition messages live
+  by `CompositePager` (compiles once at open; stops at a page without buckets or `after_key`;
+  throws on a repeated `after_key`; `track_total_hits: false`). The condition messages live
   in `conditions.proto` (publicly imported by `search_criteria.proto`, which `aggregations.proto`
   cannot import: cycle). The adapters parse responses into key-sorted maps, so keyed buckets and
   composite keys come sorted by key. `RangeValue.min`/`max` are `optional` (open bounds).

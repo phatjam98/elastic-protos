@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.TreeMap;
 import java.util.function.Consumer;
 
 /**
@@ -19,7 +20,9 @@ import java.util.function.Consumer;
  * page as the {@code after} of the next.
  *
  * <p>Each request carries the criteria's conditions and only the named composite aggregation (with
- * its sub-aggregations), no hits and no highlighting. Iteration stops when the engine returns a
+ * its sub-aggregations), no hits, no highlighting and no hit count ({@code track_total_hits:
+ * false}). The request is compiled once, when the pager is opened, so invalid criteria fail there;
+ * so does a composite that a lenient compiler skipped. Iteration stops when the engine returns a
  * page without buckets or without an {@code after_key}; empty pages are never returned. A page
  * that holds fewer buckets than the composite's size is not taken as the last one, since the
  * engines do not promise it, so the end costs one more request. An {@code after} already set on the
@@ -27,7 +30,9 @@ import java.util.function.Consumer;
  * #afterKey()}.
  *
  * <p>Each page is a separate search: unlike {@link SearchPager}, no point in time holds the data
- * still, so documents written during the iteration may or may not be counted. Not thread-safe.
+ * still, so documents written during the iteration may or may not be counted. An engine that
+ * returns the after key it was sent would loop for ever; the pager throws instead. Not
+ * thread-safe.
  *
  * <pre>{@code
  * Aggregation.Builder pairs = Aggs.composite("pairs",
@@ -45,6 +50,7 @@ public final class CompositePager implements Iterator<List<AggregationResults.Bu
   private final List<String> indices;
   private final IndexDefinition index;
   private final String name;
+  private final List<String> warnings;
   private SearchCriteria request;
   private Map<String, Object> afterKey;
   private List<AggregationResults.Bucket> pending;
@@ -73,6 +79,31 @@ public final class CompositePager implements Iterator<List<AggregationResults.Bu
         .clearHighlight()
         .setPagination(Pagination.newBuilder().setSize(-1))
         .build();
+    CompiledSearch compiled = compiler.compile(request, index);
+    if (!compiled(map(compiled.body().get("aggs")), name)) {
+      throw new IllegalArgumentException("Composite aggregation '" + name + "' was skipped by the"
+          + " lenient compiler, so there is nothing to page: " + compiled.warnings());
+    }
+    this.warnings = compiled.warnings();
+  }
+
+  /** Whether a request body's aggregations hold the named one, possibly inside its wrappers. */
+  private static boolean compiled(Map<String, Object> aggs, String name) {
+    if (aggs.containsKey(name)) {
+      return true;
+    }
+    for (Map.Entry<String, Object> entry : aggs.entrySet()) {
+      if (entry.getKey().startsWith(name + AggregationCompiler.WRAPPER)
+          && compiled(map(map(entry.getValue()).get("aggs")), name)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Map<String, Object> map(Object value) {
+    return value instanceof Map ? (Map<String, Object>) value : Map.of();
   }
 
   /**
@@ -87,7 +118,9 @@ public final class CompositePager implements Iterator<List<AggregationResults.Bu
    * @param index the definition the criteria are compiled against
    * @param name the name of a top-level composite aggregation of the criteria
    * @return the pager
-   * @throws IllegalArgumentException when the criteria have no such composite aggregation
+   * @throws IllegalArgumentException when the criteria have no such composite aggregation, or a
+   *     lenient compiler skipped it
+   * @throws QueryCompileException when the request does not fit the index
    */
   public static CompositePager open(SearchEngine engine, QueryCompiler compiler,
       List<String> indices, SearchCriteria criteria, IndexDefinition index, String name) {
@@ -121,14 +154,23 @@ public final class CompositePager implements Iterator<List<AggregationResults.Bu
     if (done) {
       return false;
     }
-    SearchResult result = engine.search(indices, compiler.compile(request, index).body());
+    Map<String, Object> body = new TreeMap<>(compiler.compile(request, index).body());
+    // pages need the aggregation only, not the hit count
+    body.put("track_total_hits", false);
+    SearchResult result = engine.search(indices, body);
     AggregationResults results = AggregationResults.of(result);
     List<AggregationResults.Bucket> buckets = results.buckets(name);
-    Optional<Map<String, Object>> after = results.afterKey(name);
+    Optional<Map<String, Object>> after = buckets.isEmpty() ? Optional.empty()
+        : results.afterKey(name);
     if (buckets.isEmpty() || after.isEmpty()) {
       done = true;
     }
     if (after.isPresent()) {
+      if (after.get().equals(afterKey)) {
+        done = true;
+        throw new IllegalStateException("Composite aggregation '" + name + "' returned the after"
+            + " key it was sent, " + afterKey + "; the engine would repeat this page for ever");
+      }
       afterKey = after.get();
       Aggregation.Builder composite = request.getAggregation(0).toBuilder();
       request = request.toBuilder().setAggregation(0, Aggs.after(composite, afterKey)).build();
@@ -149,6 +191,11 @@ public final class CompositePager implements Iterator<List<AggregationResults.Bu
     List<AggregationResults.Bucket> page = pending;
     pending = null;
     return page;
+  }
+
+  /** Returns the warnings of compiling the page request, such as skipped sub-aggregations. */
+  public List<String> warnings() {
+    return warnings;
   }
 
   /**

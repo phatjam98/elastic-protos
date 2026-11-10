@@ -186,8 +186,8 @@ class AggregationCompilerSpec extends Specification {
     def e = thrown(QueryCompileException)
     e.message.contains("Aggregations 'a>b' ask for up to 1100 buckets (the product of their sizes), more than the maximum of 1000 (QueryCompilerConfig.maxAggregationBuckets)")
 
-    when: 'ranges and filters count their buckets, histograms and filter count one'
-    compile(guarded, document, Aggs.sub(Aggs.range('r', 'size_bytes', Aggs.bucket(null, 1d, 2d), Aggs.bucket(null, 2d, 3d)),
+    when: 'ranges and filters count their buckets, histograms, filter and nested wrappers count one'
+    compile(QueryCompiler.of(guarded.config().withMaxAggregationDepth(4)), document, Aggs.sub(Aggs.range('r', 'size_bytes', Aggs.bucket(null, 1d, 2d), Aggs.bucket(null, 2d, 3d)),
         Aggs.sub(Aggs.histogram('h', 'size_bytes', 10), Aggs.sub(Aggs.filters('f',
             Aggs.keyed('x', Criteria.where('type').equalTo('A')), Aggs.keyed('y', Criteria.where('type').equalTo('B')))
             .tap { filtersBuilder.setOtherBucketKey('rest') }, terms('t', 'tags') { size = 200 }))))
@@ -195,6 +195,25 @@ class AggregationCompilerSpec extends Specification {
     then: '2 x 1 x 3 x 200 = 1200'
     def e2 = thrown(QueryCompileException)
     e2.message.contains("'r>h>f>t' ask for up to 1200 buckets")
+
+    when: 'a nested path is reported without its wrappers'
+    compile(guarded, document, Aggs.sub(terms('a', 'type') { size = 100 }, terms('r', 'parties.role') { size = 11 }))
+
+    then:
+    def e3 = thrown(QueryCompileException)
+    e3.message.contains("Aggregations 'a>r' ask for up to 1100 buckets")
+
+    when: 'validation comes first, and aggregations lenient mode skipped do not count'
+    compile(guarded, document, Aggs.sub(terms('a__x', 'type') { size = 100 }, terms('b', 'tags') { size = 11 }))
+
+    then:
+    def e4 = thrown(QueryCompileException)
+    e4.message.contains("must not contain '__'")
+
+    expect:
+    compile(QueryCompiler.of(guarded.config().withLenient(true)), document,
+        Aggs.sub(terms('a', 'type') { size = 100 }, terms('b', 'nope') { size = 11 })).warnings() ==
+        ["Skipped aggregation 'b' on unknown field 'nope'"]
 
     and: 'the guard is off by default'
     compile(strict, document, Aggs.sub(terms('a', 'type') { size = 1000 }, terms('b', 'tags') { size = 1000 }))

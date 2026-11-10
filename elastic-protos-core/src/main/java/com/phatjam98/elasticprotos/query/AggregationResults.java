@@ -169,21 +169,26 @@ public final class AggregationResults {
    * after_key}, one value per source (null for a missing bucket), to pass back as {@code
    * CompositeAggregation.after} (see {@link Aggs#after}).
    *
+   * <p>A composite is recognised by its {@code after_key} or by its buckets' map keys. A page
+   * without buckets carries neither, and looks like an empty histogram, so it is refused: check
+   * {@link #buckets} first, since a page without buckets is the last one.
+   *
    * @param name the aggregation name
-   * @return the after key; empty when the engine returned none, which it does once a page has no
-   *     buckets: there is nothing more to read
+   * @return the after key; empty when the engine returned none for a page with buckets
    * @throws NoSuchElementException when there is no aggregation of this name
-   * @throws IllegalStateException when it is not a composite aggregation
+   * @throws IllegalStateException when it is not a composite aggregation, or a page without
+   *     buckets
    */
   public Optional<Map<String, Object>> afterKey(String name) {
     Map<String, Object> aggregation = require(name);
     Object buckets = aggregation.get("buckets");
     boolean composite = aggregation.get("after_key") instanceof Map
-        || (buckets instanceof List<?> list && !aggregation.containsKey("sum_other_doc_count")
+        || (buckets instanceof List<?> list && !list.isEmpty()
             && list.stream().allMatch(bucket -> map(bucket).get("key") instanceof Map));
     if (!composite) {
       throw new IllegalStateException("Aggregation '" + name + "' is not a composite"
-          + " aggregation; only composite aggregations have an after key");
+          + " aggregation with buckets; only composite aggregations have an after key, and a"
+          + " composite page without buckets (the last one) has none");
     }
     Object after = aggregation.get("after_key");
     return after instanceof Map ? Optional.of(compositeKey(map(after))) : Optional.empty();
@@ -345,9 +350,15 @@ public final class AggregationResults {
   public record Bucket(Object key, String keyAsString, long docCount, Double from, Double to,
       String fromAsString, String toAsString, AggregationResults sub) {
 
-    /** Returns {@code keyAsString} when present, otherwise the key as a string. */
+    /**
+     * Returns {@code keyAsString} when present, otherwise the key as a string; null for the bucket
+     * of a filter aggregation, which has no key.
+     */
     public String keyString() {
-      return keyAsString != null ? keyAsString : String.valueOf(key);
+      if (keyAsString != null) {
+        return keyAsString;
+      }
+      return key == null ? null : String.valueOf(key);
     }
 
     /**

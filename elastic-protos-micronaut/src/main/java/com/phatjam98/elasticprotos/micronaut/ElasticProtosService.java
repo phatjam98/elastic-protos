@@ -238,15 +238,17 @@ public class ElasticProtosService {
   /**
    * Returns a pager over every bucket of a composite aggregation of the criteria, one page of
    * buckets per request; each request runs only that aggregation, without hits or highlights.
-   * Compiler warnings are logged once, when the pager is created.
+   * Only that request is compiled, so other aggregations of the criteria are neither checked nor
+   * reported; its compiler warnings are logged once, when the pager is created.
    *
    * @param criteria what to aggregate; it must hold a top-level composite aggregation named
    *     {@code name}
    * @param type the generated message class whose alias is searched
    * @param name the name of the composite aggregation
    * @return the pager; nothing is requested before its first {@code hasNext()}
-   * @throws IllegalArgumentException when the criteria have no such composite aggregation
-   * @throws com.phatjam98.elasticprotos.query.QueryCompileException when the criteria do not fit
+   * @throws IllegalArgumentException when the criteria have no such composite aggregation, or a
+   *     lenient compiler skipped it
+   * @throws com.phatjam98.elasticprotos.query.QueryCompileException when the request does not fit
    *     the index
    */
   public CompositePager composite(SearchCriteria criteria, Class<? extends Message> type,
@@ -254,8 +256,9 @@ public class ElasticProtosService {
     IndexDefinition definition = definition(type);
     CompositePager pager = CompositePager.open(engine, compiler, List.of(definition.alias()),
         criteria, definition, name);
-    logWarnings(definition, compiler.compile(criteria.toBuilder()
-        .setPagination(Pagination.newBuilder().setSize(-1)).clearHighlight().build(), definition));
+    if (!pager.warnings().isEmpty() && LOG.isWarnEnabled()) {
+      LOG.warn("Search on {}: {}", definition.alias(), String.join("; ", pager.warnings()));
+    }
     return pager;
   }
 

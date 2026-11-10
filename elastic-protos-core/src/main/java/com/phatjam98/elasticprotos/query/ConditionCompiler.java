@@ -36,6 +36,7 @@ final class ConditionCompiler {
   private final IndexDefinition index;
   private final NestedPathResolver resolver;
   private final List<String> warnings;
+  private int skipped;
 
   ConditionCompiler(QueryCompilerConfig config, IndexDefinition index, List<String> warnings) {
     this(config, index, warnings, List.of(), null);
@@ -51,6 +52,34 @@ final class ConditionCompiler {
     this.index = index;
     this.resolver = new NestedPathResolver(index, config.groupNested(), context, contextOwner);
     this.warnings = warnings;
+  }
+
+  /**
+   * Compiles an OR of conditions, as {@code SearchCriteria.search_condition}: one condition as is,
+   * several in a {@code bool.should} with {@code minimum_should_match: 1}.
+   *
+   * @param conditions at least one condition
+   * @return the query
+   */
+  Map<String, Object> compileAny(List<SearchCondition> conditions) {
+    List<Object> compiled = new ArrayList<>();
+    for (SearchCondition condition : conditions) {
+      compiled.add(compile(condition));
+    }
+    if (compiled.size() == 1) {
+      @SuppressWarnings("unchecked")
+      Map<String, Object> single = (Map<String, Object>) compiled.get(0);
+      return single;
+    }
+    Map<String, Object> bool = new TreeMap<>();
+    bool.put("should", compiled);
+    bool.put("minimum_should_match", 1);
+    return object("bool", bool);
+  }
+
+  /** Returns how many predicates lenient mode has skipped so far. */
+  int skipped() {
+    return skipped;
   }
 
   /** Compiles one condition; a condition without usable predicates matches everything. */
@@ -159,6 +188,7 @@ final class ConditionCompiler {
     if (!config.lenient()) {
       throw unknownField(index, name, what);
     }
+    skipped++;
     warnings.add("Skipped " + what + " on unknown field '" + name + "'");
   }
 
@@ -201,7 +231,7 @@ final class ConditionCompiler {
       Map<String, Object> query = condition.getNegate()
           ? exists
           : object("bool", object("must_not", exists));
-      return new Clause(Occur.FILTER, resolver.ancestors(field.path()), query);
+      return new Clause(Occur.FILTER, nestedPath(field), query);
     }
     requireExact(field, SearchOperationType.EQUALS);
     return clause(condition, field, Occur.FILTER,
@@ -209,14 +239,27 @@ final class ConditionCompiler {
   }
 
   private Clause existsClause(FieldCondition condition, FieldInfo field) {
-    return clause(condition, field, Occur.FILTER, exists(field));
+    Occur occur = condition.getNegate() ? Occur.MUST_NOT : Occur.FILTER;
+    return new Clause(occur, nestedPath(field), exists(field));
+  }
+
+  /**
+   * The nested paths a clause on a field is wrapped in; none for a nested path the context has
+   * already entered, which every object of the context is inside.
+   */
+  private List<String> nestedPath(FieldInfo field) {
+    return resolver.entered(field.path()) ? List.of() : resolver.ancestors(field.path());
   }
 
   /**
    * Returns the existence test for a field. A nested field itself cannot be tested with {@code
-   * exists}, so "has at least one element" is a {@code nested} {@code match_all}.
+   * exists}, so "has at least one element" is a {@code nested} {@code match_all}; a nested path
+   * already entered by the context always exists, so its test is {@code match_all}.
    */
   private Map<String, Object> exists(FieldInfo field) {
+    if (resolver.entered(field.path())) {
+      return object("match_all", new TreeMap<>());
+    }
     if (field.kind() == FieldKind.NESTED) {
       return resolver.wrapPaths(List.of(field.path()), object("match_all", new TreeMap<>()));
     }
@@ -612,9 +655,24 @@ final class ConditionCompiler {
                 + " has none; list fields in full_text.fields or map text fields",
             "");
       }
-      fields.putAll(index.fullTextFields());
+      if (resolver.hasContext()) {
+        index.fullTextFields().forEach((path, boost) -> {
+          if (resolver.inContext(path)) {
+            fields.put(path, boost);
+          }
+        });
+        if (fields.isEmpty()) {
+          throw new QueryCompileException("FULL_TEXT without fields in " + resolver.contextOwner()
+              + ", which runs in nested path '" + resolver.contextPath() + "', needs full-text"
+              + " fields inside that path, but the index has none there; list fields in"
+              + " full_text.fields", "");
+        }
+      } else {
+        fields.putAll(index.fullTextFields());
+      }
     }
     if (fields.isEmpty()) {
+      skipped++;
       warnings.add("Skipped FULL_TEXT: none of its fields are mapped");
       return null;
     }

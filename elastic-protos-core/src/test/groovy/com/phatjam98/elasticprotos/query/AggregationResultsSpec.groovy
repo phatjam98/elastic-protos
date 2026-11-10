@@ -299,7 +299,11 @@ class AggregationResultsSpec extends Specification {
 
     and: 'the last page has neither buckets nor an after key'
     pages.page3.buckets('pairs').isEmpty()
-    pages.page3.afterKey('pairs') == Optional.empty()
+    when: 'a page without buckets cannot be told from an empty histogram, so it has no after key to read'
+    pages.page3.afterKey('pairs')
+
+    then:
+    thrown(IllegalStateException)
   }
 
   def "composite keys are unmodifiable and normalized like other keys"() {
@@ -353,7 +357,16 @@ class AggregationResultsSpec extends Specification {
 
     then:
     def notComposite = thrown(IllegalStateException)
-    notComposite.message == "Aggregation 'by_type' is not a composite aggregation; only composite aggregations have an after key"
+    notComposite.message == "Aggregation 'by_type' is not a composite aggregation with buckets; only composite aggregations have an after key, and a composite page without buckets (the last one) has none"
+
+    when:
+    AggregationResults.of([h: [buckets: []]]).afterKey('h')
+
+    then:
+    thrown(IllegalStateException)
+
+    expect: 'a filter bucket has no key string'
+    aggs.bucket('filings').keyString() == null
 
     when:
     sample().afterKey('bands')
