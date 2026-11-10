@@ -172,13 +172,16 @@ public interface SearchEngine extends AutoCloseable {
    * of a zero-downtime reindex, after which the write resolves against the new index) fails it
    * with 409. The merge carries no condition of the caller's, so applying it again to the newest
    * version is what was asked for; implementations retry in the engine ({@code
-   * retry_on_conflict}).
+   * retry_on_conflict}) and, since the engine's retries stay on the index it resolved first, send
+   * the request again on a conflict that survives them ({@code JsonRestEngine} does so up to
+   * three times).
    */
   IndexResult update(String index, String id, Map<String, Object> partial);
 
   /**
    * Merges a partial document into an existing document, retrying on a version conflict up to
-   * {@code retryOnConflict} times ({@code retry_on_conflict}); 0 fails at the first conflict.
+   * {@code retryOnConflict} times in the engine ({@code retry_on_conflict}) and then sending it
+   * again a few times; 0 fails at the first conflict.
    *
    * <p>The default ignores {@code retryOnConflict} and calls {@link #update(String, String,
    * Map)}, so on an implementation that does not override it, {@code 0} does not make the update

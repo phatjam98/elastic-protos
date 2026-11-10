@@ -243,7 +243,18 @@ repeats a recorded write.
 The soak also found that a partial `_update` through the alias can fail with 409 at the instant of
 the swap (the engine read the document in the old index and the write resolved against the new
 one) and during a `BACKFILL` (the update by query rewrote the document between the update's read
-and its write). The write is not applied and a retry succeeds, so the guarantee is qualified to
-full-document writes and deletes, and `SearchEngine.update` now retries in the engine
-(`retry_on_conflict`, default 3; a new overload sets it): the merge carries no condition of the
-caller's, so applying it to the newest version is what was asked for.
+and its write). The write is not applied, so the guarantee is qualified to full-document writes
+and deletes. The merge carries no condition of the caller's, so applying it to the newest version
+is what was asked for, and `SearchEngine.update` now does that in two layers:
+
+- it sends `retry_on_conflict=3` (a new overload sets the count), which resolves the backfill
+  case; the backfill 409 did not recur in the next soak round;
+- it sends the request again on a 409 that survives the engine's retries, up to
+  `JsonRestEngine.UPDATE_RESENDS` = 3 times with a short jittered pause (5 to 25 ms times the
+  attempt). The engine's retries stay on the index it resolved first, so at a swap they keep
+  conflicting; a new request resolves the alias again. Measured with an alias flipped between two
+  indices as fast as possible against partial updates through it: `retry_on_conflict` 0, 3 and 20
+  all left 1.2 to 3.4% of updates failing on Elasticsearch 9.5.5 and 0.5 to 2.0% on OpenSearch
+  2.19.7 (so the count of engine-side retries does not matter); with the resends, 0 of 33,554
+  (Elasticsearch 9.5.5) and 0 of 35,389 (OpenSearch 2.19.7) updates failed in 60 s. A conflict that
+  outlasts the resends still fails; `retryOnConflict` 0 turns both layers off.

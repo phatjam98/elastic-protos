@@ -688,6 +688,64 @@ class JsonRestEngineSpec extends Specification {
     http.requests[4].method == 'DELETE' && http.requests[4].path == '/docs/_doc/1' && http.requests[4].params == [:]
   }
 
+  static final Map CONFLICT_BODY = [error: [type: 'version_conflict_engine_exception', reason: '[x]: version conflict'], status: 409]
+
+  def "an update that still conflicts is sent again, up to UPDATE_RESENDS times"() {
+    given: 'the engine retried on its first index; the alias moved meanwhile'
+    http.enqueue(409, CONFLICT_BODY).enqueue(409, CONFLICT_BODY).enqueue(200, [_index: 'b', _id: 'x', result: 'updated'])
+
+    when:
+    def result = engine.update('alias', 'x', [n: 1])
+
+    then:
+    result.result() == 'updated'
+    result.index() == 'b'
+    http.requests.size() == 3
+    http.requests.every { it.path == '/alias/_update/x' && it.params == [retry_on_conflict: '3'] && it.json() == [doc: [n: 1]] }
+  }
+
+  def "an update gives up after the resends, with the conflict"() {
+    given:
+    (JsonRestEngine.UPDATE_RESENDS + 1).times { http.enqueue(409, CONFLICT_BODY) }
+
+    when:
+    engine.update('alias', 'x', [n: 1])
+
+    then:
+    def e = thrown(EngineException)
+    e.kind == EngineException.Kind.CONFLICT
+    http.requests.size() == JsonRestEngine.UPDATE_RESENDS + 1
+  }
+
+  def "retryOnConflict 0 sends an update once, and other failures are never resent"() {
+    given:
+    http.enqueue(409, CONFLICT_BODY).enqueue(404, [error: [type: 'document_missing_exception'], status: 404])
+        .enqueue(503, [error: [type: 'unavailable'], status: 503])
+
+    when:
+    engine.update('alias', 'x', [n: 1], 0)
+
+    then:
+    thrown(EngineException)
+    http.requests.size() == 1
+
+    when:
+    engine.update('alias', 'x', [n: 1])
+
+    then:
+    def missing = thrown(EngineException)
+    missing.kind == EngineException.Kind.NOT_FOUND
+    http.requests.size() == 2
+
+    when:
+    engine.update('alias', 'x', [n: 1])
+
+    then:
+    def busy = thrown(EngineException)
+    busy.kind == EngineException.Kind.TRANSIENT
+    http.requests.size() == 3
+  }
+
   def "update takes a retry_on_conflict, 0 sending none"() {
     given:
     http.enqueue(200, [_index: 'd', _id: '1', result: 'updated']).enqueue(200, [_index: 'd', _id: '1', result: 'updated'])

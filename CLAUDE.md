@@ -148,7 +148,9 @@ Checkstyle, JaCoCo and Javadoc.
   answer is `SnapshotLost` only when every failure is `search_context_missing_exception`
   (`SearchResult.shardFailures`); otherwise the item fails and retries. `InMemorySearchEngine.shardedSeqNos`
   models per-shard sequence numbers (ties).
-  `SearchEngine.update` retries conflicts in the engine (`retry_on_conflict` 3; 4-arg overload).
+  `SearchEngine.update` retries conflicts in the engine (`retry_on_conflict` 3; 4-arg overload) and
+  `JsonRestEngine` resends a 409 up to `UPDATE_RESENDS` (3) times, since engine retries stay on the index
+  resolved first (alias swap); `retryOnConflict` 0 disables both.
 - `apply` and `rollback` take a per-alias lock (ADR 0008, `AliasLock`) in `IndexNamingStrategy.lockIndex()`
   (`elastic-protos-locks`, prefixed by `prefixed(...)`), re-plan under it and check the lease before
   irreversible steps. `MigrationOptions.lock` / `lockWait` (10m) / `lockTtl` (2m); `Status.LOCKED`,

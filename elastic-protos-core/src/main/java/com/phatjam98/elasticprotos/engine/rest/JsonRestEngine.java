@@ -491,9 +491,30 @@ public final class JsonRestEngine implements SearchEngine {
     String path = "/" + index + "/_update/" + pathSegment(id);
     Map<String, String> params = retryOnConflict == 0
         ? Map.of() : Map.of("retry_on_conflict", Integer.toString(retryOnConflict));
-    return indexResult(object(require(perform("POST", path, params,
-        Json.canonical(Map.of("doc", partial)), RawHttp.JSON))));
+    String body = Json.canonical(Map.of("doc", partial));
+    // The engine's own retries stay on the index it resolved first: when an alias moves between
+    // the update's read and its write (the swap of a zero-downtime reindex), every one of them
+    // conflicts again. Sending the request again resolves the alias anew. The update carries no
+    // condition of the caller's, so a 409 here is never the caller's own concurrency check.
+    int resends = retryOnConflict == 0 ? 0 : UPDATE_RESENDS;
+    for (int attempt = 0; ; attempt++) {
+      RawHttp.Response response = perform("POST", path, params, body, RawHttp.JSON);
+      if (response.status() != 409 || attempt >= resends) {
+        return indexResult(object(require(response)));
+      }
+      LOG.debug("update of {}/{} conflicted; sending it again ({} of {})", index, id,
+          attempt + 1, resends);
+      pause(Duration.ofMillis(java.util.concurrent.ThreadLocalRandom.current()
+          .nextLong(5, 25) * (attempt + 1)));
+    }
   }
+
+  /**
+   * How many times {@link #update(String, String, Map, int)} sends an update again after a
+   * version conflict the engine's {@code retry_on_conflict} did not resolve, unless the caller
+   * asked for no retries.
+   */
+  public static final int UPDATE_RESENDS = 3;
 
   @Override
   public Optional<Hit> get(String index, String id) {
@@ -883,7 +904,7 @@ public final class JsonRestEngine implements SearchEngine {
       TimeUnit.NANOSECONDS.sleep(duration.toNanos());
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      throw new EngineException(Kind.OTHER, 0, "Interrupted while waiting for reindex", e);
+      throw new EngineException(Kind.OTHER, 0, "Interrupted while waiting", e);
     }
   }
 

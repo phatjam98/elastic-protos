@@ -743,10 +743,20 @@ What writers and readers see:
   the instant of the swap (the engine read the document in the old index and its write resolved
   against the new one), as it can during a `BACKFILL` (`_update_by_query` rewrote the document
   between the update's read and its write) or under any concurrent writer; the update is not
-  applied and a retry succeeds. `SearchEngine.update(index, id, partial)` retries in the engine
-  (`retry_on_conflict`, `SearchEngine.DEFAULT_UPDATE_RETRIES` = 3), and
-  `update(index, id, partial, retryOnConflict)` sets it; `ElasticProtosService` (Micronaut) writes
-  whole documents only, so it is not affected.
+  applied. `SearchEngine.update(index, id, partial)` handles both: it sends `retry_on_conflict=3`
+  (`SearchEngine.DEFAULT_UPDATE_RETRIES`), which covers the backfill and other writers, and on a
+  409 that survives it, sends the request again, up to `JsonRestEngine.UPDATE_RESENDS` (3) times
+  with a 5 to 25 ms jittered pause each: the engine's own retries stay on the index it resolved
+  first, so after a swap only a new request reaches the new index. `update(index, id, partial,
+  retryOnConflict)` sets the engine-side count; 0 turns both off (the update fails at the first
+  conflict). Measured with an alias flipped back and forth between two indices as fast as the
+  cluster allows, against partial updates through it: with `retry_on_conflict` alone (0, 3 or 20),
+  1.2 to 3.4% of updates failed on Elasticsearch 9.5.5 and 0.5 to 2.0% on OpenSearch 2.19.7; with
+  the resends, none of 33,554 and 35,389 updates in 60 s. A conflict
+  that outlasts three resends still fails with `CONFLICT`. The update API carries no condition
+  of the caller's, so a resend never hides the caller's own optimistic-concurrency check;
+  conditional writes (`index` with `ifSeqNo`) are never resent. `ElasticProtosService`
+  (Micronaut) writes whole documents only, so it is not affected.
 - **Reads** see the old index until the swap, then the new index. Until the end of the reconcile
   the new index can lack writes made to the old index after the catch-up pass, and until the sweep
   it can still hold documents deleted from the old index after the first copy started (reads after

@@ -40,10 +40,12 @@ packages, and the private geobuf dependency is gone. The `1.0.0-rc.1`, `1.0.0-rc
   answer) instead of reading it as complete; on the snapshot that counts as a lost snapshot.
 - `ReconcileStats` equality now includes `strategy` and `swept`: a comparison with
   `new ReconcileStats(c, s, g, k)` matches only a full scan that swept.
-- `SearchEngine.update` (`JsonRestEngine`) now sends `retry_on_conflict=3`: a partial update that
-  raced another write (an alias swap, a backfill's update by query) is applied to the newest
-  version instead of failing with 409. The new `update(index, id, partial, retryOnConflict)` sets
-  it; 0 restores the old behaviour.
+- `SearchEngine.update` (`JsonRestEngine`) now sends `retry_on_conflict=3` and, on a 409 that
+  survives it, sends the request again up to three times (`JsonRestEngine.UPDATE_RESENDS`, with a
+  short jittered pause): a partial update that raced another write (a backfill's update by query)
+  or an alias swap (where the engine's own retries stay on the old index) is applied to the newest
+  version instead of failing. The new `update(index, id, partial, retryOnConflict)` sets the
+  engine-side count; 0 restores the old behaviour.
 
 #### Fixed
 
