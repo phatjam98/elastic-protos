@@ -41,10 +41,19 @@ packages, and the private geobuf dependency is gone. The `1.0.0-rc.1`, `1.0.0-rc
   `elastic-protos.query.max-aggregation-depth` and `max-aggregation-buckets`.
 - `InMemorySearchEngine` (testkit) runs `filter` and `filters` aggregations and sub-aggregations
   at any depth; `composite` fails with `BAD_REQUEST`.
+- Highlighting of text fields inside nested objects
+  ([ADR 0012](docs/adr/0012-nested-highlighting-through-inner-hits.md)) through `inner_hits` on the
+  query's `nested` clauses on their path, read back as `Hit.nestedHighlights()`
+  (`NestedHighlight`: path, offsets, fragments) and `Hit.fragments(field)`.
+  `Highlight.include_nested` adds nested full-text fields to the default set;
+  `Highlight.nested_objects` sets the inner hits size.
 
 #### Changed
 
 - Sub-aggregations may nest down to `maxAggregationDepth` levels instead of one.
+- `Hit` gains a tenth component, `nestedHighlights`; the nine- and five-argument constructors
+  remain. A highlighted field inside nested objects is no longer refused as such; it is refused
+  when the query has no condition on its nested path.
 - `SearchCondition`, `FieldCondition`, `FullTextOptions`, `FieldBoost` and the enums
   `FullTextOperator`, `FullTextType` and `SearchOperationType` moved from `search_criteria.proto`
   to the new `conditions.proto`, which `search_criteria.proto` imports publicly. Names, field

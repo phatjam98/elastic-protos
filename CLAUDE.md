@@ -143,8 +143,14 @@ Checkstyle, JaCoCo and Javadoc.
   in `conditions.proto` (publicly imported by `search_criteria.proto`, which `aggregations.proto`
   cannot import: cycle). The adapters parse responses into key-sorted maps, so keyed buckets and
   composite keys come sorted by key. `RangeValue.min`/`max` are `optional` (open bounds).
+- Nested highlighting (ADR 0012): `HighlightCompiler` attaches `inner_hits` (`<path>__highlight`,
+  `__highlight2`, ..., no `_source`) to every positive `nested` clause on a highlighted field's
+  innermost path, and a highlight-less carrier `inner_hits` to enclosing `nested` clauses; no clause on
+  the path => `QueryCompileException` (warning when lenient). Defaults exclude nested fields unless
+  `Highlight.include_nested`. `JsonRestEngine` reads inner hits at every level into
+  `Hit.nestedHighlights()` (`NestedHighlight`), merged per object.
 - `InMemorySearchEngine` (testkit) runs only terms, filter, filters (conditions of `match_all`,
   `bool`, `term`, `terms`, `exists`, `nested`), the six metrics, `nested` and `reverse_nested`
   aggregations at any depth, refuses `composite` (BAD_REQUEST), ignores `highlight`, and models
-  seq_no, tombstones and PIT snapshots like the engines. `EngineIntegrationSpec` has 55 feature
+  seq_no, tombstones and PIT snapshots like the engines. `EngineIntegrationSpec` has 56 feature
   methods.

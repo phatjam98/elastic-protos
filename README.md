@@ -1320,14 +1320,52 @@ for (Hit hit : engine.search(List.of(documents.alias()), compiled.body()).hits()
 
 | `Highlight` field | Compiles to |
 |---|---|
-| `fields` | `fields`; empty means the index's full-text fields that are text and outside nested objects. Explicit fields must be `TEXT` or `SEARCH_AS_YOU_TYPE` (typed map keys and patterns such as `notes.*` included) and outside nested objects; others fail, or are skipped with a warning when lenient |
+| `fields` | `fields`; empty means the index's full-text fields that are text and outside nested objects (plus those inside, with `include_nested`). Explicit fields must be `TEXT` or `SEARCH_AS_YOU_TYPE` (typed map keys and patterns such as `notes.*` included); others fail, or are skipped with a warning when lenient. Fields inside nested objects compile into `inner_hits` (see below) |
 | `HighlightField.fragment_size`, `number_of_fragments` | per-field settings |
 | `fragment_size`, `number_of_fragments` | the same for every field; `number_of_fragments: 0` returns the whole value |
 | `pre_tags`, `post_tags` | `pre_tags` / `post_tags`; empty means `["<em>"]` / `["</em>"]` |
 | `require_field_match` | `require_field_match`, when set |
 | `html_encode` | `encoder: html`: the field text is escaped (`&` becomes `&amp;`) before the tags are inserted |
+| `include_nested` | with empty `fields`, also the full-text text fields inside nested objects, for the nested paths the query has a clause on |
+| `nested_objects` | `size` of the inner hits: the most nested objects per hit and clause whose fragments return; 0 means the engine default (3), and the engines refuse more than `index.max_inner_result_window` (100) |
 
 When no field can be highlighted, the compiler adds a warning and no `highlight` clause.
+
+**Nested fields.** The engines highlight a field inside nested objects only within the inner hits
+of a `nested` query on its path, with that query's own clauses as the highlight query. So the
+compiler adds an `inner_hits` with the highlight settings to every `nested` clause of the query on
+the field's innermost nested path (in `filter`, `must` or `should`; not `must_not`), named
+`<path>__highlight`, `<path>__highlight2`, ... (names must be unique), without `_source`. For a
+field two nested levels deep, the enclosing `nested` clause carries an `inner_hits` too, without
+highlight: the engines return inner hits of an inner clause only inside those of the outer one. The
+fragments come back per nested object in `Hit.nestedHighlights()`, a list of
+`NestedHighlight(path, offsets, highlight)` ordered by path and offsets; `Hit.highlight()` keeps the
+fields outside nested objects, and `Hit.fragments(field)` reads either:
+
+```java
+SearchCriteria criteria = Criteria.where("parties.name").matches("acme")
+    .or().where("parties.name").matches("globex")       // two clauses on parties
+    .end()
+    .highlight("title", "parties.name")
+    .build();
+
+for (Hit hit : engine.search(List.of(documents.alias()), compiler.compile(criteria, documents).body()).hits()) {
+  for (NestedHighlight party : hit.nestedHighlights()) {
+    int position = party.offsets().get(0);                         // parties[position]
+    List<String> names = party.highlight().get("parties.name");    // "<em>Acme</em> Corp"
+  }
+  List<String> all = hit.fragments("parties.name");                // every party's fragments
+}
+```
+
+A nested field is highlighted only when the query has a condition on its nested path: there is
+nothing for the engine to mark up otherwise, and a clause added just to carry inner hits would
+highlight nothing while changing cost and scoring. Asking for such a field throws a
+`QueryCompileException` (a warning when lenient). By default (empty `fields`) nested fields are
+left out, so existing searches do not start fetching inner hits; `include_nested` adds them for the
+nested paths the query has a clause on, such as the `parties` part of `fullText("acme")` over every
+full-text field (`highlight(h -> h.setIncludeNested(true))`). Several inner hits returning the same
+object are merged into one entry.
 
 ## Engines
 
@@ -1579,7 +1617,8 @@ when the final batch fails. Listeners run on the thread that sends the batch: th
 `close`, or the flush timer.
 
 It also offers `bulkIndex`, `definition`, `pager` (a `SearchPager`), `plan`, `bootstrap`,
-`codec()` and `engine()`. `SearchPage` carries the messages, the raw hits (with their highlights),
+`codec()` and `engine()`. `SearchPage` carries the messages, the raw hits (with their highlights and
+nested highlights),
 the total, the `next` pagination, the compiler warnings and the `aggregations` of the criteria
 (`AggregationResults`, empty when there are none). `aggregate(criteria, type)` runs only the
 aggregations, with no hits or highlights, and returns an `AggregationPage` with the `results`, the
@@ -1682,9 +1721,10 @@ before 3.3); `pager(...)` always adapts.
   body by hand. Composite is top-level only, with its sources in one nested context; a filter in a
   nested context cannot test fields outside it; terms order `BY_METRIC` only by a direct metric
   sub-aggregation. Aggregations and sorts on nested paths inside typed map values are refused.
-  Highlighting covers text fields outside nested objects (nested fields would need `inner_hits`).
-  `InMemorySearchEngine` (testkit) runs only terms, filter, filters, the six metrics, `nested` and
-  `reverse_nested` aggregations, and ignores `highlight`.
+  A text field inside nested objects is highlighted only when the query has a condition on its
+  nested path (through `inner_hits` on that clause), and is not in the default field set unless
+  `include_nested` is set. `InMemorySearchEngine` (testkit) runs only terms, filter, filters, the
+  six metrics, `nested` and `reverse_nested` aggregations, and ignores `highlight`.
 - The migration lock compares the holder's `expires_at` with the reader's clock, so the clocks of
   the instances must agree to well within `lockTtl`; it uses no fencing tokens (see
   [Running from several instances](#running-from-several-instances)).

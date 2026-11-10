@@ -1,6 +1,6 @@
 # 0009. Aggregation and highlight DSL in the proto query model
 
-- Status: Accepted; the aggregation kinds and the sub-aggregation depth are amended by [0011](0011-filter-composite-and-deeper-aggregations.md)
+- Status: Accepted; the aggregation kinds and the sub-aggregation depth are amended by [0011](0011-filter-composite-and-deeper-aggregations.md), highlighting of nested fields by [0012](0012-nested-highlighting-through-inner-hits.md)
 - Date: 2026-11-09
 
 ## Context
