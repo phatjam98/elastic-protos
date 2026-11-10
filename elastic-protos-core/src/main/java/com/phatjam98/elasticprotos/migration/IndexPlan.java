@@ -17,6 +17,8 @@ import java.util.List;
  * @param warnings things that will not be applied or deserve attention
  * @param writeBlocked whether the current index has {@code index.blocks.write=true}; see {@link
  *     MigrationOptions#clearStaleWriteBlock()}
+ * @param resume for a {@link Action#REINDEX} that continues a zero-downtime reindex an earlier run
+ *     did not finish, where to pick it up; otherwise null
  */
 public record IndexPlan(
     IndexDefinition target,
@@ -26,11 +28,25 @@ public record IndexPlan(
     MappingDiff diff,
     String reason,
     List<String> warnings,
-    boolean writeBlocked) {
+    boolean writeBlocked,
+    ReindexResume resume) {
 
   /** Copies the warnings. */
   public IndexPlan {
     warnings = List.copyOf(warnings);
+  }
+
+  /** Creates a plan that does not resume an interrupted reindex. */
+  public IndexPlan(
+      IndexDefinition target,
+      Action action,
+      String currentIndex,
+      String currentHash,
+      MappingDiff diff,
+      String reason,
+      List<String> warnings,
+      boolean writeBlocked) {
+    this(target, action, currentIndex, currentHash, diff, reason, warnings, writeBlocked, null);
   }
 
   /** Creates a plan for an item whose current index, if any, is not write-blocked. */
@@ -42,7 +58,7 @@ public record IndexPlan(
       MappingDiff diff,
       String reason,
       List<String> warnings) {
-    this(target, action, currentIndex, currentHash, diff, reason, warnings, false);
+    this(target, action, currentIndex, currentHash, diff, reason, warnings, false, null);
   }
 
   /** Returns the alias being migrated. */

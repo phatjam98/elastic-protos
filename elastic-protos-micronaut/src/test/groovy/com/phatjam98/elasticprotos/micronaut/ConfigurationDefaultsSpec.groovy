@@ -106,6 +106,9 @@ class ConfigurationDefaultsSpec extends Specification {
       clearStaleWriteBlock
       failOnError
       reindexTimeout == Duration.ofMinutes(10)
+      reindexMode.name() == 'ZERO_DOWNTIME'
+      swapGrace == Duration.ofSeconds(5)
+      backfill
     }
     config.defaults.shards == 1
     config.defaults.replicas == -1

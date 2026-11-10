@@ -8,6 +8,12 @@ public enum Action {
   NO_OP,
   /** Only fields were added: extend the mapping of the current index in place. */
   PUT_MAPPING,
+  /**
+   * Fields were added that existing documents were never indexed into (a multi-field under an
+   * existing field, or a typed property under a dynamic object): extend the mapping in place, then
+   * re-index every document of the current index into it with an update by query.
+   */
+  BACKFILL,
   /** A breaking change: create a new index, copy the documents and swap the alias. */
   REINDEX,
   /** The migrator refuses to act; the plan's reason says why. */

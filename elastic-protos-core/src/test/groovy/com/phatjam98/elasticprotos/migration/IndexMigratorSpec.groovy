@@ -18,7 +18,10 @@ import com.phatjam98.elasticprotos.testkit.InMemorySearchEngine
 import com.phatjam98.elasticprotos.util.Json
 import spock.lang.Specification
 
+/** The migrator with the blocking reindex mode; zero-downtime reindexing has its own specs. */
 class IndexMigratorSpec extends Specification {
+
+  static final MigrationOptions BLOCKING = MigrationOptions.standard().withReindexMode(ReindexMode.BLOCKING)
 
   static final ProtoMapper DEFAULT = ProtoMapper.withDefaults()
 
@@ -42,7 +45,7 @@ class IndexMigratorSpec extends Specification {
 
   InMemorySearchEngine engine = new InMemorySearchEngine()
 
-  IndexMigrator migrator(ProtoMapper mapper = DEFAULT, MigrationOptions options = MigrationOptions.standard(),
+  IndexMigrator migrator(ProtoMapper mapper = DEFAULT, MigrationOptions options = BLOCKING,
                          SearchEngine target = engine) {
     IndexMigrator.builder().engine(target).mapper(mapper).options(options).build()
   }
@@ -73,7 +76,7 @@ class IndexMigratorSpec extends Specification {
   def "replica policy and default shards drive new index settings"() {
     given:
     engine.dataNodes(nodes)
-    def options = MigrationOptions.standard().withReplicas(policy).withDefaultShards(3)
+    def options = BLOCKING.withReplicas(policy).withDefaultShards(3)
 
     when:
     migrator(DEFAULT, options).bootstrap(Document, Firm)
@@ -123,7 +126,7 @@ class IndexMigratorSpec extends Specification {
     engine.getMappings('firms').properties.labels.properties.tier.type == 'text'
 
     when:
-    def item = migrator(OBJECT_LABELS, MigrationOptions.standard().withRemovedFields(policy))
+    def item = migrator(OBJECT_LABELS, BLOCKING.withRemovedFields(policy))
         .plan(Firm).items()[0]
 
     then:
@@ -143,7 +146,7 @@ class IndexMigratorSpec extends Specification {
     engine.index('firms', 'f1', [id: 'f1', labels: [tier: 'gold']], IndexOptions.defaults())
 
     when:
-    def item = migrator(DEFAULT, MigrationOptions.standard().withRemovedFields(RemovedFieldPolicy.REINDEX))
+    def item = migrator(DEFAULT, BLOCKING.withRemovedFields(RemovedFieldPolicy.REINDEX))
         .plan(Firm).items()[0]
 
     then:
@@ -226,7 +229,7 @@ class IndexMigratorSpec extends Specification {
     engine.getMappings('documents').dynamic == 'false'
   }
 
-  def "a new multi-field is applied by reindexing, so old documents are indexed into it"() {
+  def "with backfill off, a new multi-field is applied by reindexing, so old documents are indexed into it"() {
     given:
     migrator().bootstrap(Document)
     seedDocuments()
@@ -236,7 +239,7 @@ class IndexMigratorSpec extends Specification {
     String next = mapper.map(Document).name()
 
     when:
-    def plan = migrator(mapper).plan(Document)
+    def plan = migrator(mapper, BLOCKING.withBackfill(false)).plan(Document)
 
     then:
     plan.items()[0].action() == Action.REINDEX
@@ -244,11 +247,12 @@ class IndexMigratorSpec extends Specification {
     plan.items()[0].diff().unindexedAdditions()*.path == ['body.keyword']
     plan.items()[0].diff().additiveOnly()
     plan.items()[0].reason() ==
-        'breaking change: added [body.keyword], which existing documents were never indexed into'
+        'breaking change: added [body.keyword], which existing documents were never indexed into' +
+        ' (backfill is disabled)'
     plan.items()[0].target().name() == next
 
     when:
-    def result = migrator(mapper).apply(plan)
+    def result = migrator(mapper, BLOCKING.withBackfill(false)).apply(plan)
 
     then:
     result.ok()
@@ -329,7 +333,7 @@ class IndexMigratorSpec extends Specification {
     seedDocuments()
 
     when:
-    def result = migrator(TITLE_KEYWORD, MigrationOptions.standard().withDeleteOldAfter(true))
+    def result = migrator(TITLE_KEYWORD, BLOCKING.withDeleteOldAfter(true))
         .bootstrap(Document)
 
     then:
@@ -409,7 +413,7 @@ class IndexMigratorSpec extends Specification {
     failing.createIndex(DOC_V2, [:], TITLE_KEYWORD.map(Document).mappings(), [] as Set)
 
     when:
-    def result = migrator(TITLE_KEYWORD, MigrationOptions.standard(), failing).bootstrap(Document)
+    def result = migrator(TITLE_KEYWORD, BLOCKING, failing).bootstrap(Document)
 
     then:
     result.outcomes()[0].status() == MigrationResult.Status.FAILED
@@ -430,7 +434,7 @@ class IndexMigratorSpec extends Specification {
     copyInto(racing)
 
     when:
-    def result = migrator(TITLE_KEYWORD, MigrationOptions.standard(), racing).bootstrap(Document)
+    def result = migrator(TITLE_KEYWORD, BLOCKING, racing).bootstrap(Document)
 
     then:
     result.outcomes()[0].status() == MigrationResult.Status.FAILED
@@ -460,7 +464,7 @@ class IndexMigratorSpec extends Specification {
     copyInto(blind)
 
     when:
-    def result = migrator(TITLE_KEYWORD, MigrationOptions.standard(), blind).bootstrap(Document)
+    def result = migrator(TITLE_KEYWORD, BLOCKING, blind).bootstrap(Document)
 
     then:
     result.outcomes()[0].status() == MigrationResult.Status.FAILED
@@ -483,7 +487,7 @@ class IndexMigratorSpec extends Specification {
     }
     copyInto(blind)
     blind.createIndex(DOC_V2, [:], DEFAULT.map(Document).mappings(), [] as Set)
-    def migrator = migrator(TITLE_KEYWORD, MigrationOptions.standard(), blind)
+    def migrator = migrator(TITLE_KEYWORD, BLOCKING, blind)
     def plan = migrator.plan(Document)
     blind.planned = true
 
@@ -507,7 +511,7 @@ class IndexMigratorSpec extends Specification {
     copyInto(flaky)
 
     when:
-    def result = migrator(TITLE_KEYWORD, MigrationOptions.standard(), flaky).bootstrap(Document)
+    def result = migrator(TITLE_KEYWORD, BLOCKING, flaky).bootstrap(Document)
 
     then:
     result.ok()
@@ -551,7 +555,7 @@ class IndexMigratorSpec extends Specification {
     given:
     migrator().bootstrap(Document)
     engine.setWriteBlock(DOC_V1, true)
-    def options = MigrationOptions.standard().withClearStaleWriteBlock(false)
+    def options = BLOCKING.withClearStaleWriteBlock(false)
 
     when:
     def result = migrator(DEFAULT, options).bootstrap(Document)
@@ -579,8 +583,8 @@ class IndexMigratorSpec extends Specification {
 
     where:
     label     | options                                              | action         | text
-    'reindex' | MigrationOptions.standard()                          | Action.REINDEX | 'moves the alias to an unblocked index'
-    'blocked' | MigrationOptions.standard().withAllowReindex(false) | Action.BLOCKED | 'fail until it is cleared'
+    'reindex' | BLOCKING                          | Action.REINDEX | 'moves the alias to an unblocked index'
+    'blocked' | BLOCKING.withAllowReindex(false) | Action.BLOCKED | 'fail until it is cleared'
   }
 
   def "a dry run reports a stale write block without clearing it"() {
@@ -589,7 +593,7 @@ class IndexMigratorSpec extends Specification {
     engine.setWriteBlock(DOC_V1, true)
 
     when:
-    def result = migrator(DEFAULT, MigrationOptions.standard().withDryRun(true)).bootstrap(Document)
+    def result = migrator(DEFAULT, BLOCKING.withDryRun(true)).bootstrap(Document)
 
     then:
     result.outcomes()[0].status() == MigrationResult.Status.DRY_RUN
@@ -629,7 +633,7 @@ class IndexMigratorSpec extends Specification {
     copyInto(failing)
 
     when:
-    def result = migrator(TITLE_KEYWORD, MigrationOptions.standard(), failing).bootstrap(Document)
+    def result = migrator(TITLE_KEYWORD, BLOCKING, failing).bootstrap(Document)
 
     then:
     !result.ok()
@@ -650,7 +654,7 @@ class IndexMigratorSpec extends Specification {
     copyInto(broken)
 
     when:
-    def result = migrator(TITLE_KEYWORD, MigrationOptions.standard(), broken).bootstrap(Document)
+    def result = migrator(TITLE_KEYWORD, BLOCKING, broken).bootstrap(Document)
 
     then:
     result.outcomes()[0].status() == MigrationResult.Status.FAILED
@@ -671,7 +675,7 @@ class IndexMigratorSpec extends Specification {
     def dropping = new CannedReindexEngine(answer: new ReindexResult(3, 2, 0, [], 1, false), dropOne: true)
     copyInto(dropping)
     MigrationScriptProvider script = { alias, from, to -> Optional.of("ctx._source.remove('body')") } as MigrationScriptProvider
-    def scripted = IndexMigrator.builder().engine(dropping).mapper(TITLE_KEYWORD).scriptProvider(script).build()
+    def scripted = IndexMigrator.builder().engine(dropping).mapper(TITLE_KEYWORD).scriptProvider(script).options(BLOCKING).build()
 
     when:
     def result = scripted.bootstrap(Document)
@@ -694,7 +698,7 @@ class IndexMigratorSpec extends Specification {
     MigrationScriptProvider script = { alias, from, to -> Optional.of("ctx._source.remove('body')") } as MigrationScriptProvider
 
     when:
-    def result = IndexMigrator.builder().engine(broken).mapper(TITLE_KEYWORD).scriptProvider(script).build()
+    def result = IndexMigrator.builder().engine(broken).mapper(TITLE_KEYWORD).scriptProvider(script).options(BLOCKING).build()
         .bootstrap(Document)
 
     then:
@@ -727,7 +731,7 @@ class IndexMigratorSpec extends Specification {
     copyInto(stubborn)
 
     when:
-    def result = migrator(TITLE_KEYWORD, MigrationOptions.standard(), stubborn).bootstrap(Document)
+    def result = migrator(TITLE_KEYWORD, BLOCKING, stubborn).bootstrap(Document)
 
     then:
     result.outcomes()[0].error() instanceof MigrationException
@@ -753,7 +757,7 @@ class IndexMigratorSpec extends Specification {
     migrator().bootstrap(Document)
 
     when:
-    def plan = migrator(NO_RELEVANCE, MigrationOptions.standard().withRemovedFields(policy)).plan(Document)
+    def plan = migrator(NO_RELEVANCE, BLOCKING.withRemovedFields(policy)).plan(Document)
 
     then:
     plan.items()[0].action() == action
@@ -791,7 +795,7 @@ class IndexMigratorSpec extends Specification {
     }
 
     expect:
-    migrator(DEFAULT, MigrationOptions.standard(), stub).plan(Document).items()[0].action() == Action.BLOCKED
+    migrator(DEFAULT, BLOCKING, stub).plan(Document).items()[0].action() == Action.BLOCKED
   }
 
   def "an alias on two indices is blocked"() {
@@ -812,7 +816,7 @@ class IndexMigratorSpec extends Specification {
     migrator().bootstrap(Document)
 
     when:
-    def item = migrator(TITLE_KEYWORD, MigrationOptions.standard().withAllowReindex(false))
+    def item = migrator(TITLE_KEYWORD, BLOCKING.withAllowReindex(false))
         .plan(Document).items()[0]
 
     then:
@@ -829,7 +833,7 @@ class IndexMigratorSpec extends Specification {
     engine.index('documents', 'd1', [id: 'd1', title: 'T', body: 'b'], IndexOptions.defaults())
     assert migrator().bootstrap(Document).outcomes()[0].plan().action() == Action.PUT_MAPPING
     assert engine.indices() == [(v1): ['documents'] as Set]
-    def revert = migrator(NO_RELEVANCE, MigrationOptions.standard().withRemovedFields(RemovedFieldPolicy.REINDEX))
+    def revert = migrator(NO_RELEVANCE, BLOCKING.withRemovedFields(RemovedFieldPolicy.REINDEX))
 
     when: 'v1 is deployed again with removed fields reindexed'
     def plan = revert.plan(Document)
@@ -1027,7 +1031,7 @@ class IndexMigratorSpec extends Specification {
     engine.createIndex(DOC_V1, [:], [:], [] as Set)
 
     when:
-    def result = migrator(DEFAULT, MigrationOptions.standard().withFailure(policy)).bootstrap(Document, Firm)
+    def result = migrator(DEFAULT, BLOCKING.withFailure(policy)).bootstrap(Document, Firm)
 
     then:
     result.outcomes()*.status == statuses
@@ -1056,7 +1060,7 @@ class IndexMigratorSpec extends Specification {
     given:
     migrator().bootstrap(Document)
     engine.clearLog()
-    def options = MigrationOptions.standard().withDryRun(true)
+    def options = BLOCKING.withDryRun(true)
 
     when:
     def result = migrator(TITLE_KEYWORD, options).bootstrap(Firm, Document)
@@ -1074,7 +1078,7 @@ class IndexMigratorSpec extends Specification {
     migrator().bootstrap(Document)
 
     expect:
-    migrator(DEFAULT, MigrationOptions.standard().withDryRun(true)).bootstrap(Document)
+    migrator(DEFAULT, BLOCKING.withDryRun(true)).bootstrap(Document)
         .outcomes()[0].index() == DOC_V1
   }
 

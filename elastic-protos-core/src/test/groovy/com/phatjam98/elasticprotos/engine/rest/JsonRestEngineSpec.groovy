@@ -103,9 +103,24 @@ class JsonRestEngineSpec extends Specification {
 
     then:
     http.requests*.method == ['DELETE', 'PUT', 'PUT', 'POST']
-    http.requests*.path == ['/old', '/docs-v1/_mapping', '/old/_settings', '/docs/_refresh']
+    http.requests*.path == ['/old', '/docs-v1/_mapping', '/old/_block/write', '/docs/_refresh']
     http.requests[1].json() == [properties: [a: [type: 'keyword']]]
-    http.requests[2].json() == ['index.blocks.write': true]
+    http.requests[2].body == null
+  }
+
+  def "seqNoCheckpoint is the lowest max_seq_no over every shard copy"() {
+    given:
+    http.enqueue(200, [indices: [docs: [shards: [
+        '0': [[routing: [primary: true], seq_no: [max_seq_no: 7]], [routing: [primary: false], seq_no: [max_seq_no: 5]]],
+        '1': [[routing: [primary: true], seq_no: [max_seq_no: 9]]]]]]])
+    http.enqueue(200, [indices: [:]])
+
+    expect:
+    engine.seqNoCheckpoint('docs') == 5
+    http.requests[0].method == 'GET'
+    http.requests[0].path == '/docs/_stats'
+    http.requests[0].params == [level: 'shards']
+    engine.seqNoCheckpoint('docs') == -1
   }
 
   def "flattened fields are spelled flat_object on OpenSearch and read back as flattened"() {
