@@ -136,6 +136,8 @@ public final class IndexMigrator {
   private static final String PENDING = "pending";
   /** The {@code _meta.elastic_protos} key of the digest of the declared static settings. */
   static final String STATIC_DIGEST = "static_settings";
+  /** The {@code _meta.elastic_protos} key of the dynamic setting keys the proto declares. */
+  static final String DYNAMIC_RECORD = "dynamic_settings";
   private static final String ACTION_REINDEX = "reindex";
   private static final String ACTION_BACKFILL = "backfill";
   private static final String ACTION_ROLLBACK = "rollback";
@@ -267,9 +269,10 @@ public final class IndexMigrator {
         return blocked(target, null, null,
             "a concrete index named like the alias exists: " + alias);
       }
-      return new IndexPlan(withStaticDigest(target, DiffClassifier.staticSettingsDigest(
-          target.settings(), options.extraDynamicSettings())), Action.CREATE, null, null,
-          MappingDiff.empty(), "alias " + alias + " does not exist", List.of());
+      return new IndexPlan(withDynamicRecord(withStaticDigest(target,
+          DiffClassifier.staticSettingsDigest(target.settings(), options.extraDynamicSettings()))),
+          Action.CREATE, null, null, MappingDiff.empty(), "alias " + alias + " does not exist",
+          List.of());
     }
     if (holders.size() > 1) {
       return blocked(target, null, null,
@@ -331,23 +334,97 @@ public final class IndexMigrator {
   /**
    * Plans an item whose alias points at {@code current}, then adds the static-settings warning
    * unless the item reindexes (which creates the new index with every setting), and records in the
-   * target's {@code _meta} the static settings digest the index will carry: the current index's
-   * for in-place actions, the declared one for a reindex.
+   * target's {@code _meta} the static settings digest the index will carry (the current index's
+   * for in-place actions, the declared one for a reindex) and the dynamic setting keys the proto
+   * declares.
    */
   private IndexPlan planExisting(IndexDefinition target, String current,
       Map<String, Object> mappings, Map<String, Object> settings) {
     IndexPlan plan = planExistingRaw(target, current, mappings, settings);
     SettingsDiff settingsDiff = plan.diff().settings();
     List<String> warnings = new ArrayList<>(plan.warnings());
-    if (!settingsDiff.staticChanges().isEmpty() && plan.action() != Action.REINDEX) {
-      warnings.add(DiffClassifier.staticWarning(settingsDiff));
+    String recordedDigest =
+        string(map(map(mappings.get("_meta")).get(ProtoMapper.META_KEY)).get(STATIC_DIGEST));
+    String declaredDigest =
+        DiffClassifier.staticSettingsDigest(target.settings(), options.extraDynamicSettings());
+    if (plan.action() != Action.REINDEX) {
+      if (!settingsDiff.staticChanges().isEmpty()) {
+        warnings.add(DiffClassifier.staticWarning(settingsDiff));
+      } else if (recordedDigest != null && !recordedDigest.equals(declaredDigest)) {
+        warnings.add("the static settings the proto declares no longer match the digest "
+            + current + " records, although no declared static setting differs: a static"
+            + " setting was removed from the proto (it stays on the index until it is reindexed)"
+            + " or extraDynamicSettings changed");
+      }
     }
-    String digest = plan.action() == Action.REINDEX
-        ? DiffClassifier.staticSettingsDigest(target.settings(), options.extraDynamicSettings())
-        : string(map(map(mappings.get("_meta")).get(ProtoMapper.META_KEY)).get(STATIC_DIGEST));
-    return new IndexPlan(withStaticDigest(plan.target(), digest), plan.action(),
-        plan.currentIndex(), plan.currentHash(), plan.diff(), plan.reason(), warnings,
-        plan.writeBlocked(), plan.resume());
+    String digest = plan.action() == Action.REINDEX ? declaredDigest : recordedDigest;
+    return new IndexPlan(withDynamicRecord(withStaticDigest(plan.target(), digest)),
+        plan.action(), plan.currentIndex(), plan.currentHash(), plan.diff(), plan.reason(),
+        warnings, plan.writeBlocked(), plan.resume());
+  }
+
+  /**
+   * Returns the target with {@code _meta.elastic_protos.dynamic_settings} set to the dynamic
+   * setting keys it declares, or without the key when it declares none.
+   */
+  private IndexDefinition withDynamicRecord(IndexDefinition target) {
+    List<String> declared =
+        DiffClassifier.declaredDynamicSettings(target.settings(), options.extraDynamicSettings());
+    Map<String, Object> meta = new TreeMap<>(map(target.mappings().get("_meta")));
+    meta.put(ProtoMapper.META_KEY, withRecord(map(meta.get(ProtoMapper.META_KEY)), declared));
+    Map<String, Object> mappings = new TreeMap<>(target.mappings());
+    mappings.put("_meta", meta);
+    return new IndexDefinition(target.descriptor(), target.alias(), target.name(),
+        target.contentHash(), target.settings(), mappings, target.fields(), target.nestedPaths(),
+        target.fullTextFields(), target.ignoredPaths(), target.idField(), target.warnings(),
+        target.dynamicFields());
+  }
+
+  /** Returns a copy of an {@code elastic_protos} object recording {@code declared}. */
+  private static Map<String, Object> withRecord(Map<String, Object> ours, List<String> declared) {
+    Map<String, Object> copy = new TreeMap<>(ours);
+    if (declared == null || declared.isEmpty()) {
+      copy.remove(DYNAMIC_RECORD);
+    } else {
+      copy.put(DYNAMIC_RECORD, List.copyOf(declared));
+    }
+    return copy;
+  }
+
+  /**
+   * Returns the dynamic setting keys an index records as declared, or null when it records none
+   * (it was created by 1.0.0-rc.3 or earlier and has not been updated since).
+   */
+  private static List<String> recordedDynamic(Map<String, Object> mappings) {
+    Object recorded = map(map(mappings.get("_meta")).get(ProtoMapper.META_KEY))
+        .get(DYNAMIC_RECORD);
+    if (!(recorded instanceof List<?> list)) {
+      return null;
+    }
+    List<String> keys = new ArrayList<>();
+    for (Object key : list) {
+      keys.add(String.valueOf(key));
+    }
+    return keys;
+  }
+
+  /**
+   * Turns a reset of {@code number_of_replicas} into the count the replica policy gives a new
+   * index, rather than the engine default: the replica count goes back to the policy.
+   */
+  private MappingDiff withReplicaReset(MappingDiff diff) {
+    SettingsDiff settings = diff.settings();
+    if (settings.resets().stream().noneMatch(c -> "number_of_replicas".equals(c.path()))) {
+      return diff;
+    }
+    List<Change> resets = new ArrayList<>();
+    for (Change reset : settings.resets()) {
+      resets.add("number_of_replicas".equals(reset.path())
+          ? new Change(reset.path(), reset.before(), replicasFor(options.replicas())) : reset);
+    }
+    return new MappingDiff(diff.added(), diff.removed(), diff.typeChanged(), diff.paramChanged(),
+        diff.settingsChanged(), diff.unindexedAdditions(), new SettingsDiff(
+            settings.dynamicChanges(), settings.staticChanges(), settings.ignored(), resets));
   }
 
   /** Returns the target with {@code _meta.elastic_protos.static_settings}, or as it is. */
@@ -370,8 +447,9 @@ public final class IndexMigrator {
   private IndexPlan planExistingRaw(IndexDefinition target, String current,
       Map<String, Object> mappings, Map<String, Object> settings) {
     final String currentHash = recordedHash(mappings);
-    MappingDiff diff = DiffClassifier.diff(mappings, target.mappings(), settings,
-        target.settings(), options.extraDynamicSettings());
+    List<String> recordedDynamic = recordedDynamic(mappings);
+    MappingDiff diff = withReplicaReset(DiffClassifier.diff(mappings, target.mappings(), settings,
+        target.settings(), options.extraDynamicSettings(), recordedDynamic));
     Object recorded = map(map(mappings.get("_meta")).get(ProtoMapper.META_KEY))
         .get(STATIC_DIGEST);
     if (recorded != null && recorded.toString().equals(DiffClassifier.staticSettingsDigest(
@@ -379,18 +457,28 @@ public final class IndexMigrator {
       // the declared static settings are those the index was created with, however the engine
       // spells them back
       SettingsDiff withoutStatic = new SettingsDiff(diff.settings().dynamicChanges(), List.of(),
-          diff.settings().ignored());
+          diff.settings().ignored(), diff.settings().resets());
       diff = new MappingDiff(diff.added(), diff.removed(), diff.typeChanged(),
           diff.paramChanged(), !withoutStatic.isEmpty(), diff.unindexedAdditions(),
           withoutStatic);
     }
     SettingsDiff settingsDiff = diff.settings();
     List<String> warnings = new ArrayList<>(DiffClassifier.managedWarnings(settingsDiff));
+    if (recordedDynamic != null) {
+      Map<String, Object> declared = DiffClassifier.flattenSettings(target.settings());
+      for (String key : recordedDynamic) {
+        if (!declared.containsKey(key)
+            && !DiffClassifier.isDynamicSetting(key, options.extraDynamicSettings())) {
+          warnings.add(key + " is no longer declared but is not a dynamic setting under the"
+              + " current options (extraDynamicSettings), so it is not reset");
+        }
+      }
+    }
     boolean staticReindex = !settingsDiff.staticChanges().isEmpty()
         && options.staticSettings() == StaticSettingsPolicy.REINDEX;
     final String staticReason = "static settings changed: "
         + SettingsDiff.describe(settingsDiff.staticChanges());
-    String dynamicReason = SettingsDiff.describe(settingsDiff.dynamicChanges());
+    String dynamicReason = settingsDiff.describeDynamic();
     if (!diff.removed().isEmpty()) {
       warnings.add("fields no longer in the proto: " + paths(diff.removed())
           + (options.removedFields() == RemovedFieldPolicy.KEEP ? " (kept in the mapping)" : ""));
@@ -411,11 +499,11 @@ public final class IndexMigrator {
         ? Action.NO_OP : DiffClassifier.classify(diff, options.removedFields());
     if (staticReindex) {
       action = Action.REINDEX;
-    } else if (action == Action.NO_OP && !settingsDiff.dynamicChanges().isEmpty()) {
+    } else if (action == Action.NO_OP && settingsDiff.hasDynamicWork()) {
       return new IndexPlan(target, Action.UPDATE_SETTINGS, current, currentHash, diff,
           "dynamic settings changed: " + dynamicReason, warnings);
     }
-    String settingsFirst = settingsDiff.dynamicChanges().isEmpty() ? ""
+    String settingsFirst = !settingsDiff.hasDynamicWork() ? ""
         : "; dynamic settings are updated first: " + dynamicReason;
     String instead = "";
     if (action == Action.BACKFILL) {
@@ -939,6 +1027,7 @@ public final class IndexMigrator {
         case UPDATE_SETTINGS:
           clearStaleWriteBlock(item);
           updateSettings(item);
+          recordDynamicSettings(item);
           return new Outcome(item, Status.APPLIED, item.currentIndex(), List.of(), null);
         case REINDEX:
           return reindex(item);
@@ -977,16 +1066,39 @@ public final class IndexMigrator {
             + e.getCause().getMessage(), e.getCause()));
   }
 
-  /** Applies the dynamic settings of an item to its current index, when there are any. */
+  /**
+   * Applies the dynamic settings of an item to its current index, and resets those the proto no
+   * longer declares (a null value is the engine default), when there are any.
+   */
   private void updateSettings(IndexPlan item) {
     SettingsDiff settings = item.diff().settings();
-    if (settings.dynamicChanges().isEmpty()) {
+    if (!settings.hasDynamicWork()) {
       return;
     }
     LOG.info("{}: updating settings of {}: {}", item.alias(), item.currentIndex(),
-        SettingsDiff.describe(settings.dynamicChanges()));
+        settings.describeDynamic());
     guard();
     engine.putSettings(item.currentIndex(), settings.dynamicValues());
+  }
+
+  /**
+   * Writes the dynamic setting keys the proto declares into {@code _meta.elastic_protos} of the
+   * current index, after a settings update that changed no mapping: the rest of {@code _meta} is
+   * read back from the index and written unchanged, since the engines replace it as a whole.
+   */
+  private void recordDynamicSettings(IndexPlan item) {
+    Object declared = map(map(item.target().mappings().get("_meta")).get(ProtoMapper.META_KEY))
+        .get(DYNAMIC_RECORD);
+    Map<String, Object> meta = metaOf(engine.getMappings(item.currentIndex()));
+    Map<String, Object> ours = map(meta.get(ProtoMapper.META_KEY));
+    Map<String, Object> updated = withRecord(ours,
+        declared instanceof List<?> list ? list.stream().map(String::valueOf).toList() : null);
+    if (updated.equals(ours)) {
+      return;
+    }
+    meta.put(ProtoMapper.META_KEY, updated);
+    guard();
+    engine.putMappings(item.currentIndex(), Map.of("_meta", meta));
   }
 
   private boolean clearStaleWriteBlock(IndexPlan item) {

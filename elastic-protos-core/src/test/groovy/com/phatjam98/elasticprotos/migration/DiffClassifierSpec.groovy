@@ -248,6 +248,52 @@ class DiffClassifierSpec extends Specification {
     'accept null settings'                     | null                                                               | null                                                      | []        | []                         | []                                    | []
   }
 
+  def "recorded settings: #description"() {
+    given:
+    def diff = DiffClassifier.diff([:], [:], existing, desired, extra as Set, recorded)
+
+    expect:
+    diff.settings().resets().collect { [it.path(), it.before(), it.after()] } == resets
+    diff.settings().dynamicChanges()*.path == dynamic
+    diff.settings().ignored() == ignored
+    diff.settingsChanged() == !(resets.isEmpty() && dynamic.isEmpty())
+    diff.settings().hasDynamicWork() == !(resets.isEmpty() && dynamic.isEmpty())
+
+    where:
+    description                                     | existing                                                         | desired                       | extra          | recorded                                         | resets                                                 | dynamic                | ignored
+    'no record resets nothing'                      | [index: [refresh_interval: '5s']]                                | [:]                           | []             | null                                             | []                                                     | []                     | []
+    'a removed key is reset to the default'         | [index: [refresh_interval: '5s']]                                | [:]                           | []             | ['refresh_interval']                             | [['refresh_interval', '5s', null]]                     | []                     | []
+    'a removed key already at the default'          | [index: [:]]                                                     | [:]                           | []             | ['refresh_interval']                             | [['refresh_interval', null, null]]                     | []                     | []
+    'a key still declared is compared, not reset'   | [index: [refresh_interval: '5s']]                                | [refresh_interval: '5s']      | []             | ['refresh_interval']                             | []                                                     | []                     | []
+    'a removed dotted key in the index. form'       | [index: [mapping: [total_fields: [limit: '2000']]]]              | ['index.max_result_window': 1] | []            | ['mapping.total_fields.limit', 'max_result_window'] | [['mapping.total_fields.limit', '2000', null]]      | ['max_result_window']  | []
+    'a removed static key is not reset'             | [index: [codec: 'best_compression']]                             | [:]                           | []             | ['codec']                                        | []                                                     | []                     | []
+    'a removed extra dynamic key is reset'          | [index: [codec: 'best_compression']]                             | [:]                           | ['codec']      | ['codec']                                        | [['codec', 'best_compression', null]]                  | []                     | []
+    'a removed extra dynamic prefix is reset'       | [index: [lifecycle: [name: 'p']]]                                | [:]                           | ['lifecycle.'] | ['lifecycle.name']                               | [['lifecycle.name', 'p', null]]                        | []                     | []
+    'a managed key is never reset'                  | [index: [uuid: 'x', blocks: [write: 'true']]]                    | [:]                           | []             | ['uuid', 'blocks.write']                         | []                                                     | []                     | []
+    'removed replicas are reset (to the policy)'    | [index: [number_of_replicas: '2']]                               | [:]                           | []             | ['number_of_replicas']                           | [['number_of_replicas', '2', null]]                    | []                     | []
+    'removed replicas under an index auto-expand'   | [index: [number_of_replicas: '2', auto_expand_replicas: '0-1']]  | [:]                           | []             | ['number_of_replicas']                           | []                                                     | []                     | []
+    'removed replicas under a declared auto-expand' | [index: [number_of_replicas: '2', auto_expand_replicas: '0-1']]  | [auto_expand_replicas: '0-1'] | []             | ['number_of_replicas', 'auto_expand_replicas']   | []                                                     | []                     | []
+    'a reset auto-expand frees declared replicas'   | [index: [number_of_replicas: '1', auto_expand_replicas: '0-1']]  | [number_of_replicas: 2]       | []             | ['auto_expand_replicas', 'number_of_replicas']   | [['auto_expand_replicas', '0-1', null]]                | ['number_of_replicas'] | []
+    'an auto-expand set by hand still manages them' | [index: [number_of_replicas: '1', auto_expand_replicas: '0-1']]  | [number_of_replicas: 2]       | []             | ['number_of_replicas']                           | []                                                     | []                     | ['number_of_replicas']
+    'both removed: auto-expand off, replicas reset' | [index: [number_of_replicas: '1', auto_expand_replicas: '0-1']]  | [:]                           | []             | ['auto_expand_replicas', 'number_of_replicas']   | [['auto_expand_replicas', '0-1', null], ['number_of_replicas', '1', null]] | [] | []
+  }
+
+  def "a settings diff puts resets into the settings API values and describes them as default"() {
+    given:
+    def diff = DiffClassifier.settingsDiff([index: [refresh_interval: '5s', max_result_window: '1']],
+        [max_result_window: 2], [] as Set, ['refresh_interval', 'max_result_window'])
+
+    expect:
+    diff.dynamicValues() == ['index.max_result_window': 2, 'index.refresh_interval': null]
+    diff.describeDynamic() == 'max_result_window 1 -> 2, refresh_interval 5s -> default'
+    diff.describe() == 'max_result_window 1 -> 2, refresh_interval 5s -> default'
+    new SettingsDiff([], [], [], [new MappingDiff.Change('a', 'b', null)]).hasDynamicWork()
+    !new SettingsDiff([], [], []).hasDynamicWork()
+    DiffClassifier.declaredDynamicSettings([refresh_interval: '5s', number_of_shards: 2, uuid: 'x',
+        'index.lifecycle.name': 'p', mapping: [total_fields: [limit: 5]]], ['lifecycle.'] as Set) ==
+        ['lifecycle.name', 'mapping.total_fields.limit', 'refresh_interval']
+  }
+
   def "settings warnings name static and managed keys"() {
     expect:
     DiffClassifier.settingsWarnings([index: [number_of_shards: '2', number_of_replicas: '1']],

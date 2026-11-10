@@ -32,8 +32,20 @@ packages, and the private geobuf dependency is gone. The `1.0.0-rc.1`, `1.0.0-rc
   leftover indices, rollbacks, OpenSearch segment replication, engines without a global checkpoint
   and markers written by rc.3 or earlier, which still resume. The checkpoint in the marker is now
   the global checkpoint where the engine reports one.
+- A dynamic setting removed from the proto is reset to the engine default
+  ([ADR 0006 addendum](docs/adr/0006-settings-outside-the-content-hash.md)): the migrator records
+  the declared dynamic keys in `_meta.elastic_protos.dynamic_settings` whenever it writes an index,
+  and a recorded key no longer declared is reset (`PUT _settings` with null) as an
+  `UPDATE_SETTINGS` or before a `PUT_MAPPING`/`BACKFILL`. A removed `number_of_replicas` goes back
+  to the replica policy. Indices created by rc.3 or earlier get the record on their next settings
+  or mapping update, with nothing reset. A static setting removed from the proto is now a warning.
 
 #### Added
+
+- `SettingsDiff.resets()` (with `hasDynamicWork()` and `describeDynamic()`; the three-argument
+  constructor remains), `DiffClassifier.settingsDiff`/`diff` overloads taking the recorded keys,
+  `DiffClassifier.declaredDynamicSettings`, and `reset` in `MigrationPlan.toJson()` and
+  `toReport()`.
 
 - `SearchEngine.globalCheckpoint` (default empty), implemented by both adapters from
   `_stats?level=shards`.

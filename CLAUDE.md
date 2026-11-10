@@ -118,7 +118,13 @@ Checkstyle, JaCoCo and Javadoc.
   `DYNAMIC_SETTING_PREFIXES` plus `MigrationOptions.extraDynamicSettings`) are applied in place
   (`UPDATE_SETTINGS`, or before `PUT_MAPPING`/`BACKFILL`); static ones warn or reindex into the next
   generation per `StaticSettingsPolicy`. New indices record a static-settings digest in
-  `_meta.elastic_protos.static_settings`.
+  `_meta.elastic_protos.static_settings`. Every migrator write (CREATE, REINDEX, PUT_MAPPING,
+  BACKFILL, UPDATE_SETTINGS; never NO_OP) records the declared dynamic keys in
+  `_meta.elastic_protos.dynamic_settings` (omitted when empty); a recorded key no longer declared is
+  reset with a null value (`SettingsDiff.resets`, ADR 0006 second addendum), except
+  `number_of_replicas`, which goes back to the replica policy (and is left to `auto_expand_replicas`).
+  Indices without the record (rc.3) get it on their next write, nothing reset. A removed static
+  setting only warns (digest mismatch).
 - `BACKFILL` puts the mapping and runs `_update_by_query` for `MappingDiff.unindexedAdditions` (added
   multi-fields, typed properties under a dynamic object).
 - `REINDEX` defaults to `ReindexMode.ZERO_DOWNTIME` (ADR 0007): prepare (seq_no checkpoint), copy, catch up
@@ -143,4 +149,4 @@ Checkstyle, JaCoCo and Javadoc.
   `<name>__nested` / `<name>__reverse`. `RangeValue.min`/`max` are `optional` (open bounds).
 - `InMemorySearchEngine` (testkit) runs only terms, the six metrics, `nested` and `reverse_nested`
   aggregations, ignores `highlight`, and models seq_no, tombstones and PIT snapshots like the engines.
-  `EngineIntegrationSpec` has 53 feature methods.
+  `EngineIntegrationSpec` has 54 feature methods.

@@ -67,5 +67,38 @@ generation of the same index name. Each created index records a digest of its de
 settings in `_meta.elastic_protos.static_settings`, compared instead of the engine-reported values
 so that a different spelling cannot loop a reindex. Only declared keys are compared, so environment-specific replica
 policies still never change an index name or trigger a reindex; a removed setting is never reset.
+*(Superseded by the second addendum for dynamic settings.)*
 The rename path above remains the way to roll out an analyzer change without a static-settings
 policy.
+
+## Addendum (2026-11-10): removed dynamic settings are reset
+
+Comparing only declared keys meant that a dynamic setting declared, applied and later removed
+from the proto stayed on the index for good. The engines report only explicitly set settings
+(without `include_defaults`), so a live value cannot tell a setting the proto once declared from
+one an operator set by hand. The index therefore records what the proto declared:
+
+- `_meta.elastic_protos.dynamic_settings` lists the declared dynamic keys (flattened, without
+  `index.`, managed keys left out; omitted when empty). It is written whenever the migrator writes
+  the index: at `CREATE`, on the new index of a `REINDEX`, with the mappings of a `PUT_MAPPING` or
+  `BACKFILL`, and after an `UPDATE_SETTINGS` (which reads `_meta` back and rewrites it whole, since
+  the engines replace it). A `NO_OP` writes nothing.
+- A recorded key the proto no longer declares, and that is dynamic under the current options, is
+  reset with a null value in the same `PUT _settings` as the other dynamic changes
+  (`SettingsDiff.resets`), which makes the plan an `UPDATE_SETTINGS` when nothing else changes.
+  After that the record no longer lists it, so a later value set by hand is left alone.
+- Create-time policies are never recorded: the replica policy and `defaultShards` stay out, as
+  before. A declared and then removed `number_of_replicas` goes back to the count the replica
+  policy gives a new index rather than to the engine default (1, which turns a single-node cluster
+  yellow), and is left alone while `auto_expand_replicas` manages it. A removed
+  `auto_expand_replicas` is reset (to `false`), and a declared `number_of_replicas` is then
+  compared in the same plan.
+- A recorded key that is no longer dynamic (because `extraDynamicSettings` changed) cannot be
+  reset in place; the plan warns. Instances with different `extraDynamicSettings` record different
+  lists; only real writes rewrite the record, so they do not flap, but they should agree.
+- Indices without a record (1.0.0-rc.3 or earlier) get it on their next settings or mapping
+  update, and nothing is reset on their behalf: their history is unknown.
+- Static settings are not recorded. A static setting removed from the proto changes the digest in
+  `static_settings` while no declared static key differs; that was silently ignored and is now a
+  warning, under either `StaticSettingsPolicy`, without a reindex: the digest cannot name the key,
+  and a digest change also follows a change of `extraDynamicSettings`, which must not reindex.

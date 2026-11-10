@@ -1295,6 +1295,43 @@ abstract class EngineIntegrationSpec extends Specification {
     reindexing.plan(Document).items()*.action() == [Action.NO_OP]
   }
 
+  def "a dynamic setting removed from the proto is reset to the engine default"() {
+    given: 'a documents alias under -rs with the sample set'
+    IndexNamingStrategy rsNaming = IndexNamingStrategy.prefixed(prefix + '-rs')
+    def plain = ProtoMapper.builder().naming(rsNaming).build()
+    IndexDefinition v1 = plain.map(Document)
+    indexSampleDocuments(plain)
+    def declared = ProtoMapper.builder().naming(rsNaming).overrides(MappingOverrides.builder()
+        .setting('refresh_interval', '5s').setting('max_result_window', 20000).build()).build()
+    def kept = ProtoMapper.builder().naming(rsNaming).overrides(MappingOverrides.builder()
+        .setting('max_result_window', 20000).build()).build()
+    def migrator = { ProtoMapper with -> IndexMigrator.builder().engine(engine).mapper(with).options(FAST).build() }
+
+    when: 'refresh_interval is declared and applied'
+    def applied = migrator(declared).bootstrap(Document)
+
+    then:
+    applied.ok()
+    applied.outcomes()[0].plan().action() == Action.UPDATE_SETTINGS
+    engine.getSettings(v1.name()).index.refresh_interval == '5s'
+    engine.getMappings(v1.name())._meta.elastic_protos.dynamic_settings == ['max_result_window', 'refresh_interval']
+
+    when: 'it is removed from the proto'
+    MigrationPlan plan = migrator(kept).plan(Document)
+    def reset = migrator(kept).apply(plan)
+    def settings = engine.getSettings(v1.name()).index
+
+    then: 'the plan resets it, the engine forgets it, and the record follows'
+    plan.items()*.action() == [Action.UPDATE_SETTINGS]
+    plan.items()[0].reason() == 'dynamic settings changed: refresh_interval 5s -> default'
+    reset.ok()
+    !settings.containsKey('refresh_interval')
+    settings.max_result_window == '20000'
+    engine.getMappings(v1.name())._meta.elastic_protos.dynamic_settings == ['max_result_window']
+    engine.getMappings(v1.name())._meta.elastic_protos.hash == v1.contentHash()
+    migrator(kept).plan(Document).items()*.action() == [Action.NO_OP]
+  }
+
   // ------------------------------------------------------------------ concurrent bootstrap
 
   def "a second process waits for the lock while the first migrates, then re-plans to NO_OP"() {

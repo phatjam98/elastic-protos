@@ -55,6 +55,11 @@ public record MigrationPlan(List<IndexPlan> items) {
       for (String warning : item.warnings()) {
         out.append("      warning: ").append(warning).append('\n');
       }
+      if (!diff.settings().resets().isEmpty() && item.action() != Action.BLOCKED
+          && item.action() != Action.REINDEX) {
+        out.append("      reset: ").append(SettingsDiff.describe(diff.settings().resets()))
+            .append('\n');
+      }
       if (item.action() == Action.BLOCKED) {
         out.append("      blocked: ").append(item.reason()).append('\n');
       } else if (item.action() == Action.NO_OP) {
@@ -110,6 +115,7 @@ public record MigrationPlan(List<IndexPlan> items) {
       settings.put("dynamic", changes(item.diff().settings().dynamicChanges()));
       settings.put("static", changes(item.diff().settings().staticChanges()));
       settings.put("ignored", item.diff().settings().ignored());
+      settings.put("reset", changes(item.diff().settings().resets()));
       diff.put("settings", settings);
       entry.put("diff", diff);
       list.add(entry);
