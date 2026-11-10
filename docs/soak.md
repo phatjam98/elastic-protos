@@ -87,6 +87,9 @@ applies. Kill points:
   `FROZEN`), `MID_SWEEP` (200 ms after `RECONCILED`), `MID_BACKFILL` (500 ms after
   `BACKFILL_MARKED`). The report's `midPhaseKill.insidePhase` says whether the kill landed before
   the next phase was reported;
+- `AFTER_<PHASE>_<n>MS`: a kill `n` ms after `<PHASE>` was reported, to aim inside a short pass
+  (for example `AFTER_FROZEN_20MS` inside the hot pass of the reconcile, the window of the resume
+  replay residual); not in the defaults;
 - `SCRIPTED_<point>`: the same with the migration script (default `SCRIPTED_SWAPPED`,
   `SCRIPTED_MID_RECONCILE`).
 

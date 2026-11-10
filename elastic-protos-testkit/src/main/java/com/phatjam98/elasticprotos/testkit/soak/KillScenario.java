@@ -61,7 +61,11 @@ final class KillScenario {
         case "MID_BACKFILL":
           return new MidKill("BACKFILL_MARKED", 500);
         default:
-          return null;
+          // AFTER_<PHASE>_<n>MS: n ms after the phase was reported, to aim inside a short pass
+          java.util.regex.Matcher after = java.util.regex.Pattern
+              .compile("AFTER_([A-Z_]+?)_(\\d+)MS").matcher(point);
+          return after.matches()
+              ? new MidKill(after.group(1), Long.parseLong(after.group(2))) : null;
       }
     }
   }
@@ -82,7 +86,7 @@ final class KillScenario {
     final boolean scripted = killAt.startsWith("SCRIPTED_");
     final String point = scripted ? killAt.substring("SCRIPTED_".length()) : killAt;
     final MidKill mid = MidKill.of(point, options);
-    boolean backfill = point.startsWith("BACKFILL") || point.equals("MID_BACKFILL");
+    boolean backfill = point.contains("BACKFILL");
     final Mode mode = backfill ? Mode.BACKFILL : Mode.ZERO_DOWNTIME;
     final String version = backfill ? "backfill" : scripted ? "scripted" : "reindex";
     String prefix = "soak-kill-" + killAt.toLowerCase(Locale.ROOT).replace('_', '-');
@@ -170,7 +174,7 @@ final class KillScenario {
       landed.put("killedAfterTriggerMs", triggered < 0 ? null : killedAt - triggered);
       landed.put("insidePhase", midPhase);
       report.put("midPhaseKill", landed);
-      load.reconcileInterrupted = "MID_RECONCILE".equals(point) && midPhase;
+      load.reconcileInterrupted = "FROZEN".equals(mid.after()) && midPhase;
     }
     final String childHolder = lockAtKill.map(h -> String.valueOf(h.source().get("holder")))
         .orElse(null);

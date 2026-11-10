@@ -468,6 +468,18 @@ class LogComparisonSpec extends Specification {
     'no marker at the kill'                    | true    | [:]                                       | 50    | 0    | false
   }
 
+  def 'kill points: named mid-phase kills and AFTER_<PHASE>_<n>MS'() {
+    given:
+    def options = SoakOptions.parse(['elasticsearch', 'http://x', 'kill'] as String[])
+
+    expect:
+    KillScenario.MidKill.of('MID_RECONCILE', options) == new KillScenario.MidKill('FROZEN', 300)
+    KillScenario.MidKill.of('AFTER_FROZEN_20MS', options) == new KillScenario.MidKill('FROZEN', 20)
+    KillScenario.MidKill.of('AFTER_BACKFILL_MARKED_150MS', options) ==
+        new KillScenario.MidKill('BACKFILL_MARKED', 150)
+    KillScenario.MidKill.of('SWAPPED', options) == null
+  }
+
   static Writers.Observation observed(String kind, long at, List<Entry> before) {
     new Writers.Observation('x', kind, 'P', at - 5, at, before)
   }
