@@ -49,13 +49,16 @@ unchanged and be compiled on the server against the index definition.
 ## Features
 
 - Index mappings derived from proto descriptors, configured with proto options
-  (`elastic`, `elastic_field`) and optional programmatic overrides; no field-name guessing.
+  (`elastic`, `elastic_field`) and optional programmatic overrides; no field-name guessing. Maps
+  are `flattened` by default, or typed maps whose keys take the value type.
 - Content-hash-versioned indices (`documents-v1a2b3c4d`) behind a stable alias, with a recorded
   `_meta` block.
-- Migrations that plan before they act: `CREATE`, `NO_OP`, `PUT_MAPPING`, `UPDATE_SETTINGS`,
-  `BACKFILL` (in-place update by query), `REINDEX` (with optional Painless scripts) or `BLOCKED`, a printable dry-run
-  report, and rollback. A reindex never blocks writes to the live index: it copies, catches up,
-  swaps the alias and reconciles with conditional writes, and resumes after a crash.
+- Migrations that plan before they act: `CREATE`, `NO_OP`, `PUT_MAPPING`, `UPDATE_SETTINGS`
+  (dynamic settings in place), `BACKFILL` (in-place update by query), `REINDEX` (with optional
+  Painless scripts) or `BLOCKED`, a printable dry-run report, and rollback. By default a reindex
+  never blocks writes to the live index: it copies, catches up, swaps the alias and reconciles
+  with conditional writes, and resumes after a crash. A per-alias lock lets several instances
+  bootstrap at once.
 - `ProtoDocumentCodec`: message to document and back, honouring renamed and ignored fields, geo
   types, 64-bit integers and timestamps.
 - `QueryCompiler`: `SearchCriteria` to a search body, validated against the mapped field types, with
@@ -442,6 +445,9 @@ Inside `forField` / `forMessage` callbacks, `skip`, `id` and `full_text` are `Bo
   cannot start an index name (empty; leading `-`, `_` or `+`; whitespace or any of
   `\ / * ? " < > | , # :`) is rejected with `IllegalArgumentException`. Implement
   `IndexNamingStrategy` for anything else.
+- The migration lock index is `elastic-protos-locks`, or `<prefix>-elastic-protos-locks` with a
+  prefix (`IndexNamingStrategy.lockIndex()`; see
+  [Running from several instances](#running-from-several-instances)).
 - `PUT_MAPPING` and `BACKFILL` extend an index in place, so the index keeps the name of the mapping it was created
   with while its recorded hash moves on. If a later reindex targets that same name (typically when a
   deploy is reverted under `RemovedFieldPolicy.REINDEX`), the new index gets a generation suffix:
@@ -813,7 +819,8 @@ changes anything, so one instance does the work and the others wait and then fin
   (the `pending` marker of a [zero-downtime reindex](#zero-downtime-reindex) or a backfill).
 - An instance waits up to `lockWait` (default 10 minutes; `Duration.ZERO` fails at once); after
   that the item is `LOCKED` (not ok) with a `LockException` naming the holder, and the run goes on
-  with the other aliases even under `FAIL_FAST`. `NO_OP` and `BLOCKED` items take no lock. A plan
+  with the other aliases even under `FAIL_FAST`. `BLOCKED` items take no lock, nor do `NO_OP`
+  items unless they lift a stale write block (`clearStaleWriteBlock`). A plan
   whose target hash differs from the plan made under the lock (the mapper changed in between) is
   `FAILED` with "plan is stale: plan again". `Outcome.plan()` is the fresh plan when it was
   applied, and the original item otherwise.
@@ -1516,12 +1523,12 @@ that do not fit together such as a `max-page-size` below `default-size`, abort
 | `elastic-protos.bootstrap.reindex-timeout` | `10m` | How long a reindex or backfill may take |
 | `elastic-protos.bootstrap.reindex-mode` | `ZERO_DOWNTIME` | Or `BLOCKING` (write-block the old index during the copy) |
 | `elastic-protos.bootstrap.swap-grace` | `5s` | Wait after the alias swap before the old index is write-blocked |
+| `elastic-protos.bootstrap.backfill` | `true` | Apply additions existing documents were never indexed into with an update by query; `false` reindexes |
 | `elastic-protos.bootstrap.static-settings` | `WARN` | Or `REINDEX`: reindex into the next generation when static settings differ |
 | `elastic-protos.bootstrap.extra-dynamic-settings` | empty | Setting keys (without `index.`) to apply in place in addition to the built-in list |
 | `elastic-protos.bootstrap.lock.enabled` | `true` | Take a per-alias lock in the lock index, so several instances can bootstrap at once |
 | `elastic-protos.bootstrap.lock.wait` | `10m` | How long to wait for a lock another instance holds; `0s` fails at once |
 | `elastic-protos.bootstrap.lock.ttl` | `2m` | How long a lock lives without a heartbeat |
-| `elastic-protos.bootstrap.backfill` | `true` | Apply additions existing documents were never indexed into with an update by query; `false` reindexes |
 | `elastic-protos.defaults.shards` | `1` | Shards of new indices (message options win) |
 | `elastic-protos.defaults.replicas` | `-1` | Replicas of new indices; negative means data nodes minus one, at most 1 |
 | `elastic-protos.naming.prefix` | empty | Prefix for every alias and index, joined with `-` |
@@ -1561,18 +1568,19 @@ before 3.3); `pager(...)` always adapts.
 - A document created after the catch-up pass and deleted through the alias after the swap,
   before the reconcile reached it, is created again by the reconcile: the new index never held it,
   so there is nothing to compare the delete with. The hot pass keeps this window short.
-- Static settings (shards, analysis, ...) of an existing index only change by a reindex
-  (`StaticSettingsPolicy.REINDEX`); a setting removed from the proto is never reset (see
-  [Settings changes](#settings-changes)).
-- Keys of typed maps must not contain dots; dynamic keys count toward
-  `index.mapping.total_fields.limit` (and nested fields in their values toward
-  `index.mapping.nested_fields.limit`) at index time; inner maps inside typed map values stay untyped.
+- Inner maps inside the values of a typed map (and `Struct`, `Value`, `ListValue` or `Any` values)
+  stay untyped. Keys of typed maps must not be blank or contain dots, and every distinct key adds
+  fields that count toward `index.mapping.total_fields.limit` (and nested fields in the values
+  toward `index.mapping.nested_fields.limit`) at index time (see [Mapping](#default-rules)).
 - The aggregation DSL covers terms, date histograms, histograms, ranges and single-value metrics
   with one level of sub-aggregations; pipeline, filter, composite and other aggregations go into a
   copy of the body by hand. Aggregations on nested paths inside typed map values are refused.
-- Highlighting covers text fields outside nested objects; nested fields would need `inner_hits`.
-- `InMemorySearchEngine` (testkit) runs only terms, the six metrics, `nested` and `reverse_nested`
+  Highlighting covers text fields outside nested objects (nested fields would need `inner_hits`).
+  `InMemorySearchEngine` (testkit) runs only terms, the six metrics, `nested` and `reverse_nested`
   aggregations, and ignores `highlight`.
+- The migration lock compares the holder's `expires_at` with the reader's clock, so the clocks of
+  the instances must agree to well within `lockTtl`; it uses no fencing tokens (see
+  [Running from several instances](#running-from-several-instances)).
 
 ## Building from source
 
