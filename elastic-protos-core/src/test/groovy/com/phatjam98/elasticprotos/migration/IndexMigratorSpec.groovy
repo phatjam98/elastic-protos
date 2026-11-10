@@ -73,6 +73,19 @@ class IndexMigratorSpec extends Specification {
     engine.getMappings('documents')._meta.elastic_protos.hash == DEFAULT.map(Document).contentHash()
   }
 
+  def "the planned target keeps the dynamic fields of a typed map next to the static-settings digest"() {
+    given:
+    def expected = OBJECT_LABELS.map(Firm).dynamicFields()
+
+    when:
+    def target = migrator(OBJECT_LABELS).plan(Firm).items()[0].target()
+
+    then:
+    target.mappings()._meta.elastic_protos.static_settings != null
+    !expected.isEmpty()
+    target.dynamicFields() == expected
+  }
+
   def "replica policy and default shards drive new index settings"() {
     given:
     engine.dataNodes(nodes)

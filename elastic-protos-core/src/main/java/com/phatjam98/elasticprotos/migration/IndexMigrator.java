@@ -354,7 +354,8 @@ public final class IndexMigrator {
     mappings.put("_meta", meta);
     return new IndexDefinition(target.descriptor(), target.alias(), target.name(),
         target.contentHash(), target.settings(), mappings, target.fields(), target.nestedPaths(),
-        target.fullTextFields(), target.ignoredPaths(), target.idField(), target.warnings());
+        target.fullTextFields(), target.ignoredPaths(), target.idField(), target.warnings(),
+        target.dynamicFields());
   }
 
   private IndexPlan planExistingRaw(IndexDefinition target, String current,

@@ -11,71 +11,109 @@ left out. All modules share one version ([ADR 0005](docs/adr/0005-lockstep-versi
 The first public release is a rewrite of the earlier internal library. It turns protobuf message
 definitions into Elasticsearch and OpenSearch index mappings driven by `elastic_options.proto` and
 programmatic overrides; creates and migrates hash-versioned indices behind stable aliases
-(`CREATE`, `NO_OP`, `PUT_MAPPING`, `BACKFILL`, `REINDEX` with Painless scripts, `BLOCKED`, dry runs and
-rollback); converts messages to documents and back; and compiles the proto query DSL, including
-full-text search, nested queries, sorting and point-in-time paging, into search requests. It ships
-adapters for Elasticsearch 8.x/9.x and OpenSearch 2.x/3.x on the official low-level REST clients,
-an optional Micronaut 4 module and a BOM, and requires Java 17. It is not API-compatible with the
-pre-1.0 `com.phatjam98.elasticsearch.*` packages, and the private geobuf dependency is gone. A
-`1.0.0-rc.1` pre-release precedes it.
+(`CREATE`, `NO_OP`, `PUT_MAPPING`, `UPDATE_SETTINGS`, `BACKFILL`, `REINDEX` with Painless scripts,
+`BLOCKED`, dry runs and rollback); converts messages to documents and back; and compiles the proto
+query DSL, including full-text search, nested queries, sorting, point-in-time paging, aggregations
+and highlighting, into search requests. It ships adapters for Elasticsearch 8.x/9.x and OpenSearch
+2.x/3.x on the official low-level REST clients, an optional Micronaut 4 module and a BOM, and
+requires Java 17. It is not API-compatible with the pre-1.0 `com.phatjam98.elasticsearch.*`
+packages, and the private geobuf dependency is gone. The `1.0.0-rc.1` and `1.0.0-rc.2`
+pre-releases precede it.
 
-Zero-downtime migrations before 1.0.0 ([ADR 0007](docs/adr/0007-zero-downtime-reindex.md)):
-a `REINDEX` no longer write-blocks the live index by default (`ReindexMode.ZERO_DOWNTIME`: copy,
-catch up, swap, freeze, reconcile with conditional writes, resumable after a crash;
-`ReindexMode.BLOCKING` keeps the old behaviour); additions existing documents were never indexed
-into are applied in place with the new `BACKFILL` action; `rollback` copies the writes made since
-the reindex back by default (`RollbackMode.REVERSE_DELTA`) and returns an `Outcome` instead of
-`void` (the one- and two-argument overloads throw when it fails); without the snapshot of the new
-index the reconcile reports and ends `INCOMPLETE` unless `DegradedReconcile.CREATE_MISSING` is set;
-`SearchEngine.seqNoCheckpoint` is new, and `setWriteBlock(index, true)` uses `_block/write`; only
-`MigrationListener.Abort` stops a run; the in-memory test engine's points in time are snapshots, a
-mapping update replaces `_meta`, like the engines, and `gcDeletes`/`expireTombstones` model
-`index.gc_deletes`.
+### Since 1.0.0-rc.2
 
-Maps mapped with `type: OBJECT` or `NESTED` are typed maps: `dynamic_templates` give every key the
-value type (new `value_type` option), and the query compiler, sorts and codec treat keys as typed
-fields ([ADR 0010](docs/adr/0010-typed-maps-through-dynamic-templates.md)). This changes the content
-hash of indices with such maps; `flattened` maps are unchanged.
+#### Added
 
-`RangeValue.min` and `max` are now proto3 `optional`, so `NUM_RANGE` supports open-ended ranges
-(`Values.atLeast`, `greaterThan`, `atMost`, `lessThan`, `onOrAfter`, `after`, `onOrBefore`,
-`before` and `between(Instant, Instant)`; the same steps on `Criteria`). Only the bounds that are
-set are compiled. Wire break: with implicit presence, rc.1/rc.2 generated code never put `0.0` on
-the wire and the default `JsonFormat` printer omits it, so criteria built with rc.2 such as
-`between(0, 100)` or `range(-50, 0)` and then serialized (binary or JSON), or saved queries, now
-arrive with that `min` or `max` unset and therefore open. Rebuild producers against rc.3 or
-persist criteria with `includingDefaultValueFields`. A range with no bound, a NaN bound or an empty
-range is rejected with `QueryCompileException`.
+- Zero-downtime reindex ([ADR 0007](docs/adr/0007-zero-downtime-reindex.md)):
+  `ReindexMode.ZERO_DOWNTIME` copies, catches up, swaps the alias, freezes the old index and
+  reconciles with conditional writes, recording its phase in `_meta.elastic_protos.pending` so an
+  interrupted run resumes (`IndexPlan.resume`, `ReindexResume`). `MigrationOptions.reindexMode`,
+  `swapGrace` and `degradedReconcile` (`DegradedReconcile.REPORT` / `CREATE_MISSING`);
+  `Outcome.reconcile` (`ReconcileStats`); the new `Status.INCOMPLETE`; `MigrationListener`
+  (`IndexMigrator.Builder.listener`), whose exceptions are logged and ignored except
+  `MigrationListener.Abort`, which stops the run.
+- `Action.BACKFILL`: additions existing documents were never indexed into (an added multi-field,
+  typed properties under a dynamic object) extend the mapping in place and re-index the documents
+  with `_update_by_query` (`MigrationOptions.backfill`).
+- Rollback modes: `rollback(item, previousIndex, RollbackMode)` with `REVERSE_DELTA` (default),
+  `REVERSE_DELTA_FORCE` and `ALIAS_ONLY`.
+- Per-alias migration lock ([ADR 0008](docs/adr/0008-migration-lock-index.md)): `apply` and
+  `rollback` take a lock in a lock index (`IndexNamingStrategy.lockIndex()`), plan the item again
+  under it and check the lease before every irreversible step, so several instances can bootstrap
+  at once. `MigrationOptions.lock`, `lockWait`, `lockTtl`, the new `Status.LOCKED` and
+  `LockException`.
+- Dynamic settings applied in place (ADR 0006 addendum): `Action.UPDATE_SETTINGS`, dynamic
+  settings updated before a `PUT_MAPPING`/`BACKFILL`, `StaticSettingsPolicy` (`WARN` or `REINDEX`
+  into the next generation), `MigrationOptions.staticSettings` and `extraDynamicSettings`,
+  `MappingDiff.settings` (`SettingsDiff`), and a static-settings digest in
+  `_meta.elastic_protos.static_settings`. Settings stay outside the content hash.
+- Typed maps ([ADR 0010](docs/adr/0010-typed-maps-through-dynamic-templates.md)): `type: OBJECT`
+  or `NESTED` on a `map` field maps it as an `object` or `nested` field with `dynamic: true` and
+  `dynamic_templates` on the root mapping, so every key takes the value
+  type; the new `value_type` field option; the query compiler, sorts, aggregations and codec treat
+  keys as typed fields.
+- Open-ended `NUM_RANGE`: `RangeValue.min` and `max` are proto3 `optional`; `Values` and
+  `Criteria` gain `atLeast`, `greaterThan`, `atMost`, `lessThan`, `onOrAfter`, `after`,
+  `onOrBefore`, `before` and `between(Instant, Instant)`. Only the bounds that are set are compiled.
+- Aggregations and highlighting ([ADR 0009](docs/adr/0009-aggregation-and-highlight-dsl.md)):
+  `aggregations.proto`, `SearchCriteria.aggregation` (terms, date histogram, histogram, range and
+  the min, max, avg, sum, value count and cardinality metrics, one sub-aggregation level, nested
+  fields wrapped in `<name>__nested` / `<name>__reverse`) and `SearchCriteria.highlight`, built with
+  `Aggs` and `Criteria.aggregate`, `aggregationsOnly` and `highlight`, read with
+  `AggregationResults` and `Hit.highlight()`. `QueryCompilerConfig.maxTermsSize` (default 1000).
+- Engine SPI: conditional writes (`IndexOptions.ifMatch`, `BulkOp.indexIfMatch` /
+  `deleteIfMatch`), `updateByQuery` (`UpdateByQueryRequest`), `putSettings`, `seqNoCheckpoint`,
+  `ReindexRequest` source query, `VersionType.EXTERNAL` and `proceedOnConflicts`, and hit metadata
+  (`version`, `seqNo`, `primaryTerm`, `highlight`).
+- Micronaut: `SearchPage.aggregations`, `ElasticProtosService.aggregate(criteria, type)` returning
+  an `AggregationPage` (results, total, warnings), both logging compiler warnings at WARN; the
+  properties `elastic-protos.bootstrap.reindex-mode`, `swap-grace`, `backfill`, `lock.enabled`,
+  `lock.wait`, `lock.ttl`, `static-settings`, `extra-dynamic-settings` and
+  `elastic-protos.query.max-terms-size`.
+- Testkit: the in-memory engine runs terms, the six metrics, `nested` and `reverse_nested`
+  aggregations, snapshots points in time, replaces `_meta` on a mapping update like the engines,
+  copies a reindex from a snapshot of the source, and models sequence numbers, delete tombstones
+  and `index.gc_deletes` (`gcDeletes`, `expireTombstones`).
 
-Settings before 1.0.0: dynamic index settings the proto declares are applied to existing indices
-in place (the new `UPDATE_SETTINGS` action, or before a `PUT_MAPPING`/`BACKFILL`), so
-proto-declared replicas, refresh intervals and limits are now enforced on existing indices; static
-settings warn, or reindex into the next generation with `StaticSettingsPolicy.REINDEX`
-(`MigrationOptions.staticSettings`, `extraDynamicSettings`; Micronaut
-`elastic-protos.bootstrap.static-settings`, `extra-dynamic-settings`). Settings stay outside the
-content hash (ADR 0006 addendum).
+#### Changed
 
-Concurrent bootstrap before 1.0.0 ([ADR 0008](docs/adr/0008-migration-lock-index.md)): `apply`
-and `rollback` take a per-alias lock in a lock index (`IndexNamingStrategy.lockIndex()`), plan the
-item again under it and check the lease before every irreversible step, so several instances can
-bootstrap at once; `MigrationOptions.lock`, `lockWait` and `lockTtl` (Micronaut
-`elastic-protos.bootstrap.lock.*`), the new `Status.LOCKED` and `LockException`.
-
-Engine SPI additions before 1.0.0 (conditional writes, `updateByQuery`, `putSettings`, hit
-metadata):
-
-- Hits read by id (`SearchEngine.get`) now carry `version`, `seqNo` and `primaryTerm`, so they no
-  longer equal a `Hit` built with the five-argument constructor.
-- The in-memory test engine copies a reindex from a snapshot of the source taken when the call
-  starts, and a delete consumes a sequence number and leaves a version tombstone.
-
-The query DSL gains aggregations and highlighting ([ADR 0009](docs/adr/0009-aggregation-and-highlight-dsl.md)):
-`SearchCriteria.aggregation` (terms, date histogram, histogram, range and the min, max, avg, sum,
-value count and cardinality metrics, one sub-aggregation level, nested fields wrapped in
-`<name>__nested` / `<name>__reverse`) and `SearchCriteria.highlight`, built with `Aggs` and
-`Criteria.aggregate`, `aggregationsOnly` and `highlight`, and read with `AggregationResults`.
-Aggregation names must not contain `__`, `[`, `]`, `>` or `.`, end with `_` or equal a bucket key. New
-`QueryCompilerConfig.maxTermsSize` (Micronaut `elastic-protos.query.max-terms-size`, default 1000).
-The Micronaut `SearchPage` record gains a seventh component, `aggregations` (the six-argument
-constructor remains), and `ElasticProtosService` gains `aggregate(criteria, type)`, which returns an
-`AggregationPage` (results, total, warnings); both log compiler warnings at WARN.
+- The default `reindexMode` is `ZERO_DOWNTIME`: a `REINDEX` no longer write-blocks the live index
+  for the whole copy. `ReindexMode.BLOCKING` (Micronaut `elastic-protos.bootstrap.reindex-mode:
+  BLOCKING`) keeps the rc.2 procedure.
+- The first migration that changes anything creates the lock index `elastic-protos-locks`
+  (`<prefix>-elastic-protos-locks` with a naming prefix). `lock(false)` (Micronaut
+  `elastic-protos.bootstrap.lock.enabled: false`) turns it off.
+- Proto-declared replicas, refresh intervals, limits and other dynamic settings are now enforced
+  on existing indices; rc.2 never changed the settings of an existing index. Static settings that
+  differ are a warning by default.
+- An omitted `RangeValue.min` or `max` is now an open bound; rc.1/rc.2 compiled an unset bound as
+  `0`. Wire break: with implicit presence, rc.1/rc.2 generated code never put `0.0` on the wire and
+  the default `JsonFormat` printer omits it, so criteria built with rc.2 such as `between(0, 100)`
+  or `between(-50, 0)` and then serialized (binary or JSON), or saved queries, now arrive with that
+  bound unset and therefore open. Rebuild producers against rc.3 (binary or JSON), or, for JSON,
+  persist with `JsonFormat.printer().includingDefaultValueFields()`. A range with no bound, a NaN bound or an empty range is rejected
+  with `QueryCompileException`.
+- A typed map (`type: OBJECT` or `NESTED` on a `map`) changes the mapping and the content hash of
+  its index (the hash now covers `dynamic_templates`), which reindexes; `flattened` maps are
+  unchanged.
+- Additions that existing documents were never indexed into (`MappingDiff.unindexedAdditions`)
+  are a `BACKFILL` (mapping put plus `_update_by_query` on the current index) instead of a
+  `REINDEX`; `backfill(false)` (Micronaut `elastic-protos.bootstrap.backfill: false`) keeps the
+  rc.2 reindex.
+- `rollback` returns an `Outcome` instead of `void`; the one- and two-argument overloads use
+  `REVERSE_DELTA` and throw `MigrationException` when it fails.
+- `SearchEngine.setWriteBlock(index, true)` uses `PUT /<index>/_block/write`, which waits for
+  writes in flight.
+- `SearchEngine` gains the abstract methods `updateByQuery` and `putSettings` (and the default
+  `seqNoCheckpoint`); custom implementations must add them.
+- Records gained components, each with the previous constructor kept: `Hit` (`version`, `seqNo`,
+  `primaryTerm`, `highlight`; the five-argument constructor remains), `IndexResult` (`seqNo`,
+  `primaryTerm`; four-argument), `ReindexResult` (`noops`, `deleted`, `versionConflicts`;
+  six-argument), `IndexOptions` (`ifSeqNo`, `ifPrimaryTerm`), `BulkOp` (`ifSeqNo`,
+  `ifPrimaryTerm`), `IndexPlan` (`resume`), `MigrationResult.Outcome` (`reconcile`), `MappingDiff`
+  (`settings`), `IndexDefinition` (`dynamicFields`), `FieldInfo` (`pattern`) and the Micronaut
+  `SearchPage` (`aggregations`; six-argument). Hits read by id (`SearchEngine.get`) now carry
+  `version`, `seqNo` and `primaryTerm`, so they no longer equal a `Hit` built with the
+  five-argument constructor.
+- `Action` gains `UPDATE_SETTINGS` and `BACKFILL`; `MigrationResult.Status` gains `INCOMPLETE` and
+  `LOCKED`, which are not `ok()`.

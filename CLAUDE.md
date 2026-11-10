@@ -16,11 +16,11 @@ skeleton, M1 core demoable, M2 both adapters + CI, M3 docs + 1.0.0-rc, M4 releas
 
 | Module | Purpose |
 |---|---|
-| `elastic-protos-core` | mapping, options, codec, engine SPI, migration, query; owns all `.proto` files under `src/main/proto/phatjam98/elasticprotos/v1/` |
+| `elastic-protos-core` | mapping, options, codec, engine SPI, migration, query (incl. `AggregationCompiler`, `HighlightCompiler`, `AggregationResults`, `Aggs`); owns all `.proto` files under `src/main/proto/phatjam98/elasticprotos/v1/` (`elastic_options`, `search_criteria`, `aggregations`, `flat_struct`, `sorting_criteria`, `pagination`, `geo`) |
 | `elastic-protos-elasticsearch` | `SearchEngine` adapter on `elasticsearch-rest-client` (ES 8.x and 9.x) |
 | `elastic-protos-opensearch` | `SearchEngine` adapter on `opensearch-rest-client` (OpenSearch 2.x and 3.x) |
-| `elastic-protos-micronaut` | optional Micronaut 4 integration: config, bean factories, startup bootstrap |
-| `elastic-protos-testkit` | internal: example protos, golden fixtures, shared engine integration spec (not published) |
+| `elastic-protos-micronaut` | optional Micronaut 4 integration: config (`ElasticProtosConfiguration`), bean factories, startup bootstrap, `ElasticProtosService` (`search` -> `SearchPage`, `aggregate` -> `AggregationPage`) |
+| `elastic-protos-testkit` | internal: example protos, golden fixtures, `InMemorySearchEngine`, shared engine integration spec (not published) |
 | `elastic-protos-bom` | Maven BOM for the published modules |
 | `examples/micronaut-sample` | runnable Micronaut example app; a standalone build, **not in settings.gradle**, consuming the published artifacts from `mavenLocal()` (`./gradlew publishToMavenLocal` first; `-PelasticProtosVersion=` to override). CI job `sample` builds it |
 | `buildSrc` | convention plugins: `java-conventions`, `proto-conventions`, `publish-conventions`, `library-conventions` |
@@ -113,3 +113,27 @@ Checkstyle, JaCoCo and Javadoc.
   repeated message => `nested`, `Timestamp` => `date`, `map<K,V>` => `flattened` (`type: OBJECT` opts in
   to a typed map: dynamic object plus `dynamic_templates` from the value type, ADR 0010). Documents carry proto3 default values (`CodecConfig.includeDefaults` is true).
   Index settings, including analysis, are outside the content hash (ADR 0006).
+- Migration actions: `CREATE`, `NO_OP`, `PUT_MAPPING`, `UPDATE_SETTINGS`, `BACKFILL`, `REINDEX`, `BLOCKED`.
+  Only proto-declared settings are compared; dynamic ones (`DiffClassifier.DYNAMIC_SETTINGS` /
+  `DYNAMIC_SETTING_PREFIXES` plus `MigrationOptions.extraDynamicSettings`) are applied in place
+  (`UPDATE_SETTINGS`, or before `PUT_MAPPING`/`BACKFILL`); static ones warn or reindex into the next
+  generation per `StaticSettingsPolicy`. New indices record a static-settings digest in
+  `_meta.elastic_protos.static_settings`.
+- `BACKFILL` puts the mapping and runs `_update_by_query` for `MappingDiff.unindexedAdditions` (added
+  multi-fields, typed properties under a dynamic object).
+- `REINDEX` defaults to `ReindexMode.ZERO_DOWNTIME` (ADR 0007): prepare (seq_no checkpoint), copy, catch up
+  (external versioning), probe (scripts), snapshot (PIT), swap, freeze (`_block/write` after `swapGrace`),
+  reconcile (hot pass then cold, conditional writes), sweep, finish. The phase lives in
+  `_meta.elastic_protos.pending` on the new index (backfills use it too); `plan` reads the pending
+  marker into `IndexPlan.resume` and `apply` continues from there. `BLOCKING` is the old write-blocking copy. Rollback: `RollbackMode`
+  (`REVERSE_DELTA` default, `REVERSE_DELTA_FORCE`, `ALIAS_ONLY`).
+- `apply` and `rollback` take a per-alias lock (ADR 0008, `AliasLock`) in `IndexNamingStrategy.lockIndex()`
+  (`elastic-protos-locks`, prefixed by `prefixed(...)`), re-plan under it and check the lease before
+  irreversible steps. `MigrationOptions.lock` / `lockWait` (10m) / `lockTtl` (2m); `Status.LOCKED`,
+  `LockException`. The migrator writes the whole `_meta` on every update, since the engines replace it.
+- Query DSL: `SearchCriteria.aggregation` / `highlight` (ADR 0009) compile through `AggregationCompiler`
+  and `HighlightCompiler`; one sub-aggregation level, nested/reverse_nested wrappers named
+  `<name>__nested` / `<name>__reverse`. `RangeValue.min`/`max` are `optional` (open bounds).
+- `InMemorySearchEngine` (testkit) runs only terms, the six metrics, `nested` and `reverse_nested`
+  aggregations, ignores `highlight`, and models seq_no, tombstones and PIT snapshots like the engines.
+  `EngineIntegrationSpec` has 52 feature methods.
