@@ -22,6 +22,9 @@ import com.phatjam98.elasticprotos.proto.example.Firm
 import com.phatjam98.elasticprotos.proto.example.FirmStatus
 import com.phatjam98.elasticprotos.proto.example.InboxItem
 import com.phatjam98.elasticprotos.proto.example.InboxStatus
+import com.phatjam98.elasticprotos.proto.example.InnerMaps
+import com.phatjam98.elasticprotos.proto.example.InnerPart
+import com.phatjam98.elasticprotos.proto.example.InnerValue
 import com.phatjam98.elasticprotos.proto.example.Office
 import com.phatjam98.elasticprotos.proto.example.Party
 import com.phatjam98.elasticprotos.proto.example.PartyRole
@@ -475,6 +478,74 @@ class ProtoDocumentCodecSpec extends Specification {
 
     where:
     key << ['a.b', '', '  ']
+  }
+
+  static InnerMaps innerMaps() {
+    def part = InnerPart.newBuilder().setQty(9007199254740993L).setAt(FILED)
+        .setWhere(LatLon.newBuilder().setLat(36.1d).setLon(-115.1d))
+        .putCounts('c', 7L).build()
+    InnerMaps.newBuilder()
+        .setId('im-1')
+        .putOuter('a', InnerValue.newBuilder()
+            .setScore(1.5d)
+            .putLabels('env', 'prod')
+            .putMetrics('m', 2.5d)
+            .putParts('p', part)
+            .setExtra(Struct.newBuilder().putFields('x', Value.newBuilder().setStringValue('y').build()))
+            .setPayload(com.google.protobuf.Any.pack(StringValue.of('packed')))
+            .setMask(com.google.protobuf.FieldMask.newBuilder().addPaths('a.b').addPaths('c'))
+            .build())
+        .putNestedOuter('n', part)
+        .build()
+  }
+
+  def "inner maps of typed map values convert at every level and read back"() {
+    given:
+    def anyCodec = ProtoDocumentCodec.of(ProtoMapper.withDefaults(), CodecConfig.standard()
+        .withAnyTypes(com.google.protobuf.TypeRegistry.newBuilder().add(StringValue.descriptor).build()))
+    def message = innerMaps()
+
+    when:
+    def document = anyCodec.toDocument(message)
+    Map part = [qty: 9007199254740993L, at: '2024-03-04T05:06:07.123Z', where: [lat: 36.1d, lon: -115.1d],
+                counts: [c: 7L]]
+
+    then: 'int64 as numbers, dates, geo points; flattened, Struct and Any as printed'
+    document.outer == [a: [score: 1.5d, labels: [env: 'prod'], metrics: [m: 2.5d], parts: [p: part],
+                           extra: [x: 'y'],
+                           payload: ['@type': 'type.googleapis.com/google.protobuf.StringValue', value: 'packed'],
+                           mask: 'a.b,c']]
+    document.nested_outer == [n: part]
+
+    and:
+    anyCodec.fromDocument(document, InnerMaps) == message
+    anyCodec.fromDocument(Json.parseObject(Json.canonical(document)), InnerMaps) == message
+    anyCodec.fromDocument([outer: [a: [parts: [p: [counts: [c: '8'], at: 1709528767123]]]]], InnerMaps)
+        .getOuterOrThrow('a').getPartsOrThrow('p').with { it.getCountsOrThrow('c') == 8L && it.at == FILED }
+  }
+
+  @Unroll
+  def "an inner typed map key '#key' is rejected at #level"() {
+    when:
+    codec.toDocument(message)
+
+    then:
+    def e = thrown(CodecException)
+    e.message == "Field ${field} has the key '${key}'; keys of a map mapped as OBJECT must not be blank and must contain no '.'"
+
+    where:
+    level         | key   | field                      | message
+    'the second'  | 'a.b' | 'outer.*.metrics'          | InnerMaps.newBuilder().putOuter('a', InnerValue.newBuilder().putMetrics(key, 1d).build()).build()
+    'the second'  | ''    | 'outer.*.metrics'          | InnerMaps.newBuilder().putOuter('a', InnerValue.newBuilder().putMetrics(key, 1d).build()).build()
+    'the third'   | ' '   | 'outer.*.parts.*.counts'   | InnerMaps.newBuilder().putOuter('a', InnerValue.newBuilder().putParts('p', InnerPart.newBuilder().putCounts(key, 1L).build()).build()).build()
+    'the third'   | 'x.y' | 'outer.*.parts.*.counts'   | InnerMaps.newBuilder().putOuter('a', InnerValue.newBuilder().putParts('p', InnerPart.newBuilder().putCounts(key, 1L).build()).build()).build()
+    'the first'   | 'x.y' | 'outer'                    | InnerMaps.newBuilder().putOuter(key, InnerValue.defaultInstance).build()
+  }
+
+  def "keys of a flattened map inside typed map values stay opaque"() {
+    expect:
+    codec.toDocument(InnerMaps.newBuilder().putOuter('a', InnerValue.newBuilder().putLabels('a.b', 'x').build())
+        .build()).outer.a.labels == ['a.b': 'x']
   }
 
   def "keys of flattened maps stay opaque"() {

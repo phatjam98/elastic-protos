@@ -72,6 +72,12 @@ class DiffClassifierSpec extends Specification {
                                                     mapping: [type: 'object', dynamic: true]]]
   static final Map CHILD_NAME = template('children.*.name', [type: 'keyword'])
   static final Map INNER = template('o.counters.*', [type: 'long'])
+  // a map inside the values of children: flattened, or typed with two key wildcards
+  static final Map CHILD_TAGS_FLAT = template('children.*.tags', [type: 'flattened'])
+  static final Map CHILD_TAGS_TYPED = [('ep:children.*.tags'): [path_match: 'children.*.tags',
+                                                              match_mapping_type: 'object', mapping: [type: 'object', dynamic: true]]]
+  static final Map CHILD_TAGS_KEYS = template('children.*.tags.*', [type: 'long'])
+  static final Map CHILD_TAGS_KEYS_DOUBLE = template('children.*.tags.*', [type: 'double'])
 
   @Unroll
   def "dynamic templates: #description"() {
@@ -98,6 +104,12 @@ class DiffClassifierSpec extends Specification {
     'template of a map in an existing object' | root([o: [properties: [a: KEYWORD]]])                                    | root([o: [properties: [a: KEYWORD, counters: DYN]]], [dynamic_templates: [INNER]])            | ['o.counters']       | ['<root>:dynamic_templates']   | Action.PUT_MAPPING
     'a template that is not ours'            | root([a: KEYWORD])                                                        | root([a: KEYWORD, m: DYN], [dynamic_templates: [[custom: [match: 'm*', mapping: KEYWORD]]]])  | ['m']                | ['<root>:dynamic_templates']   | Action.REINDEX
     'an ep: template without a pattern'      | root([a: KEYWORD])                                                        | root([a: KEYWORD, m: DYN], [dynamic_templates: [['ep:m': [match: 'm', mapping: KEYWORD]]]])   | ['m']                | ['<root>:dynamic_templates']   | Action.REINDEX
+    'inner typed map added to values'        | root([children: DYN], [dynamic_templates: [CHILD, CHILD_ROOT]])          | root([children: DYN], [dynamic_templates: [CHILD_TAGS_KEYS, CHILD, CHILD_TAGS_TYPED, CHILD_ROOT]]) | []             | ['<root>:dynamic_templates']   | Action.PUT_MAPPING
+    'inner map flattened becomes typed'      | root([children: DYN], [dynamic_templates: [CHILD, CHILD_TAGS_FLAT, CHILD_ROOT]]) | root([children: DYN], [dynamic_templates: [CHILD_TAGS_KEYS, CHILD, CHILD_TAGS_TYPED, CHILD_ROOT]]) | []      | ['<root>:dynamic_templates']   | Action.REINDEX
+    'inner typed map becomes flattened'      | root([children: DYN], [dynamic_templates: [CHILD_TAGS_KEYS, CHILD, CHILD_TAGS_TYPED, CHILD_ROOT]]) | root([children: DYN], [dynamic_templates: [CHILD, CHILD_TAGS_FLAT, CHILD_ROOT]]) | [] | ['<root>:dynamic_templates']   | Action.REINDEX
+    'inner key type changed'                 | root([children: DYN], [dynamic_templates: [CHILD_TAGS_KEYS, CHILD_TAGS_TYPED, CHILD_ROOT]]) | root([children: DYN], [dynamic_templates: [CHILD_TAGS_KEYS_DOUBLE, CHILD_TAGS_TYPED, CHILD_ROOT]]) | [] | ['<root>:dynamic_templates'] | Action.REINDEX
+    'rc.3 untyped map gains inner templates' | root([children: DYN], [dynamic_templates: [CHILD_ROOT]])                  | root([children: DYN], [dynamic_templates: [CHILD_TAGS_FLAT, CHILD_ROOT]])                     | []                   | ['<root>:dynamic_templates']   | Action.REINDEX
+    'map with inner maps added'              | root([a: KEYWORD])                                                        | root([a: KEYWORD, children: DYN], [dynamic_templates: [CHILD_TAGS_KEYS, CHILD_TAGS_TYPED, CHILD_ROOT]]) | ['children'] | ['<root>:dynamic_templates'] | Action.PUT_MAPPING
   }
 
   def "a removed typed map reindexes when removed fields reindex"() {

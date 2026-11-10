@@ -1,0 +1,17 @@
+{
+  "from" : 0,
+  "query" : {
+    "bool" : {
+      "filter" : [ {
+        "range" : {
+          "outer.metrics.metrics.score" : {
+            "gte" : 1.0,
+            "lte" : 10.0
+          }
+        }
+      } ]
+    }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

@@ -10,10 +10,15 @@ import static com.phatjam98.elasticprotos.proto.SearchOperationType.TEXT_MATCHES
 import static com.phatjam98.elasticprotos.proto.SearchOperationType.TEXT_PREFIX
 import static com.phatjam98.elasticprotos.proto.SearchOperationType.TEXT_REGEX
 
+import com.google.protobuf.Any
+import com.google.protobuf.FieldMask
 import com.google.protobuf.Message
+import com.google.protobuf.StringValue
 import com.google.protobuf.Struct
 import com.google.protobuf.Timestamp
+import com.google.protobuf.TypeRegistry
 import com.google.protobuf.Value
+import com.phatjam98.elasticprotos.codec.CodecConfig
 import com.phatjam98.elasticprotos.codec.ProtoDocumentCodec
 import com.phatjam98.elasticprotos.engine.BulkOp
 import com.phatjam98.elasticprotos.engine.EngineException
@@ -68,6 +73,9 @@ import com.phatjam98.elasticprotos.proto.SortingOrder
 import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
 import com.phatjam98.elasticprotos.proto.example.InboxItem
+import com.phatjam98.elasticprotos.proto.example.InnerMaps
+import com.phatjam98.elasticprotos.proto.example.InnerPart
+import com.phatjam98.elasticprotos.proto.example.InnerValue
 import com.phatjam98.elasticprotos.proto.example.Office
 import com.phatjam98.elasticprotos.proto.example.TypedBag
 import com.phatjam98.elasticprotos.proto.example.TypedChild
@@ -710,6 +718,100 @@ abstract class EngineIntegrationSpec extends Specification {
     and: 'hits parse back into the messages'
     engine.search([typed.alias()], compiler.compile(sorted(fieldSort('counters.views', SortingOrder.ASC)), typed).body())
         .hits().collect { tmCodec.fromHit(it, TypedMaps) } == [first, second]
+  }
+
+  def "typed maps inside typed map values: inner maps are flattened or keyed twice, Struct flattened, Any kept"() {
+    given: 'its own index; outer key "metrics" and inner keys "score" and "parts" equal field names on purpose'
+    def imMapper = ProtoMapper.builder().naming(IndexNamingStrategy.prefixed(prefix + '-im')).build()
+    def imCodec = ProtoDocumentCodec.of(imMapper, CodecConfig.standard()
+        .withAnyTypes(TypeRegistry.newBuilder().add(StringValue.descriptor).build()))
+    def imMigrator = IndexMigrator.builder().engine(engine).mapper(imMapper).build()
+    IndexDefinition im = imMapper.map(InnerMaps)
+    def imIds = { SearchCriteria criteria -> docIds(criteria, im) }
+    def at = Timestamp.newBuilder().setSeconds(1_709_528_767L).build()
+    def part = { long qty, long count ->
+      InnerPart.newBuilder().setQty(qty).setAt(at).setWhere(SampleData.LAS_VEGAS).putCounts('c', count).build()
+    }
+    def first = InnerMaps.newBuilder()
+        .setId('im-1')
+        .putOuter('metrics', InnerValue.newBuilder()
+            .setScore(1d)
+            .putLabels('env', 'prod')
+            .putMetrics('score', 5d)
+            .putMetrics('parts', 1d)
+            .putParts('p', part(2L, 7L))
+            .setExtra(Struct.newBuilder().putFields('x', Value.newBuilder().setStringValue('y').build()))
+            .setPayload(Any.pack(StringValue.of('packed')))
+            .setMask(FieldMask.newBuilder().addPaths('a.b').addPaths('c'))
+            .build())
+        .putNestedOuter('n', part(3L, 4L))
+        .build()
+    def second = InnerMaps.newBuilder()
+        .setId('im-2')
+        .putOuter('metrics', InnerValue.newBuilder().setScore(2d).putLabels('env', 'dev').putMetrics('score', 50d).build())
+        .putOuter('k', InnerValue.newBuilder().putParts('score', part(9L, 1L)).build())
+        .putNestedOuter('n', part(1L, 9L))
+        .build()
+
+    when: 'bootstrapped'
+    def created = imMigrator.bootstrap(InnerMaps)
+    def stored = engine.getMappings(im.alias())
+
+    then: 'the engine stores the templates with two key wildcards as sent, so a re-plan is a no-op'
+    created.ok()
+    DiffClassifier.normalize(stored).dynamic_templates == DiffClassifier.normalize(im.mappings()).dynamic_templates
+    imMigrator.plan(InnerMaps).items()*.action() == [Action.NO_OP]
+
+    when: 'two documents are indexed'
+    def bulk = engine.bulk([first, second].collect {
+      BulkOp.index(im.alias(), imCodec.idOf(it).get(), imCodec.toDocument(it))
+    })
+    engine.refresh(im.alias())
+    def live = engine.getMappings(im.alias()).properties
+    def metrics = live.outer.properties.metrics.properties
+
+    then: 'every path took the template it was generated for, even where a key equals a field name'
+    !bulk.errors()
+    metrics.score.type == 'double'
+    metrics.labels.type == 'flattened'
+    metrics.extra.type == 'flattened'
+    metrics.metrics.properties.score.type == 'double'
+    metrics.metrics.properties.parts.type == 'double'
+    metrics.parts.properties.p.properties.qty.type == 'long'
+    metrics.parts.properties.p.properties.at.type == 'date'
+    metrics.parts.properties.p.properties.where.type == 'geo_point'
+    metrics.parts.properties.p.properties.counts.properties.c.type == 'long'
+    String.valueOf(metrics.payload.enabled) == 'false'
+    String.valueOf(metrics.mask.enabled) == 'false'
+    !metrics.payload.containsKey('properties')
+    live.outer.properties.k.properties.parts.properties.score.properties.qty.type == 'long'
+    live.nested_outer.properties.n.type == 'nested'
+    live.nested_outer.properties.n.properties.counts.properties.c.type == 'long'
+    imMigrator.plan(InnerMaps).items()*.action() == [Action.NO_OP]
+
+    and: 'doubly keyed paths are queried by the inner value type'
+    imIds(where(fc('outer.metrics.metrics.score', NUM_RANGE, range(10, 100)))) == ['im-2'] as Set
+    imIds(where(fc('outer.metrics.metrics.score', NUM_RANGE, range(1, 10)))) == ['im-1'] as Set
+    imIds(where(fc('outer.metrics.score', NUM_RANGE, range(1.5, 3)))) == ['im-2'] as Set
+    imIds(where(fc('outer.metrics.parts.p.counts.c', NUM_RANGE, range(5, 10)))) == ['im-1'] as Set
+    imIds(where(fc('outer.k.parts.score.qty', EQUALS, integer(9)))) == ['im-2'] as Set
+    imIds(where(fc('outer.metrics.parts.p.where', GEO_DISTANCE, FlatValue.newBuilder().setGeoDistanceValue(
+        GeoDistanceValue.newBuilder().setPoint(SampleData.LAS_VEGAS).setDistance('10km')).build()))) == ['im-1'] as Set
+    imIds(where(fc('outer.nobody.metrics.score', NUM_RANGE, range(0, 100)))).isEmpty()
+
+    and: 'a flattened map and a Struct inside the values answer EQUALS on a key'
+    imIds(where(fc('outer.metrics.labels.env', EQUALS, str('prod')))) == ['im-1'] as Set
+    imIds(where(fc('outer.metrics.extra.x', EQUALS, str('y')))) == ['im-1'] as Set
+
+    and: 'inside nested values, predicates hold for the same element'
+    imIds(where(fc('nested_outer.n.counts.c', EQUALS, integer(4)), fc('nested_outer.n.qty', NUM_RANGE, range(2, 5)))) ==
+        ['im-1'] as Set
+    imIds(where(fc('nested_outer.n.counts.c', EQUALS, integer(9)), fc('nested_outer.n.qty', NUM_RANGE, range(2, 5)))).isEmpty()
+
+    and: 'sorting by a doubly keyed path, and hits parse back into the messages, Any and FieldMask included'
+    orderedIds(im, sorted(fieldSort('outer.metrics.metrics.score', SortingOrder.DESC))) == ['im-2', 'im-1']
+    engine.search([im.alias()], compiler.compile(sorted(fieldSort('outer.metrics.metrics.score', SortingOrder.ASC)), im).body())
+        .hits().collect { imCodec.fromHit(it, InnerMaps) } == [first, second]
   }
 
   // ------------------------------------------------------------------ round trip

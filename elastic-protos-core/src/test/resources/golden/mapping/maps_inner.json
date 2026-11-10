@@ -1,0 +1,200 @@
+{
+  "alias" : "inner_maps",
+  "fullTextFields" : { },
+  "idField" : "id",
+  "ignoredPaths" : [ ],
+  "mappings" : {
+    "_meta" : {
+      "elastic_protos" : {
+        "hash" : "7d039e2e",
+        "proto" : "phatjam98.elasticprotos.example.InnerMaps",
+        "schema_version" : 1
+      }
+    },
+    "dynamic" : "strict",
+    "dynamic_templates" : [ {
+      "ep:outer.*.parts.*.counts.*" : {
+        "mapping" : {
+          "type" : "long"
+        },
+        "path_match" : "outer.*.parts.*.counts.*"
+      }
+    }, {
+      "ep:outer.*.parts.*.at" : {
+        "mapping" : {
+          "format" : "strict_date_optional_time",
+          "type" : "date"
+        },
+        "path_match" : "outer.*.parts.*.at"
+      }
+    }, {
+      "ep:outer.*.parts.*.counts" : {
+        "mapping" : {
+          "dynamic" : true,
+          "type" : "object"
+        },
+        "match_mapping_type" : "object",
+        "path_match" : "outer.*.parts.*.counts"
+      }
+    }, {
+      "ep:outer.*.parts.*.qty" : {
+        "mapping" : {
+          "type" : "long"
+        },
+        "path_match" : "outer.*.parts.*.qty"
+      }
+    }, {
+      "ep:outer.*.parts.*.where" : {
+        "mapping" : {
+          "type" : "geo_point"
+        },
+        "path_match" : "outer.*.parts.*.where"
+      }
+    }, {
+      "ep:nested_outer.*.counts.*" : {
+        "mapping" : {
+          "type" : "long"
+        },
+        "path_match" : "nested_outer.*.counts.*"
+      }
+    }, {
+      "ep:outer.*.metrics.*" : {
+        "mapping" : {
+          "type" : "double"
+        },
+        "path_match" : "outer.*.metrics.*"
+      }
+    }, {
+      "ep:outer.*.parts.*" : {
+        "mapping" : {
+          "dynamic" : true,
+          "type" : "object"
+        },
+        "match_mapping_type" : "object",
+        "path_match" : "outer.*.parts.*"
+      }
+    }, {
+      "ep:nested_outer.*.at" : {
+        "mapping" : {
+          "format" : "strict_date_optional_time",
+          "type" : "date"
+        },
+        "path_match" : "nested_outer.*.at"
+      }
+    }, {
+      "ep:nested_outer.*.counts" : {
+        "mapping" : {
+          "dynamic" : true,
+          "type" : "object"
+        },
+        "match_mapping_type" : "object",
+        "path_match" : "nested_outer.*.counts"
+      }
+    }, {
+      "ep:nested_outer.*.qty" : {
+        "mapping" : {
+          "type" : "long"
+        },
+        "path_match" : "nested_outer.*.qty"
+      }
+    }, {
+      "ep:nested_outer.*.where" : {
+        "mapping" : {
+          "type" : "geo_point"
+        },
+        "path_match" : "nested_outer.*.where"
+      }
+    }, {
+      "ep:outer.*.extra" : {
+        "mapping" : {
+          "type" : "flattened"
+        },
+        "path_match" : "outer.*.extra"
+      }
+    }, {
+      "ep:outer.*.labels" : {
+        "mapping" : {
+          "type" : "flattened"
+        },
+        "path_match" : "outer.*.labels"
+      }
+    }, {
+      "ep:outer.*.mask" : {
+        "mapping" : {
+          "enabled" : false,
+          "type" : "object"
+        },
+        "path_match" : "outer.*.mask"
+      }
+    }, {
+      "ep:outer.*.metrics" : {
+        "mapping" : {
+          "dynamic" : true,
+          "type" : "object"
+        },
+        "match_mapping_type" : "object",
+        "path_match" : "outer.*.metrics"
+      }
+    }, {
+      "ep:outer.*.parts" : {
+        "mapping" : {
+          "dynamic" : true,
+          "type" : "object"
+        },
+        "match_mapping_type" : "object",
+        "path_match" : "outer.*.parts"
+      }
+    }, {
+      "ep:outer.*.payload" : {
+        "mapping" : {
+          "enabled" : false,
+          "type" : "object"
+        },
+        "path_match" : "outer.*.payload"
+      }
+    }, {
+      "ep:outer.*.score" : {
+        "mapping" : {
+          "type" : "double"
+        },
+        "path_match" : "outer.*.score"
+      }
+    }, {
+      "ep:nested_outer.*" : {
+        "mapping" : {
+          "dynamic" : true,
+          "type" : "nested"
+        },
+        "match_mapping_type" : "object",
+        "path_match" : "nested_outer.*"
+      }
+    }, {
+      "ep:outer.*" : {
+        "mapping" : {
+          "dynamic" : true,
+          "type" : "object"
+        },
+        "match_mapping_type" : "object",
+        "path_match" : "outer.*"
+      }
+    } ],
+    "properties" : {
+      "id" : {
+        "ignore_above" : 256,
+        "type" : "keyword"
+      },
+      "nested_outer" : {
+        "dynamic" : true,
+        "type" : "object"
+      },
+      "outer" : {
+        "dynamic" : true,
+        "type" : "object"
+      }
+    }
+  },
+  "name" : "inner_maps-v7d039e2e",
+  "nestedPaths" : [ ],
+  "settings" : { },
+  "warnings" : [ "each distinct key of outer.*.metrics adds 1 field(s) at index time (index.mapping.total_fields.limit)", "each distinct key of outer.*.parts.*.counts adds 1 field(s) at index time (index.mapping.total_fields.limit)", "each distinct key of outer.*.parts adds 5 field(s) at index time (index.mapping.total_fields.limit)", "outer.*.payload: google.protobuf.Any inside the values of a typed map is mapped as a disabled object (kept in _source, not indexed)", "outer.*.mask: google.protobuf.FieldMask inside the values of a typed map is mapped as a disabled object (kept in _source, not indexed)", "each distinct key of outer adds 8 field(s) at index time (index.mapping.total_fields.limit)", "each distinct key of nested_outer.*.counts adds 1 field(s) at index time (index.mapping.total_fields.limit)", "each distinct key of nested_outer adds 5 field(s) at index time (index.mapping.total_fields.limit), 1 of them nested (index.mapping.nested_fields.limit, default 50)" ]
+}
