@@ -135,7 +135,7 @@ Checkstyle, JaCoCo and Javadoc.
   and `HighlightCompiler`; nested/reverse_nested wrappers named `<name>__nested` / `<name>__reverse`.
   Sub-aggregations nest down to `QueryCompilerConfig.maxAggregationDepth` (default 3, top level
   included); `maxAggregationBuckets` (default 0, off) guards the product of requested bucket counts.
-  `filter` / `filters` / `composite` (ADR 0011): conditions are `SearchCondition`s compiled by
+  `filter` / `filters` / `composite` (ADR 0012): conditions are `SearchCondition`s compiled by
   `ConditionCompiler` with the aggregation's nested context entered (`NestedPathResolver` context:
   context paths not re-wrapped, fields outside refused); a filter with a nested path as `field`
   filters those nested objects. Composite is top level only, sources in one nested context, paged

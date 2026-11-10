@@ -25,7 +25,7 @@ packages, and the private geobuf dependency is gone. The `1.0.0-rc.1`, `1.0.0-rc
 #### Added
 
 - Filter, filters and composite aggregations and deeper sub-aggregations
-  ([ADR 0011](docs/adr/0011-filter-composite-and-deeper-aggregations.md)): `Aggregation.filter`
+  ([ADR 0012](docs/adr/0012-filter-composite-and-deeper-aggregations.md)): `Aggregation.filter`
   (`FilterAggregation`), `filters` (`FiltersAggregation`, `KeyedFilter`, `other_bucket_key`) and
   `composite` (`CompositeAggregation` with terms, date histogram and histogram `CompositeSource`s,
   `order`, `missing_bucket`, `size` and an `after` key). Filter conditions are `SearchCondition`s

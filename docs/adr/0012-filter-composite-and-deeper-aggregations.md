@@ -1,4 +1,4 @@
-# 0011. Filter, filters and composite aggregations, and deeper sub-aggregations
+# 0012. Filter, filters and composite aggregations, and deeper sub-aggregations
 
 - Status: Accepted
 - Date: 2026-11-10
