@@ -20,6 +20,31 @@ requires Java 17. It is not API-compatible with the pre-1.0 `com.phatjam98.elast
 packages, and the private geobuf dependency is gone. The `1.0.0-rc.1`, `1.0.0-rc.2` and
 `1.0.0-rc.3` pre-releases precede it.
 
+### Since 1.0.0-rc.3
+
+#### Changed
+
+- **Breaking (mapping output):** maps inside the values of a typed map
+  ([ADR 0011](docs/adr/0011-maps-inside-typed-map-values.md)). A typed map whose value message
+  holds a `map`, a `Struct`/`Value`/`ListValue` or an `Any`/`FieldMask`/`Empty` (at any depth), or
+  whose value is one of those types, is no longer an untyped dynamic object with a "values of ... are
+  untyped" warning. The value keeps its typed leaves, and the inner field follows the rule it
+  follows anywhere else: an inner `map` is `flattened` (`flat_object` on OpenSearch), an inner
+  `map` with `type: OBJECT`/`NESTED` is typed through templates with one wildcard per key
+  (`outer.*.inner.*`), `Struct`/`Value`/`ListValue` are `flattened`, and `Any`/`FieldMask`/`Empty`
+  are `{"type": "object", "enabled": false}` (kept in `_source`, not indexed; at the top level they
+  are still left out). The content hash of an index with such a map changes, so it is reindexed
+  once on the next bootstrap; flattened maps and typed maps without these inner types keep their
+  mapping and hash. Doubly keyed paths such as `outer.a.inner.b` resolve, compile and sort like
+  any key (`IndexDefinition.resolve`, `typedMapValues` and `nestedAncestors` handle several keys),
+  and keys of a flattened field inside the values (`outer.a.labels.env`) take `EQUALS`, `ANY_IN`,
+  `EXISTS` and `TEXT_PREFIX`. The codec checks keys at every level.
+- `Struct`/`Value`/`ListValue` with an explicit `type: OBJECT` or `NESTED` inside the values of a
+  typed map, an explicit `type` other than `IGNORE` on an `Any`/`FieldMask`/`Empty` there, and an
+  `elastic_field.name` holding `*` there throw `MappingException`; with
+  `MappingDefaults.structKind(OBJECT)` such a `Struct` is mapped `flattened` with a warning
+  (ADR 0011 explains why a dynamic object there would be captured by the map's templates).
+
 ### Since 1.0.0-rc.2
 
 #### Added

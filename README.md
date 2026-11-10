@@ -303,7 +303,7 @@ Index settings follow the same idea: `shards`/`replicas` options, then `settings
 | `google.protobuf.Duration` | `keyword` |
 | wrapper types (`StringValue`, `Int64Value`, ...) | the wrapped scalar's type |
 | `google.protobuf.Struct`, `Value`, `ListValue` | `flattened` |
-| `google.protobuf.Any`, `FieldMask`, `Empty` | left out, with a warning |
+| `google.protobuf.Any`, `FieldMask`, `Empty` | left out, with a warning (inside the values of a typed map: `object` with `enabled: false`) |
 | `phatjam98.elasticprotos.v1.LatLon` | `geo_point` |
 | `phatjam98.elasticprotos.v1.GeoShape` | `geo_shape` |
 | recursive message, or nesting deeper than 5 | `object` with `enabled: false`, with a warning |
@@ -333,15 +333,44 @@ map<string, string> notes = 3 [(phatjam98.elasticprotos.v1.elastic_field) = {
 map<string, Child> children = 4 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
 ```
 
-The codec checks the keys of typed maps only (keys of flattened maps pass unchanged): they must not
-be blank and must contain no `.`, or it throws `CodecException`. Every distinct key adds fields to
+The codec checks the keys of typed maps only (keys of flattened maps pass unchanged), at every
+level of typed maps inside typed map values: they must not be blank and must contain no `.`, or it
+throws `CodecException`. Every distinct key adds fields to
 the index at index time (the key's object, plus every field of a message value), which count toward
 `index.mapping.total_fields.limit`; nested fields inside message values also count toward
 `index.mapping.nested_fields.limit` (default 50), so indexing fails at about the 51st distinct key
-of a map whose values hold a nested field. The mapper warns with both numbers per key. `Struct`,
-`Value`, `ListValue` and `Any` values, and values whose message holds a map, `Struct` or `Any` at
-any depth, stay untyped (`dynamic: true` only), with a warning. A typed map is a different mapping from a flattened one, so switching a map to or from
-`OBJECT` reindexes.
+of a map whose values hold a nested field. The mapper warns with both numbers per key. A typed map
+is a different mapping from a flattened one, so switching a map to or from `OBJECT` reindexes.
+
+Inside the values of a typed map every field follows the rule it follows anywhere else
+([ADR 0011](docs/adr/0011-maps-inside-typed-map-values.md)): an inner `map` is `flattened`; an
+inner `map` with `type: OBJECT` (or `NESTED`) is typed too, with one key wildcard per level
+(`outer.*.inner.*`); `Struct`, `Value` and `ListValue` are `flattened`. The one difference is
+`Any`, `FieldMask` and `Empty`: left out elsewhere, inside typed map values they are
+`{"type": "object", "enabled": false}`, kept in `_source` but not indexed. A value that is itself
+a `Struct` or an `Any` follows the same rules.
+
+```protobuf
+map<string, Bucket> buckets = 5 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+
+message Bucket {
+  double score = 1;                     // buckets.<key>.score => double
+  map<string, string> labels = 2;       // buckets.<key>.labels => flattened
+  map<string, int64> counts = 3 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+                                        // buckets.<key>.counts.<key> => long
+  google.protobuf.Struct extra = 4;     // buckets.<key>.extra => flattened
+  google.protobuf.Any payload = 5;      // buckets.<key>.payload => disabled object
+}
+```
+
+Because `*` in a template also matches dots, a dynamic object inside the values would let its keys
+be matched by the value's own templates (`buckets.k.extra.score` by `buckets.*.score`). So a
+`Struct` there with an explicit `type: OBJECT` or `NESTED`, an explicit type other than `IGNORE` on
+an `Any`, `FieldMask` or `Empty` there, and an `elastic_field.name` holding `*` there throw
+`MappingException`; `MappingDefaults.structKind(OBJECT)` falls back to `flattened` there, with a
+warning. Every other path is matched by its own template whatever the keys are, including keys
+equal to field names (the ADR has the argument). A `raw_mapping_json` that makes a field inside the
+values dynamic is not checked.
 
 The root mapping is `dynamic: strict`. `MappingDefaults` can change the string rule
 (`withStringsAsText`), the keyword sub-field, `ignore_above`, the date format, the depth limit, the
@@ -514,7 +543,7 @@ MigrationResult result = migrator.apply(plan);
 | `PUT_MAPPING` | Only fields were added that existing documents can be indexed into (new top-level fields, new properties under an object that already has typed properties, new typed maps with their `dynamic_templates`, new fields in the values of typed maps), or only `dynamic` changed | Extends the mapping of the current index in place (after updating dynamic settings that differ) |
 | `UPDATE_SETTINGS` | The mappings match, and dynamic settings the proto declares differ ([Settings changes](#settings-changes)) | `PUT /<index>/_settings` with the differing dynamic settings |
 | `BACKFILL` | Fields were added that existing documents were never indexed into: a multi-field added to an existing field (for example `name.keyword`), or a typed property added under an object whose current mapping is dynamic; nothing else needs a reindex | Extends the mapping in place, then re-indexes every document of the current index with `_update_by_query` (below) |
-| `REINDEX` | A field changed type or any mapping parameter other than `dynamic` (analyzer, `search_analyzer`, format, `ignore_above`, normalizer, `copy_to`, `index`, `doc_values`, `null_value`, `coerce`, `enabled`, ...); a template of a typed map that already exists changed or went away (except a removed map under `RemovedFieldPolicy.KEEP`), or an untyped map became typed; fields were removed under `RemovedFieldPolicy.REINDEX`; a `BACKFILL` with `backfill` off or a migration script for the change; or static settings differ under `StaticSettingsPolicy.REINDEX` | New index, copy, swap the alias, reconcile ([Zero-downtime reindex](#zero-downtime-reindex)) |
+| `REINDEX` | A field changed type or any mapping parameter other than `dynamic` (analyzer, `search_analyzer`, format, `ignore_above`, normalizer, `copy_to`, `index`, `doc_values`, `null_value`, `coerce`, `enabled`, ...); a template of a typed map that already exists changed or went away (except a removed map under `RemovedFieldPolicy.KEEP`), or an untyped map became typed (such as an rc.3 map whose values held a map, `Struct` or `Any`); fields were removed under `RemovedFieldPolicy.REINDEX`; a `BACKFILL` with `backfill` off or a migration script for the change; or static settings differ under `StaticSettingsPolicy.REINDEX` | New index, copy, swap the alias, reconcile ([Zero-downtime reindex](#zero-downtime-reindex)) |
 | `BLOCKED` | A concrete index is named like the alias; the alias points at several indices; or a breaking change with `allowReindex` off | Nothing; the outcome's status is `BLOCKED`, the plan's `reason` says why and `MigrationResult.ok()` is false |
 
 An added multi-field, or typed properties over what used to be a dynamic object, need more than a
@@ -886,7 +915,7 @@ Document back = codec.fromDocument(source, Document.class);
 | Topic | Behaviour |
 |---|---|
 | Field names | Proto field names; `elastic_field.name` renames on write and back on read |
-| Ignored fields | `IGNORE` fields (and `Any`/`FieldMask`/`Empty`) are dropped from documents |
+| Ignored fields | `IGNORE` fields (and `Any`/`FieldMask`/`Empty`) are dropped from documents. Inside the values of a typed map `Any`/`FieldMask`/`Empty` are kept as printed (an `Any` needs its type in `CodecConfig.anyTypes`) |
 | Defaults | Proto3 default values are written (`includeDefaults`, default true): `false`, `0`, `""`, the first enum value, `[]` and `{}`. Fields with presence stay absent when unset: sub-messages (never written as `{}`), `Timestamp` (never the epoch), wrappers, `Struct`, proto3 `optional` fields and unset oneof members. `""` is written only to keyword and text fields; date, ip, geo, numeric and binary fields leave it out. See below |
 | 64-bit integers | Fields mapped as `long` are written as JSON numbers (`int64AsNumber`, default true) instead of protobuf's strings; values beyond 2^53 lose precision in JavaScript consumers. `uint64`/`fixed64` map to `keyword` and stay strings. A value that does not fit the mapped `long` (an unsigned field forced to `LONG`) throws `CodecException` naming the field |
 | `Timestamp` | RFC 3339 strings; epoch-millisecond numbers are accepted when reading back |
@@ -999,6 +1028,10 @@ Notes:
   an exact keyword match on a whole note also scores. Geo queries on a key add `ignore_unmapped:
   true`, so a key no document has used matches nothing instead of failing. A key segment holding
   `*` is not a key. An unknown field below a typed map names the value type in the error.
+  Typed maps inside typed map values take one key per level: `buckets.a.counts.b` resolves to
+  `buckets.*.counts.*` and compiles, sorts and aggregates like any key, nested values at every
+  level are wrapped with `ignore_unmapped: true`, and the keys of a flattened field inside the
+  values (`buckets.a.labels.env`, `buckets.a.extra.x`) take the flattened-key operations.
 - **Leading wildcards** scan every term and are off by default.
 - **Client-supplied criteria**: criteria often come straight from API callers, so the features that
   run code or can scan a whole field are opt-in. `TEXT_REGEX` needs `allowRegex`, and a pattern
@@ -1582,10 +1615,14 @@ before 3.3); `pager(...)` always adapts.
 - Static settings of an existing index change only through a reindex
   (`StaticSettingsPolicy.REINDEX`; the default only warns), and a setting removed from the proto is
   never reset (see [Settings changes](#settings-changes)).
-- Inner maps inside the values of a typed map (and `Struct`, `Value`, `ListValue` or `Any` values)
-  stay untyped. Keys of typed maps must not be blank or contain dots, and every distinct key adds
-  fields that count toward `index.mapping.total_fields.limit` (and nested fields in the values
-  toward `index.mapping.nested_fields.limit`) at index time (see [Mapping](#default-rules)).
+- Keys of typed maps, at every level, must not be blank or contain dots, and every distinct key
+  adds fields that count toward `index.mapping.total_fields.limit` (and nested fields in the values
+  toward `index.mapping.nested_fields.limit`) at index time; the mapper can only warn per key, not
+  check these limits up front (see [Mapping](#default-rules)). Inside the values of a typed map,
+  `Struct`, `Value` and `ListValue` are always `flattened` (an explicit `OBJECT` or `NESTED` is
+  refused) and `Any`, `FieldMask` and `Empty` are disabled objects, kept in `_source` but not
+  searchable; a `raw_mapping_json` that makes a field there dynamic is not checked against the
+  map's templates.
 - The aggregation DSL covers terms, date histograms, histograms, ranges and single-value metrics
   with one level of sub-aggregations; pipeline, filter, composite and other aggregations go into a
   copy of the body by hand. Aggregations and sorts on nested paths inside typed map values are

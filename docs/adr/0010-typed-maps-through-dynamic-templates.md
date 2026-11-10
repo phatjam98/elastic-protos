@@ -1,6 +1,7 @@
 # 0010. Typed maps through dynamic templates
 
-- Status: Accepted
+- Status: Accepted; the untyped-values bullet is superseded by
+  [ADR 0011](0011-maps-inside-typed-map-values.md)
 - Date: 2026-11-09
 
 ## Context
@@ -45,7 +46,8 @@ a new field decides its mapping. `*` in `path_match` matches any characters, dot
 - `Struct`/`Value`/`ListValue` and `Any` values, and values whose message holds a map, one of
   those types at any depth, stay untyped: only the root container template is emitted, with a
   warning. Typed maps inside typed map
-  values are left for later.
+  values are left for later. (Superseded by ADR 0011: such values keep their types, and the inner
+  fields follow their usual rules.)
 - The `IndexDefinition` records the value fields as `dynamicFields` keyed by pattern;
   `resolve(path)` instantiates a pattern for a concrete key. The query compiler resolves fields
   through it, adds `ignore_unmapped: true` to `nested` queries on nested paths inside values and
