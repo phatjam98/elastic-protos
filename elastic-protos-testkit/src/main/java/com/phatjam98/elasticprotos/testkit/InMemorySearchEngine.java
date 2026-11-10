@@ -153,6 +153,7 @@ public class InMemorySearchEngine implements SearchEngine {
   private long generatedIds;
   private long seqNo = -1;
   private boolean globalCheckpoints = true;
+  private boolean shardedSeqNos;
   private long globalCheckpointLag;
   private Consumer<ReindexRequest> duringReindex = request -> {};
   private Runnable afterAliasUpdate = () -> {};
@@ -256,8 +257,7 @@ public class InMemorySearchEngine implements SearchEngine {
   @Override
   public long seqNoCheckpoint(String index) {
     record("seqNoCheckpoint", index);
-    concrete(index);
-    return seqNo;
+    return checkpointOf(concrete(index));
   }
 
   /**
@@ -268,8 +268,20 @@ public class InMemorySearchEngine implements SearchEngine {
   @Override
   public OptionalLong globalCheckpoint(String index) {
     record("globalCheckpoint", index);
-    concrete(index);
-    return globalCheckpoints ? OptionalLong.of(seqNo - globalCheckpointLag) : OptionalLong.empty();
+    long checkpoint = checkpointOf(concrete(index));
+    return globalCheckpoints
+        ? OptionalLong.of(checkpoint - globalCheckpointLag) : OptionalLong.empty();
+  }
+
+  /**
+   * Sets whether an index created with several shards ({@code number_of_shards}) numbers the
+   * writes of each shard on its own, the shard of a document being the hash of its id, as the
+   * engines do; then documents of different shards share sequence numbers, and the checkpoints are
+   * the lowest over the shards. Off by default: one global counter for every index.
+   */
+  public InMemorySearchEngine shardedSeqNos(boolean value) {
+    this.shardedSeqNos = value;
+    return this;
   }
 
   /** Sets whether {@link #globalCheckpoint} reports a checkpoint (default) or none. */
@@ -899,8 +911,50 @@ public class InMemorySearchEngine implements SearchEngine {
     state.tombstones.remove(id);
     state.tombstoneTimes.remove(id);
     state.versions.put(id, next);
-    state.seqNos.put(id, ++seqNo);
+    state.seqNos.put(id, nextSeqNo(state, id));
     return next;
+  }
+
+  /**
+   * Takes the next sequence number for a write of {@code id}: from the global counter, or with
+   * {@link #shardedSeqNos(boolean)} from the counter of the document's shard when the index has
+   * several, so documents of different shards share sequence numbers as on the engines.
+   */
+  private long nextSeqNo(IndexState state, String id) {
+    int shards = shards(state);
+    if (!shardedSeqNos || shards < 2) {
+      return ++seqNo;
+    }
+    int shard = Math.floorMod(id.hashCode(), shards);
+    long next = state.shardSeqNos.getOrDefault(shard, -1L) + 1;
+    state.shardSeqNos.put(shard, next);
+    return next;
+  }
+
+  /** Returns the shard count an index was created with, 1 when it set none. */
+  private static int shards(IndexState state) {
+    Object shards = state.settings.get("number_of_shards");
+    try {
+      return shards == null ? 1 : Integer.parseInt(shards.toString());
+    } catch (NumberFormatException e) {
+      return 1;
+    }
+  }
+
+  /**
+   * Returns the lowest last sequence number over the shards of an index with per-shard counters,
+   * or the global counter.
+   */
+  private long checkpointOf(IndexState state) {
+    int shards = shards(state);
+    if (!shardedSeqNos || shards < 2) {
+      return seqNo;
+    }
+    long lowest = Long.MAX_VALUE;
+    for (int shard = 0; shard < shards; shard++) {
+      lowest = Math.min(lowest, state.shardSeqNos.getOrDefault(shard, -1L));
+    }
+    return lowest;
   }
 
   /** Returns the tombstone version of an id, dropping it once {@link #gcDeletes} has passed. */
@@ -921,7 +975,7 @@ public class InMemorySearchEngine implements SearchEngine {
       state.tombstoneTimes.put(id, System.nanoTime());
     }
     state.seqNos.remove(id);
-    seqNo++;
+    nextSeqNo(state, id);
     return state.docs.remove(id) != null;
   }
 
@@ -1321,6 +1375,7 @@ public class InMemorySearchEngine implements SearchEngine {
     private final Map<String, Map<String, Object>> docs = new LinkedHashMap<>();
     private final Map<String, Long> versions = new TreeMap<>();
     private final Map<String, Long> seqNos = new TreeMap<>();
+    private final Map<Integer, Long> shardSeqNos = new TreeMap<>();
     private final Map<String, Long> tombstones = new TreeMap<>();
     private final Map<String, Long> tombstoneTimes = new TreeMap<>();
     private boolean writeBlocked;

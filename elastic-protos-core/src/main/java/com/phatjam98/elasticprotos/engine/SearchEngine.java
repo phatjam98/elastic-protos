@@ -181,7 +181,9 @@ public interface SearchEngine extends AutoCloseable {
    * {@code retryOnConflict} times ({@code retry_on_conflict}); 0 fails at the first conflict.
    *
    * <p>The default ignores {@code retryOnConflict} and calls {@link #update(String, String,
-   * Map)}.
+   * Map)}, so on an implementation that does not override it, {@code 0} does not make the update
+   * fail at the first conflict and the count is not validated; {@code JsonRestEngine} (both
+   * adapters) honours it and rejects a negative count.
    *
    * @param index the index or alias
    * @param id the document id

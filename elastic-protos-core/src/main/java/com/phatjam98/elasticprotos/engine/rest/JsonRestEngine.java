@@ -609,7 +609,17 @@ public final class JsonRestEngine implements SearchEngine {
         string(response.get("pit_id")),
         map(response.get("aggregations")),
         number(response.get("took")),
-        (int) number(map(response.get("_shards")).get("failed")));
+        (int) number(map(response.get("_shards")).get("failed")),
+        shardFailureTypes(map(response.get("_shards"))));
+  }
+
+  /** Returns the {@code reason.type} of every entry of {@code _shards.failures}. */
+  private static List<String> shardFailureTypes(Map<String, Object> shards) {
+    List<String> types = new ArrayList<>();
+    for (Map<String, Object> failure : list(shards.get("failures"))) {
+      types.add(string(map(failure.get("reason")).get("type")));
+    }
+    return types;
   }
 
   @Override

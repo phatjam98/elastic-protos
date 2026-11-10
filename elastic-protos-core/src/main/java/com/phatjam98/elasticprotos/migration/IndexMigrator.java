@@ -156,6 +156,8 @@ public final class IndexMigrator {
   private final MigrationOptions options;
   private final MigrationScriptProvider scripts;
   private final MigrationListener listener;
+  private final int savePages;
+  private final Duration saveInterval;
   private final AliasLock lock;
   /** The lease the current thread holds while it applies an item under the alias lock. */
   private final ThreadLocal<AliasLock.Lease> lease = new ThreadLocal<>();
@@ -166,6 +168,8 @@ public final class IndexMigrator {
     this.options = builder.options;
     this.scripts = builder.scripts;
     this.listener = builder.listener;
+    this.savePages = builder.savePages;
+    this.saveInterval = builder.saveInterval;
     this.lock = options.lock()
         ? new AliasLock(engine, mapper.naming().lockIndex(), options.lockTtl(),
             () -> replicasFor(options.replicas()), builder.clock)
@@ -1415,8 +1419,6 @@ public final class IndexMigrator {
     String from = move.from();
     String to = move.to();
     Reconciler.Counts counts = new Reconciler.Counts();
-    long before;
-    long after;
     try {
       if (!engine.indexExists(from)) {
         String warning = from + " no longer exists, so nothing was reconciled into " + to;
@@ -1449,9 +1451,6 @@ public final class IndexMigrator {
       }
       writePending(to, move.meta(), null);
       phase(alias, Phase.FINISHED);
-      engine.refresh(to);
-      before = Reconciler.count(engine, from, null);
-      after = Reconciler.count(engine, to, null);
     } catch (Interrupted e) {
       throw e;
     } catch (RuntimeException e) {
@@ -1464,7 +1463,23 @@ public final class IndexMigrator {
           null, null, counts.warnings, counts.stats());
     }
     List<String> warnings = new ArrayList<>(counts.warnings);
-    if (before != after) {
+    // the migration is finished (the marker is gone): the counts only inform, so a failure to
+    // take them is a warning, not a failed item
+    Long before = null;
+    Long after = null;
+    try {
+      engine.refresh(to);
+      before = Reconciler.count(engine, from, null);
+      after = Reconciler.count(engine, to, null);
+    } catch (Interrupted e) {
+      throw e;
+    } catch (RuntimeException e) {
+      String warning = "the reindex finished, but counting the documents of " + from + " and "
+          + to + " failed: " + e.getMessage();
+      LOG.warn("{}: {}", alias, warning);
+      warnings.add(warning);
+    }
+    if (before != null && after != null && !before.equals(after)) {
       String warning = from + " holds " + before + " documents and " + to + " " + after
           + "; writes through the alias after the swap"
           + (move.staging() == null ? "" : " and the migration script") + " account for this";
@@ -1510,7 +1525,8 @@ public final class IndexMigrator {
     Reconciler reconciler = new Reconciler(engine, pitKeepAlive(), options.reindexTimeout(),
         this::guard, move.progress(), progress -> writePending(move.to(), move.meta(),
             pending(move.from(), PHASE_RECONCILING, move.pitId(), move.rollback(),
-                move.checkpoint(), move.coldCount(), progress.toMap())));
+                move.checkpoint(), move.coldCount(), progress.toMap())),
+        savePages, saveInterval);
     if (move.staging() != null) {
       createStaging(move.staging(), move.to());
     }
@@ -1930,6 +1946,8 @@ public final class IndexMigrator {
     private MigrationScriptProvider scripts = MigrationScriptProvider.classpath();
     private MigrationListener listener = MigrationListener.noop();
     private java.time.Clock clock = java.time.Clock.systemUTC();
+    private int savePages = Reconciler.SAVE_PAGES;
+    private Duration saveInterval = Reconciler.SAVE_INTERVAL;
 
     private Builder() {}
 
@@ -1963,6 +1981,13 @@ public final class IndexMigrator {
      */
     public Builder listener(MigrationListener value) {
       this.listener = Objects.requireNonNull(value);
+      return this;
+    }
+
+    /** Sets how often the reconcile records its cursor; for tests. */
+    Builder reconcileProgress(int pages, Duration interval) {
+      this.savePages = pages;
+      this.saveInterval = Objects.requireNonNull(interval);
       return this;
     }
 

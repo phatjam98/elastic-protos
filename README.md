@@ -789,19 +789,38 @@ the reconcile, after the swap (`FAILED`, resumable once the script is fixed).
 (409 when the document changed), but the `create` of a document the snapshot lacks is not: a
 document the earlier run created, and the application then deleted through the alias, is still
 missing from the snapshot and would be created again. So the reconcile records its progress in the
-marker (`pending.progress`): every pass (hot, cold, the sweep, and a `CREATE_MISSING` degraded
-reconcile) reads the frozen old index ordered by `_seq_no`, and after every page that wrote
-something the cursor (the last sequence number and the ids at it) is written into the marker;
-completed passes are listed in `done`. A resumed run skips the completed passes and continues the
-current one after the cursor. Residual window: the one page (at most 1,000 documents) whose writes
-went in but whose cursor write did not, because the run died between the two, is replayed; a
-document of that page that the earlier run created and that was deleted through the alias between
-that page and the resume is created again. No exact test tells "never created" from "created, then
-deleted" (the delete's tombstone lives only for `index.gc_deletes`, 60 s by default), and dropping
-the document instead would lose an acknowledged write to the old index, so the library prefers
-re-creating it, as it does for the documented create-after-catch-up case below. A marker of
-1.0.0-rc.3 or earlier has no progress and replays the whole reconcile, as before. The sweep's
-conditional deletes keep a document the application wrote again after the first sweep.
+marker (`pending.progress`). The passes that create (hot, cold, and a `CREATE_MISSING` degraded
+reconcile) read the frozen old index ordered by `_seq_no`, then by shard; each has its own cursor
+(the last sequence number processed and the ids at it, which several documents of different shards
+can share), so a degraded pass keeps its cursor while a later run first tries the snapshot again.
+Completed passes, the sweep included, are listed in `done`. A resumed run skips the completed
+passes and continues each other one after its cursor.
+
+The cursor is recorded once four pages that wrote have gone unrecorded, or after any page once
+five seconds have passed since the last record, and at the end of every pass. Each record is a
+mapping update, a cluster-state publication, so recording after every page would load the master
+on large reconciles (a rollback or a migration script writes every document it reads); four pages
+keep it to one per 4,000 written documents at most.
+
+Residual window: a crash replays what was processed after the last record, at most four pages
+(4,000 documents) that wrote and at most five seconds of pages. A document of those pages that the
+earlier run created and that was deleted through the alias before the resume is created again. No
+exact test tells "never created" from "created, then deleted" (the delete's tombstone lives only
+for `index.gc_deletes`, 60 s by default), and dropping the document instead would lose an
+acknowledged write to the old index, so the library prefers re-creating it, as it does for the
+documented create-after-catch-up case below. Replayed pages that wrote nothing cost only reads. A
+marker of 1.0.0-rc.3 or earlier has no progress and replays the whole reconcile, as before.
+
+The sweep pages the snapshot of the new index (not the old index), keeps no cursor and is only
+listed in `done` when it completes; a crash during it replays the whole sweep, which is safe: its
+deletes are conditional on the snapshot's sequence number, so a document the application wrote
+again after the first sweep gets 409 and stays.
+
+A partial answer from the snapshot counts as a lost snapshot only when every failed shard reports
+`search_context_missing_exception` (its reader is gone; a point in time closed or expired on every
+shard is a 404 with that reason on all four engines). Any other shard failure (a full search queue,
+a relocating shard) fails the item and the next run tries the same snapshot again, never the
+degraded path, which cannot tell a delete through the alias from a missing document.
 
 `IndexMigrator.Builder.listener(MigrationListener)` is told about every phase, for metrics and
 logs. Exceptions from the listener are logged and ignored, except `MigrationListener.Abort`, which
@@ -1657,8 +1676,9 @@ before 3.3); `pager(...)` always adapts.
   return documents deleted from the old index after the first copy started; a partial `_update`
   in that window applies to the possibly stale copy and can drop those field changes or keep such
   a deleted document, and a partial `_update` at the instant of the swap or during a `BACKFILL` can
-  fail with 409 (retried by `SearchEngine.update`). A resumed reconcile replays at most the one page
-  whose progress was not recorded, re-creating a document of it deleted in between (see
+  fail with 409 (retried by `SearchEngine.update`). A resumed reconcile replays what it processed
+  after its last progress record (at most four pages that wrote, and five seconds), re-creating a
+  document of those pages deleted through the alias in between (see
   [Zero-downtime reindex](#zero-downtime-reindex)). The window lasts as long as reading the
   documents above the lowest shard checkpoint (the changed documents on evenly loaded shards, up to
   most of the index on skewed ones), plus a sweep of the whole new index when documents were
