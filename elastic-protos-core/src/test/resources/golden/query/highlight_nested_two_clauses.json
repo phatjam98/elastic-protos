@@ -1,0 +1,89 @@
+{
+  "from" : 0,
+  "query" : {
+    "bool" : {
+      "minimum_should_match" : 1,
+      "should" : [ {
+        "bool" : {
+          "must" : [ {
+            "nested" : {
+              "inner_hits" : {
+                "_source" : false,
+                "highlight" : {
+                  "fields" : {
+                    "parties.name" : {
+                      "highlight_query" : {
+                        "bool" : {
+                          "should" : [ {
+                            "match" : {
+                              "parties.name" : "acme"
+                            }
+                          }, {
+                            "match" : {
+                              "parties.name" : "globex"
+                            }
+                          } ]
+                        }
+                      }
+                    }
+                  },
+                  "post_tags" : [ "</em>" ],
+                  "pre_tags" : [ "<em>" ]
+                },
+                "name" : "parties__highlight",
+                "size" : 5
+              },
+              "path" : "parties",
+              "query" : {
+                "match" : {
+                  "parties.name" : "acme"
+                }
+              }
+            }
+          } ]
+        }
+      }, {
+        "bool" : {
+          "must" : [ {
+            "nested" : {
+              "inner_hits" : {
+                "_source" : false,
+                "highlight" : {
+                  "fields" : {
+                    "parties.name" : {
+                      "highlight_query" : {
+                        "bool" : {
+                          "should" : [ {
+                            "match" : {
+                              "parties.name" : "acme"
+                            }
+                          }, {
+                            "match" : {
+                              "parties.name" : "globex"
+                            }
+                          } ]
+                        }
+                      }
+                    }
+                  },
+                  "post_tags" : [ "</em>" ],
+                  "pre_tags" : [ "<em>" ]
+                },
+                "name" : "parties__highlight2",
+                "size" : 5
+              },
+              "path" : "parties",
+              "query" : {
+                "match" : {
+                  "parties.name" : "globex"
+                }
+              }
+            }
+          } ]
+        }
+      } ]
+    }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

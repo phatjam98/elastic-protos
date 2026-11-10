@@ -1,0 +1,126 @@
+{
+  "took": 4,
+  "timed_out": false,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  },
+  "hits": {
+    "total": {
+      "value": 1,
+      "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+      {
+        "_index": "binders",
+        "_id": "binder-1",
+        "_score": null,
+        "_source": {
+          "id": "binder-1",
+          "sections": [
+            {
+              "heading": "red section",
+              "meta": {
+                "annotations": [
+                  {
+                    "text": "blue pen"
+                  },
+                  {
+                    "text": "red ink"
+                  }
+                ]
+              },
+              "notes": [
+                {
+                  "text": "red apple"
+                },
+                {
+                  "text": "blue sky"
+                },
+                {
+                  "text": "red fox"
+                }
+              ]
+            },
+            {
+              "heading": "blue section",
+              "notes": [
+                {
+                  "text": "red sun"
+                }
+              ]
+            },
+            {
+              "heading": "green section",
+              "notes": [
+                {
+                  "text": "red rose"
+                }
+              ]
+            }
+          ],
+          "title": "Field notes"
+        },
+        "sort": [
+          "binder-1"
+        ],
+        "inner_hits": {
+          "sections__highlight": {
+            "hits": {
+              "total": {
+                "value": 1,
+                "relation": "eq"
+              },
+              "max_score": 0.6931471,
+              "hits": [
+                {
+                  "_index": "binders",
+                  "_id": "binder-1",
+                  "_nested": {
+                    "field": "sections",
+                    "offset": 0
+                  },
+                  "_score": 0.6931471,
+                  "inner_hits": {
+                    "sections.meta.annotations__highlight": {
+                      "hits": {
+                        "total": {
+                          "value": 1,
+                          "relation": "eq"
+                        },
+                        "max_score": 0.6931471,
+                        "hits": [
+                          {
+                            "_index": "binders",
+                            "_id": "binder-1",
+                            "_nested": {
+                              "field": "sections",
+                              "offset": 0,
+                              "_nested": {
+                                "field": "meta.annotations",
+                                "offset": 1
+                              }
+                            },
+                            "_score": 0.6931471,
+                            "highlight": {
+                              "sections.meta.annotations.text": [
+                                "red <em>ink</em>"
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  }
+}

@@ -130,6 +130,7 @@ public class ElasticProtosFactory {
         .maxTermsSize(query.getMaxTermsSize())
         .maxAggregationDepth(query.getMaxAggregationDepth())
         .maxAggregationBuckets(query.getMaxAggregationBuckets())
+        .maxInnerResultWindow(query.getMaxInnerResultWindow())
         .shardDocTiebreaker(query.getShardDocTiebreaker() != ShardDocTiebreaker.OFF)
         .build();
   }

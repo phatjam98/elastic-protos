@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package phatjam98.elasticprotos.example;
+
+import "phatjam98/elasticprotos/v1/elastic_options.proto";
+
+option java_package = "com.phatjam98.elasticprotos.proto.example";
+option java_multiple_files = true;
+option java_outer_classname = "BinderProtos";
+
+// A binder of sections with notes: text two nested levels deep, and a nested array under a plain
+// object inside a nested one, for highlighting through inner hits.
+message Binder {
+  option (phatjam98.elasticprotos.v1.elastic) = { alias: "binders" };
+
+  string id = 1 [(phatjam98.elasticprotos.v1.elastic_field).id = TRUE];
+  string title = 2 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
+  repeated Section sections = 3;   // nested
+}
+
+message Section {
+  string heading = 1 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
+  repeated BinderNote notes = 2;   // nested inside sections
+  SectionMeta meta = 3;            // object
+}
+
+message SectionMeta {
+  repeated BinderNote annotations = 1;  // nested under the object meta of a section
+}
+
+message BinderNote {
+  string text = 1 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
+}

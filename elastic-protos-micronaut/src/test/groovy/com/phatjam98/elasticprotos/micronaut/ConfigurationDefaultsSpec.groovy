@@ -126,6 +126,7 @@ class ConfigurationDefaultsSpec extends Specification {
     config.query.maxTermsSize == 1000
     config.query.maxAggregationDepth == 3
     config.query.maxAggregationBuckets == 0L
+    config.query.maxInnerResultWindow == 100
     config.query.trackTotalHits == TrackTotalHits.exact()
     config.bulk.actions == 500
     config.bulk.flushInterval == Duration.ofSeconds(1)

@@ -261,6 +261,32 @@ class ElasticProtosServiceSpec extends Specification {
     thrown(IllegalArgumentException)
   }
 
+  def "search asks for nested highlights through inner hits and returns them on the hits"() {
+    given:
+    com.phatjam98.elasticprotos.engine.SearchEngine fake = Mock()
+    def searching = new ElasticProtosService(fake, service.codec(), QueryCompiler.withDefaults(), null, null)
+    def doc = SampleData.documents()[0]
+    def nested = com.phatjam98.elasticprotos.engine.NestedHighlights.of([new com.phatjam98.elasticprotos.engine.NestedHighlight(
+        [new com.phatjam98.elasticprotos.engine.NestedLevel('parties', 0)], ['parties.name': ['<em>Acme</em> Corp']])],
+        [new com.phatjam98.elasticprotos.engine.NestedTotal([], 'parties', 1, 1, false)])
+    Map body = null
+
+    when:
+    def page = searching.search(Criteria.where('parties.name').matches('acme').end().highlight('parties.name').build(), Document)
+
+    then:
+    1 * fake.search(['documents'], _) >> { args ->
+      body = args[1]
+      new com.phatjam98.elasticprotos.engine.SearchResult(1, true, [new com.phatjam98.elasticprotos.engine.Hit(
+          'documents-v1', doc.id, 1.0d, service.codec().toDocument(doc), [], null, null, null, [:], nested)], null, [:], 1)
+    }
+    body.query.bool.must[0].nested.inner_hits.name == 'parties__highlight'
+    !body.containsKey('highlight')
+    page.items() == [doc]
+    page.hits()[0].nestedHighlights() == nested
+    page.hits()[0].fragments('parties.name') == ['<em>Acme</em> Corp']
+  }
+
   def "the six-component SearchPage constructor supplies empty aggregations"() {
     expect:
     new SearchPage([], [], 0, true, null, []).aggregations() == AggregationResults.empty()

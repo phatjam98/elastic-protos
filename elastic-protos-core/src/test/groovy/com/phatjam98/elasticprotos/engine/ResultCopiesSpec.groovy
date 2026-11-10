@@ -64,7 +64,74 @@ class ResultCopiesSpec extends Specification {
     hit.seqNo() == null
     hit.primaryTerm() == null
     hit.highlight() == [:]
+    hit.nestedHighlights() == NestedHighlights.empty()
     hit == new Hit('i', 'id', 1.0d, [a: 1], [], null, null, null, [:])
+    hit == new Hit('i', 'id', 1.0d, [a: 1], [], null, null, null, [:], NestedHighlights.empty())
+    new Hit('i', 'id', 1.0d, [a: 1], [], null, null, null, [:], null).nestedHighlights().isEmpty()
+  }
+
+  def "nested highlights copy their parts, map nulls to empty, and read fragments across objects"() {
+    given:
+    def levels = [new NestedLevel('a', 0), new NestedLevel('b', 2)]
+    def fragments = ['<em>x</em>']
+    def nested = new NestedHighlight(levels, ['a.b.c': fragments, 'a.b.d': null])
+    def objects = [nested]
+    def totals = [new NestedTotal([new NestedLevel('a', 0)], 'a.b', 4, 1, true)]
+    def hit = new Hit('i', 'id', null, [:], [], null, null, null, [t: ['root']], NestedHighlights.of(objects, totals))
+
+    when:
+    levels << new NestedLevel('c', 9)
+    fragments << 'y'
+    objects << nested
+    totals.clear()
+
+    then:
+    hit.nestedHighlights().objects() == [new NestedHighlight([new NestedLevel('a', 0), new NestedLevel('b', 2)],
+        ['a.b.c': ['<em>x</em>'], 'a.b.d': []])]
+    hit.nestedHighlights().objects()[0].path() == 'a.b'
+    hit.nestedHighlights().objects()[0].offsets() == [0, 2]
+    hit.nestedHighlights().totals()*.truncated() == [true]
+    hit.nestedHighlights().isTruncated()
+    !hit.nestedHighlights().isEmpty()
+    hit.fragments('t') == ['root']
+    hit.fragments('a.b.c') == ['<em>x</em>']
+    hit.fragments('nope') == []
+    hit.nestedHighlights() == NestedHighlights.of([nested], [new NestedTotal([new NestedLevel('a', 0)], 'a.b', 4, 1, true)])
+    hit.nestedHighlights().hashCode() == NestedHighlights.of([nested], hit.nestedHighlights().totals()).hashCode()
+    hit.nestedHighlights().toString().startsWith('NestedHighlights[objects=[NestedHighlight[levels=')
+    hit.nestedHighlights() != NestedHighlights.empty()
+    hit.nestedHighlights() != 'x'
+
+    and: 'nulls become empty'
+    new NestedHighlight(null, null) == new NestedHighlight([], [:])
+    new NestedTotal(null, 'p', 0, 0, false).parent() == []
+    NestedHighlights.of(null, null).is(NestedHighlights.empty())
+    NestedHighlights.of([], []).is(NestedHighlights.empty())
+    NestedHighlights.of(null, totals + [new NestedTotal([], 'p', 1, 1, false)]).objects() == []
+
+    when:
+    hit.nestedHighlights().objects().add(nested)
+
+    then:
+    thrown(UnsupportedOperationException)
+
+    when:
+    hit.nestedHighlights().objects()[0].levels().add(new NestedLevel('z', 1))
+
+    then:
+    thrown(UnsupportedOperationException)
+
+    when:
+    new NestedLevel(null, 0)
+
+    then:
+    thrown(NullPointerException)
+
+    when:
+    new NestedTotal([], null, 0, 0, false)
+
+    then:
+    thrown(NullPointerException)
   }
 
   def "a hit copies its highlights and each fragment list, and a null highlight is empty"() {

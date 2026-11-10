@@ -1,0 +1,212 @@
+{
+  "took": 79,
+  "timed_out": false,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  },
+  "hits": {
+    "total": {
+      "value": 2,
+      "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+      {
+        "_index": "binders",
+        "_id": "binder-1",
+        "_score": null,
+        "_source": {
+          "id": "binder-1",
+          "sections": [
+            {
+              "heading": "red section",
+              "meta": {
+                "annotations": [
+                  {
+                    "text": "blue pen"
+                  },
+                  {
+                    "text": "red ink"
+                  }
+                ]
+              },
+              "notes": [
+                {
+                  "text": "red apple"
+                },
+                {
+                  "text": "blue sky"
+                },
+                {
+                  "text": "red fox"
+                }
+              ]
+            },
+            {
+              "heading": "blue section",
+              "notes": [
+                {
+                  "text": "red sun"
+                }
+              ]
+            },
+            {
+              "heading": "green section",
+              "notes": [
+                {
+                  "text": "red rose"
+                }
+              ]
+            }
+          ],
+          "title": "Field notes"
+        },
+        "sort": [
+          "binder-1"
+        ],
+        "inner_hits": {
+          "sections__highlight2": {
+            "hits": {
+              "total": {
+                "value": 3,
+                "relation": "eq"
+              },
+              "max_score": 0.35667494,
+              "hits": [
+                {
+                  "_index": "binders",
+                  "_id": "binder-1",
+                  "_nested": {
+                    "field": "sections",
+                    "offset": 0
+                  },
+                  "_score": 0.35667494,
+                  "highlight": {
+                    "sections.heading": [
+                      "<em>red</em> <em>section</em>"
+                    ]
+                  }
+                },
+                {
+                  "_index": "binders",
+                  "_id": "binder-1",
+                  "_nested": {
+                    "field": "sections",
+                    "offset": 1
+                  },
+                  "_score": 0.35667494,
+                  "highlight": {
+                    "sections.heading": [
+                      "blue <em>section</em>"
+                    ]
+                  }
+                },
+                {
+                  "_index": "binders",
+                  "_id": "binder-1",
+                  "_nested": {
+                    "field": "sections",
+                    "offset": 2
+                  },
+                  "_score": 0.35667494,
+                  "highlight": {
+                    "sections.heading": [
+                      "green <em>section</em>"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          "sections__highlight": {
+            "hits": {
+              "total": {
+                "value": 1,
+                "relation": "eq"
+              },
+              "max_score": 0.6931471,
+              "hits": [
+                {
+                  "_index": "binders",
+                  "_id": "binder-1",
+                  "_nested": {
+                    "field": "sections",
+                    "offset": 0
+                  },
+                  "_score": 0.6931471,
+                  "highlight": {
+                    "sections.heading": [
+                      "<em>red</em> <em>section</em>"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "_index": "binders",
+        "_id": "binder-2",
+        "_score": null,
+        "_source": {
+          "id": "binder-2",
+          "sections": [
+            {
+              "heading": "red heading",
+              "notes": [
+                {
+                  "text": "plain"
+                }
+              ]
+            }
+          ],
+          "title": "Plain binder"
+        },
+        "sort": [
+          "binder-2"
+        ],
+        "inner_hits": {
+          "sections__highlight2": {
+            "hits": {
+              "total": {
+                "value": 0,
+                "relation": "eq"
+              },
+              "max_score": null,
+              "hits": []
+            }
+          },
+          "sections__highlight": {
+            "hits": {
+              "total": {
+                "value": 1,
+                "relation": "eq"
+              },
+              "max_score": 0.6931471,
+              "hits": [
+                {
+                  "_index": "binders",
+                  "_id": "binder-2",
+                  "_nested": {
+                    "field": "sections",
+                    "offset": 0
+                  },
+                  "_score": 0.6931471,
+                  "highlight": {
+                    "sections.heading": [
+                      "<em>red</em> heading"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  }
+}

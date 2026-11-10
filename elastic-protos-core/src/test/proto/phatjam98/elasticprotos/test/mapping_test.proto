@@ -183,3 +183,16 @@ message Shelf {
   int32 position = 2;
   repeated Child books = 3;     // nested inside shelves
 }
+
+// A typed map whose values hold nested objects with text, for highlighting inside them.
+message Folders {
+  map<string, Folder> folders = 1 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
+}
+
+message Folder {
+  repeated Page pages = 1;      // nested inside each value of the typed map
+}
+
+message Page {
+  string text = 1 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
+}

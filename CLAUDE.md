@@ -146,8 +146,20 @@ Checkstyle, JaCoCo and Javadoc.
   in `conditions.proto` (publicly imported by `search_criteria.proto`, which `aggregations.proto`
   cannot import: cycle). The adapters parse responses into key-sorted maps, so keyed buckets and
   composite keys come sorted by key. `RangeValue.min`/`max` are `optional` (open bounds).
+- Nested highlighting (ADR 0013): `HighlightCompiler` attaches `inner_hits` (`<path>__highlight`,
+  `__highlight2`, ..., no `_source`) to every positive `nested` clause on a highlighted field's
+  innermost path, each highlighted field with a `highlight_query` ORing the clauses on that path,
+  and a highlight-less carrier `inner_hits` to enclosing `nested` clauses; size `nested_objects` at
+  every level (<= `maxInnerResultWindow`, 100). A field no positive clause on its path can mark up
+  (full-text query on it, or on any field when `require_field_match` is false) =>
+  `QueryCompileException` (warning when lenient). Defaults exclude nested fields unless
+  `Highlight.include_nested`; size-0 searches skip highlighting. `JsonRestEngine` reads inner hits
+  at every level into `Hit.nestedHighlights()` (`NestedHighlights`: `objects()` as `NestedHighlight`
+  with `NestedLevel`s, first inner hit's fragments per object; `totals()` as `NestedTotal` per path
+  and parent); `_nested` without field/offset is skipped. Testkit `Binder` (binder.proto,
+  `SampleData.binders()`) has two nested levels and a nested array under an object.
 - `InMemorySearchEngine` (testkit) runs only terms, filter, filters (conditions of `match_all`,
   `bool`, `term`, `terms`, `exists`, `nested`), the six metrics, `nested` and `reverse_nested`
   aggregations at any depth, refuses `composite` (BAD_REQUEST), ignores `highlight`, and models
-  seq_no, tombstones and PIT snapshots like the engines. `EngineIntegrationSpec` has 55 feature
+  seq_no, tombstones and PIT snapshots like the engines. `EngineIntegrationSpec` has 57 feature
   methods.

@@ -233,5 +233,20 @@ class QueryCompilerGoldenSpec extends Specification {
     'highlight_default_fields' | Criteria.builder().fullText('merger agreement').highlight()
     'highlight_options'        | Criteria.builder().fullText('merger').highlight { it.addFields(com.phatjam98.elasticprotos.proto.HighlightField.newBuilder().setField('title').setNumberOfFragments(0)).addFields(com.phatjam98.elasticprotos.proto.HighlightField.newBuilder().setField('body').setFragmentSize(80).setNumberOfFragments(2)).setFragmentSize(150).setNumberOfFragments(3).addPreTags('<b>').addPostTags('</b>').setRequireFieldMatch(false).setHtmlEncode(true) }
     'search_aggs_and_highlight' | Criteria.where('type').equalTo('FILING').end().fullText('agreement').sortByScore(SortingOrder.DESC).page(20, 0).aggregate(Aggs.sub(Aggs.terms('by_firm', 'firm_id').setTerms(TermsAggregation.newBuilder().setSize(3)), Aggs.max('latest', 'filed_at')), Aggs.dateHistogram('per_month', 'filed_at', CalendarInterval.MONTH)).highlight('title')
+    'highlight_nested_field'   | Criteria.where('parties.name').matches('acme').end().highlight('title', 'parties.name')
+    'highlight_nested_two_clauses' | Criteria.where('parties.name').matches('acme').or().where('parties.name').matches('globex').end().highlight { it.addFields(com.phatjam98.elasticprotos.proto.HighlightField.newBuilder().setField('parties.name')).setNestedObjects(5) }
+    'highlight_include_nested' | Criteria.builder().fullText('acme').highlight { it.setIncludeNested(true) }
+  }
+
+  def "highlight on two nested levels compiles to its golden body"() {
+    when:
+    CompiledSearch compiled = strict.compile(Criteria.where('sections.notes.text').matches('red').and('sections.heading').matches('red')
+        .end().highlight { it.addFields(com.phatjam98.elasticprotos.proto.HighlightField.newBuilder().setField('sections.heading'))
+            .addFields(com.phatjam98.elasticprotos.proto.HighlightField.newBuilder().setField('sections.notes.text')).setNestedObjects(2) }
+        .build(), mapper.map(com.phatjam98.elasticprotos.proto.example.Binder))
+
+    then:
+    compiled.warnings().isEmpty()
+    Golden.assertMatches('query/highlight_nested_two_levels', compiled.body())
   }
 }

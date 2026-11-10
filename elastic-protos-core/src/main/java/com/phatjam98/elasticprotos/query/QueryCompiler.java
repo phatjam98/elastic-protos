@@ -39,7 +39,9 @@ import java.util.TreeMap;
  * <name>__nested2}, ...) and, to step out of a nested bucket, a {@code reverse_nested} named
  * {@code <name>__reverse}; names therefore must not contain {@code __}. {@link
  * AggregationResults} unwraps them. Highlighting ({@code SearchCriteria.highlight}) compiles into
- * {@code highlight} over text fields outside nested objects.
+ * {@code highlight} over text fields outside nested objects, and into {@code inner_hits} with a
+ * {@code highlight} on the query's {@code nested} clauses for text fields inside nested objects
+ * (read back as {@link com.phatjam98.elasticprotos.engine.Hit#nestedHighlights()}).
  *
  * <p>Instances are immutable and thread-safe.
  */
@@ -109,11 +111,15 @@ public final class QueryCompiler {
         body.put("aggs", aggs);
       }
     }
-    if (criteria.hasHighlight()) {
-      Map<String, Object> highlight = new HighlightCompiler(config, index, warnings)
-          .compile(criteria.getHighlight());
-      if (highlight != null) {
-        body.put("highlight", highlight);
+    // a search without hits has nothing to highlight
+    if (criteria.hasHighlight() && !Integer.valueOf(0).equals(body.get("size"))) {
+      @SuppressWarnings("unchecked")
+      Map<String, Object> query = (Map<String, Object>) body.get("query");
+      HighlightCompiler.Compiled highlight = new HighlightCompiler(config, index, warnings)
+          .compile(criteria.getHighlight(), query);
+      body.put("query", highlight.query());
+      if (highlight.highlight() != null) {
+        body.put("highlight", highlight.highlight());
       }
     }
   }

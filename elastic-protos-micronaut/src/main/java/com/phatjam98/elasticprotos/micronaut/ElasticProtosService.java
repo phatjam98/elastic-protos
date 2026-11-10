@@ -185,7 +185,8 @@ public class ElasticProtosService {
 
   /**
    * Runs one search and reads the hits back into messages, with the results of any aggregations
-   * of the criteria and the highlights of the hits ({@link Hit#highlight()}).
+   * of the criteria and the highlights of the hits ({@link Hit#highlight()}, and {@link
+   * Hit#nestedHighlights()} for fields inside nested objects).
    *
    * @param criteria what to search for, including sorting, pagination and aggregations
    * @param type the generated message class

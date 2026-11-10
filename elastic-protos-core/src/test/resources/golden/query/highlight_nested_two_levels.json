@@ -1,0 +1,113 @@
+{
+  "from" : 0,
+  "query" : {
+    "bool" : {
+      "must" : [ {
+        "nested" : {
+          "inner_hits" : {
+            "_source" : false,
+            "highlight" : {
+              "fields" : {
+                "sections.heading" : {
+                  "highlight_query" : {
+                    "bool" : {
+                      "should" : [ {
+                        "nested" : {
+                          "path" : "sections.notes",
+                          "query" : {
+                            "match" : {
+                              "sections.notes.text" : "red"
+                            }
+                          }
+                        }
+                      }, {
+                        "match" : {
+                          "sections.heading" : "red"
+                        }
+                      } ]
+                    }
+                  }
+                }
+              },
+              "post_tags" : [ "</em>" ],
+              "pre_tags" : [ "<em>" ]
+            },
+            "name" : "sections__highlight",
+            "size" : 2
+          },
+          "path" : "sections",
+          "query" : {
+            "nested" : {
+              "inner_hits" : {
+                "_source" : false,
+                "highlight" : {
+                  "fields" : {
+                    "sections.notes.text" : {
+                      "highlight_query" : {
+                        "match" : {
+                          "sections.notes.text" : "red"
+                        }
+                      }
+                    }
+                  },
+                  "post_tags" : [ "</em>" ],
+                  "pre_tags" : [ "<em>" ]
+                },
+                "name" : "sections.notes__highlight",
+                "size" : 2
+              },
+              "path" : "sections.notes",
+              "query" : {
+                "match" : {
+                  "sections.notes.text" : "red"
+                }
+              }
+            }
+          }
+        }
+      }, {
+        "nested" : {
+          "inner_hits" : {
+            "_source" : false,
+            "highlight" : {
+              "fields" : {
+                "sections.heading" : {
+                  "highlight_query" : {
+                    "bool" : {
+                      "should" : [ {
+                        "nested" : {
+                          "path" : "sections.notes",
+                          "query" : {
+                            "match" : {
+                              "sections.notes.text" : "red"
+                            }
+                          }
+                        }
+                      }, {
+                        "match" : {
+                          "sections.heading" : "red"
+                        }
+                      } ]
+                    }
+                  }
+                }
+              },
+              "post_tags" : [ "</em>" ],
+              "pre_tags" : [ "<em>" ]
+            },
+            "name" : "sections__highlight2",
+            "size" : 2
+          },
+          "path" : "sections",
+          "query" : {
+            "match" : {
+              "sections.heading" : "red"
+            }
+          }
+        }
+      } ]
+    }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

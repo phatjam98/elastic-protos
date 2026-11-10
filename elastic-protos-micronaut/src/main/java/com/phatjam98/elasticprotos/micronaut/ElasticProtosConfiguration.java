@@ -704,6 +704,8 @@ public class ElasticProtosConfiguration {
    *       level included; default 3
    *   <li>{@code max-aggregation-buckets}: when positive, the largest product of the requested
    *       bucket counts along a path of aggregations; default 0, no limit
+   *   <li>{@code max-inner-result-window}: the largest {@code Highlight.nested_objects}; default
+   *       100, the engines' default {@code index.max_inner_result_window}
    * </ul>
    */
   @ConfigurationProperties("query")
@@ -724,6 +726,7 @@ public class ElasticProtosConfiguration {
     private int maxTermsSize = STANDARD.maxTermsSize();
     private int maxAggregationDepth = STANDARD.maxAggregationDepth();
     private long maxAggregationBuckets = STANDARD.maxAggregationBuckets();
+    private int maxInnerResultWindow = STANDARD.maxInnerResultWindow();
 
     /** Values of {@code shard-doc-tiebreaker}. */
     public enum ShardDocTiebreaker {
@@ -871,6 +874,16 @@ public class ElasticProtosConfiguration {
     /** Sets {@code max-aggregation-buckets}. */
     public void setMaxAggregationBuckets(long maxAggregationBuckets) {
       this.maxAggregationBuckets = maxAggregationBuckets;
+    }
+
+    /** Returns {@code max-inner-result-window}. */
+    public int getMaxInnerResultWindow() {
+      return maxInnerResultWindow;
+    }
+
+    /** Sets {@code max-inner-result-window}. */
+    public void setMaxInnerResultWindow(int maxInnerResultWindow) {
+      this.maxInnerResultWindow = maxInnerResultWindow;
     }
   }
 
