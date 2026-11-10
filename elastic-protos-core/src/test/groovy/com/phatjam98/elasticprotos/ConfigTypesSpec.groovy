@@ -338,7 +338,8 @@ class ConfigTypesSpec extends Specification {
         .removedFields(RemovedFieldPolicy.REINDEX).defaultShards(3).replicas(ReplicaPolicy.fixed(2))
         .reindexTimeout(Duration.ofSeconds(90)).dryRun(true).clearStaleWriteBlock(false)
         .reindexMode(ReindexMode.BLOCKING).swapGrace(Duration.ZERO).backfill(false)
-        .degradedReconcile(DegradedReconcile.CREATE_MISSING).build()
+        .degradedReconcile(DegradedReconcile.CREATE_MISSING)
+        .lock(false).lockWait(Duration.ZERO).lockTtl(Duration.ofSeconds(30)).build()
     def copied = MigrationOptions.standard()
         .withFailure(FailurePolicy.CONTINUE).withAllowReindex(false).withDeleteOldAfter(true)
         .withRemovedFields(RemovedFieldPolicy.REINDEX).withDefaultShards(3)
@@ -346,6 +347,7 @@ class ConfigTypesSpec extends Specification {
         .withDryRun(true).withClearStaleWriteBlock(false)
         .withReindexMode(ReindexMode.BLOCKING).withSwapGrace(Duration.ZERO).withBackfill(false)
         .withDegradedReconcile(DegradedReconcile.CREATE_MISSING)
+        .withLock(false).withLockWait(Duration.ZERO).withLockTtl(Duration.ofSeconds(30))
 
     expect:
     MigrationOptions.builder().build() == MigrationOptions.standard()
@@ -357,7 +359,11 @@ class ConfigTypesSpec extends Specification {
     built.toString() == 'MigrationOptions[failure=CONTINUE, allowReindex=false, deleteOldAfter=true,' +
         ' removedFields=REINDEX, defaultShards=3, replicas=ReplicaPolicy[mode=FIXED, count=2],' +
         ' reindexTimeout=PT1M30S, dryRun=true, clearStaleWriteBlock=false, reindexMode=BLOCKING,' +
-        ' swapGrace=PT0S, backfill=false, degradedReconcile=CREATE_MISSING]'
+        ' swapGrace=PT0S, backfill=false, degradedReconcile=CREATE_MISSING, lock=false, lockWait=PT0S,' +
+        ' lockTtl=PT30S]'
+    MigrationOptions.standard().lock()
+    MigrationOptions.standard().lockWait() == Duration.ofMinutes(10)
+    MigrationOptions.standard().lockTtl() == Duration.ofMinutes(2)
     MigrationOptions.standard().degradedReconcile() == DegradedReconcile.REPORT
     MigrationOptions.standard().reindexMode() == ReindexMode.ZERO_DOWNTIME
     MigrationOptions.standard().swapGrace() == Duration.ofSeconds(5)
@@ -385,6 +391,9 @@ class ConfigTypesSpec extends Specification {
     'swapGrace'            | { it.withSwapGrace(Duration.ofSeconds(1)) }
     'backfill'             | { it.withBackfill(false) }
     'degradedReconcile'    | { it.withDegradedReconcile(DegradedReconcile.CREATE_MISSING) }
+    'lock'                 | { it.withLock(false) }
+    'lockWait'             | { it.withLockWait(Duration.ZERO) }
+    'lockTtl'              | { it.withLockTtl(Duration.ofMinutes(1)) }
   }
 
   @Unroll
@@ -409,6 +418,10 @@ class ConfigTypesSpec extends Specification {
     'no grace'       | { it.swapGrace(null) }                       || NullPointerException     | 'swapGrace'
     'no mode'        | { it.reindexMode(null) }                     || NullPointerException     | 'reindexMode'
     'no degraded'    | { it.degradedReconcile(null) }               || NullPointerException     | 'degradedReconcile'
+    'neg. lock wait' | { it.lockWait(Duration.ofSeconds(-1)) }      || IllegalArgumentException | 'lockWait must not be negative: PT-1S'
+    'short lock ttl' | { it.lockTtl(Duration.ofMillis(999)) }       || IllegalArgumentException | 'lockTtl must be at least one second: PT0.999S'
+    'no lock wait'   | { it.lockWait(null) }                        || NullPointerException     | 'lockWait'
+    'no lock ttl'    | { it.lockTtl(null) }                         || NullPointerException     | 'lockTtl'
   }
 
   // ---- ReplicaPolicy -----------------------------------------------------------------------

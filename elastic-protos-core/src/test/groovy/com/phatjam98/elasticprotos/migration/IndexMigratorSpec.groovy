@@ -21,7 +21,7 @@ import spock.lang.Specification
 /** The migrator with the blocking reindex mode; zero-downtime reindexing has its own specs. */
 class IndexMigratorSpec extends Specification {
 
-  static final MigrationOptions BLOCKING = MigrationOptions.standard().withReindexMode(ReindexMode.BLOCKING)
+  static final MigrationOptions BLOCKING = MigrationOptions.standard().withReindexMode(ReindexMode.BLOCKING).withLock(false)
 
   static final ProtoMapper DEFAULT = ProtoMapper.withDefaults()
 

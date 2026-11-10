@@ -53,11 +53,11 @@ public interface IndexNamingStrategy {
   }
 
   /**
-   * Returns the name of the index that holds migration locks, one document per alias being
-   * migrated, so that concurrent migrations of the same alias exclude each other. Nothing creates
-   * it yet: it is reserved for the upcoming zero-downtime reindex. Strategies that separate
-   * environments sharing one cluster should return a distinct name per environment, as {@link
-   * #prefixed} does.
+   * Returns the name of the index that holds the migration locks of {@code IndexMigrator}, one
+   * document per alias being migrated, so that concurrent migrations of the same alias exclude
+   * each other. The migrator creates it on first use (one shard, strict mapping). An alias named
+   * like it collides with it. Strategies that separate environments sharing one cluster should
+   * return a distinct name per environment, as {@link #prefixed} does.
    *
    * @return {@code elastic-protos-locks} by default
    */

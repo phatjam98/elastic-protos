@@ -40,7 +40,8 @@ class BootstrapSpec extends Specification {
 
     expect:
     aliases(engine) == ['firms', 'documents'] as Set
-    engine.indices().keySet().every { it.startsWith('firms-v') || it.startsWith('documents-v') }
+    engine.indices().keySet().every { it.startsWith('firms-v') || it.startsWith('documents-v') || it == 'elastic-protos-locks' }
+    engine.documents('elastic-protos-locks').isEmpty()
 
     when: 'running it again is a no-op'
     def result = ctx.getBean(ElasticProtosBootstrap).run()

@@ -12,6 +12,7 @@ Short records of the decisions that shape elastic-protos, in the
 | [0005](0005-lockstep-versioning.md) | Lockstep versioning of all modules | Accepted | 2026-11-01 |
 | [0006](0006-settings-outside-the-content-hash.md) | Index settings stay out of the content hash | Accepted | 2026-11-08 |
 | [0007](0007-zero-downtime-reindex.md) | Zero-downtime reindex: copy, catch up, swap, freeze, reconcile | Accepted | 2026-11-09 |
+| [0008](0008-migration-lock-index.md) | A per-alias lock in a lock index coordinates concurrent bootstraps | Accepted | 2026-11-09 |
 | [0010](0010-typed-maps-through-dynamic-templates.md) | Typed maps through dynamic templates | Accepted | 2026-11-09 |
 
 ## Adding a record

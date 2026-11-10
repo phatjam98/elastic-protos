@@ -266,6 +266,7 @@ public class ElasticProtosConfiguration {
    *       it write-blocks the old index; default {@code 5s}
    *   <li>{@code backfill}: apply additions existing documents were never indexed into in place
    *       with an update by query instead of reindexing; default true
+   *   <li>{@code lock.*}: the per-alias migration lock; see {@link Lock}
    * </ul>
    */
   @ConfigurationProperties("bootstrap")
@@ -284,6 +285,7 @@ public class ElasticProtosConfiguration {
     private ReindexMode reindexMode = ReindexMode.ZERO_DOWNTIME;
     private Duration swapGrace = Duration.ofSeconds(5);
     private boolean backfill = true;
+    private Lock lock = new Lock();
 
     /** Returns {@code enabled}. */
     public boolean isEnabled() {
@@ -413,6 +415,65 @@ public class ElasticProtosConfiguration {
     /** Sets {@code backfill}. */
     public void setBackfill(boolean backfill) {
       this.backfill = backfill;
+    }
+
+    /** Returns the {@code lock} group. */
+    public Lock getLock() {
+      return lock;
+    }
+
+    /** Sets the {@code lock} group. */
+    public void setLock(Lock lock) {
+      this.lock = lock;
+    }
+
+    /**
+     * The per-alias migration lock, bound from {@code elastic-protos.bootstrap.lock.*}.
+     *
+     * <ul>
+     *   <li>{@code enabled}: take a lock per alias in the lock index before changing it, so that
+     *       several instances can bootstrap at once; default true
+     *   <li>{@code wait}: how long to wait for a lock another instance holds before the index is
+     *       reported as locked; default {@code 10m}; {@code 0s} fails at once
+     *   <li>{@code ttl}: how long a lock lives without a heartbeat; default {@code 2m}
+     * </ul>
+     */
+    @ConfigurationProperties("lock")
+    public static class Lock {
+
+      private boolean enabled = true;
+      private Duration wait = Duration.ofMinutes(10);
+      private Duration ttl = Duration.ofMinutes(2);
+
+      /** Returns {@code enabled}. */
+      public boolean isEnabled() {
+        return enabled;
+      }
+
+      /** Sets {@code enabled}. */
+      public void setEnabled(boolean enabled) {
+        this.enabled = enabled;
+      }
+
+      /** Returns {@code wait}. */
+      public Duration getWait() {
+        return wait;
+      }
+
+      /** Sets {@code wait}. */
+      public void setWait(Duration wait) {
+        this.wait = wait;
+      }
+
+      /** Returns {@code ttl}. */
+      public Duration getTtl() {
+        return ttl;
+      }
+
+      /** Sets {@code ttl}. */
+      public void setTtl(Duration ttl) {
+        this.ttl = ttl;
+      }
     }
   }
 
