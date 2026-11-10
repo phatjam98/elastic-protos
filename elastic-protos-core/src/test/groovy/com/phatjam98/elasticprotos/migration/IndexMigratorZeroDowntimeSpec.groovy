@@ -10,6 +10,7 @@ import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.testkit.InMemorySearchEngine
 import java.time.Duration
 import java.util.OptionalLong
+import com.phatjam98.elasticprotos.engine.SearchResult
 import spock.lang.Specification
 
 /** Zero-downtime reindexing: copy, catch up, swap, freeze, reconcile, sweep, and resuming it. */
@@ -163,7 +164,8 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
 
     then:
     result.ok()
-    seen[Phase.PREPARED] == [action: 'reindex', from: V1, phase: 'copying', checkpoint: 4, seq_no_range: true]
+    seen[Phase.PREPARED] == [action: 'reindex', from: V1, phase: 'copying', checkpoint: 4]
+    seen[Phase.SNAPSHOT].findAll { k, v -> k in ['seq_no_range', 'cold_count'] } == [cold_count: 5, seq_no_range: true]
     seen[Phase.COPIED] == seen[Phase.PREPARED]
     seen[Phase.CAUGHT_UP] == seen[Phase.PREPARED]
     seen[Phase.SNAPSHOT].subMap('action', 'from', 'phase') == [action: 'reindex', from: V1, phase: 'swapping']
@@ -846,26 +848,106 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     outcome.reconcile().ghostsDeleted() == 1L
   }
 
-  def "counts that do not add up fall back to the cold pass and the sweep, with a warning"() {
-    given: 'an engine that reports a global checkpoint above writes made after it'
-    engine = new LyingCheckpointEngine()
-    setup()
-    on[Phase.CAUGHT_UP] = { put('n1', 'new'); put('d0', 'pre-swap') }
+  def "the reviewer's scenario: a document lost on the way to the snapshot plus a real ghost no longer cancel out"() {
+    given: 'd1 is deleted from the old index after the copy (a real ghost), n1 written before the swap,'
+    on[Phase.COPIED] = { remove('d1') }
+    and: 'd3 vanishes from the new index before the snapshot, breaking the premise; the counts would cancel to 0'
+    on[Phase.CAUGHT_UP] = { put('n1', 'new'); engine.delete(V2, 'd3') }
 
     when:
     def outcome = migrator().bootstrap(Document).outcomes()[0]
 
-    then: 'the range is empty, n1 is missing from the snapshot and not counted: -1 ghosts'
+    then: 'the snapshot count disagrees with what the copies created, so the full scan runs'
     outcome.ok()
-    titles(V2) == [d0: 'pre-swap', d1: 'Title 1', d2: 'Title 2', d3: 'Title 3', d4: 'Title 4', n1: 'new']
-    outcome.reconcile() == new ReconcileStats(2, 0, 0, 0, ReconcileStrategy.FULL_SCAN, true)
+    titles(V2) == [d0: 'Title 0', d2: 'Title 2', d3: 'Title 3', d4: 'Title 4', n1: 'new']
+    outcome.reconcile() == new ReconcileStats(2, 0, 1, 0, ReconcileStrategy.FULL_SCAN, true)
+  }
+
+  def "the same scenario with a checkpoint the engine cannot have (above its max_seq_no) is not trusted"() {
+    given:
+    engine = new LyingCheckpointEngine()
+    setup()
+    on[Phase.COPIED] = { remove('d1') }
+    on[Phase.CAUGHT_UP] = { put('n1', 'new') }
+    on[Phase.FROZEN] = { assert pending(V2).seq_no_range == null }
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    titles(V2) == [d0: 'Title 0', d2: 'Title 2', d3: 'Title 3', d4: 'Title 4', n1: 'new']
+    outcome.reconcile().strategy() == ReconcileStrategy.FULL_SCAN
+  }
+
+  def "a first copy pass that did not create every document it read disables the range: #why"() {
+    given:
+    engine = faulty
+    setup()
+    on[Phase.FROZEN] = { assert pending(V2).seq_no_range == null }
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    outcome.reconcile().strategy() == ReconcileStrategy.FULL_SCAN
+
+    where:
+    why                                   | faulty
+    'a version conflict on a fresh index' | new FirstPassEngine(conflicts: 1)
+    'a no-op (a dropping pipeline)'       | new FirstPassEngine(noops: 1)
+    'fewer documents read than were cold' | new FirstPassEngine(shortTotal: true)
+  }
+
+  def "a catch-up that deleted documents disables the range"() {
+    given:
+    engine = new CatchUpDeleteEngine()
+    setup()
+    on[Phase.FROZEN] = { assert pending(V2).seq_no_range == null }
+
+    expect:
+    migrator().bootstrap(Document).outcomes()[0].reconcile().strategy() == ReconcileStrategy.FULL_SCAN
+  }
+
+  def "more documents at or below the checkpoint at the freeze than at the copy disable the range"() {
+    given: 'a document appears at or below the checkpoint after the copy started'
+    engine = new LateColdEngine()
+    setup()
+    on[Phase.SWAPPED] = { (engine as LateColdEngine).late = true }
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    outcome.reconcile().strategy() == ReconcileStrategy.FULL_SCAN
+    outcome.warnings()[0].startsWith("${V1} holds 6 documents at or below sequence number".toString())
+  }
+
+  def "counts that still do not add up fall back to the cold pass and the sweep, with a warning"() {
+    given: 'the old index is counted one too many at the freeze, after every earlier check passed'
+    engine = new InflatedCountEngine()
+    setup()
+    on[Phase.FROZEN] = { (engine as InflatedCountEngine).inflate = true }
+    on[Phase.CAUGHT_UP] = { put('d0', 'pre-swap') }
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    titles(V2).d0 == 'pre-swap'
+    outcome.reconcile() == new ReconcileStats(1, 0, 0, 0, ReconcileStrategy.FULL_SCAN, true)
     outcome.warnings()[0] == "the document counts of ${V1} and of the snapshot of ${V2} do not add up (-1 ghosts), so every document was compared after all".toString()
   }
 
-  def "a count that is not exact sweeps"() {
+  def "a count that is not exact at the freeze sweeps, with a warning"() {
     given:
     engine = new InexactCountEngine()
     setup()
+    on[Phase.RECONCILED] = { (engine as InexactCountEngine).inexact = true }
+    on[Phase.SWEPT] = { (engine as InexactCountEngine).inexact = false }
     on[Phase.CAUGHT_UP] = { put('n1', 'new') }
 
     when:
@@ -874,6 +956,51 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     then:
     outcome.ok()
     outcome.reconcile() == new ReconcileStats(1, 0, 0, 0, ReconcileStrategy.SEQ_NO_RANGE, true)
+    outcome.warnings()[0] == "the engine counted ${V1} or the snapshot of ${V2} only as a lower bound, so the snapshot was swept".toString()
+  }
+
+  def "an empty shard (global checkpoint -1) means a full scan, not a range over everything"() {
+    given:
+    engine.globalCheckpointLag(100)
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    outcome.reconcile().strategy() == ReconcileStrategy.FULL_SCAN
+  }
+
+  def "a new index with segment replication means a full scan"() {
+    given: 'OpenSearch writes the cluster default replication type into every new index'
+    engine = new SegmentDefaultEngine()
+    setup()
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.ok()
+    outcome.reconcile().strategy() == ReconcileStrategy.FULL_SCAN
+  }
+
+  def "a partial answer #where fails the item or loses the snapshot, never counts as complete"() {
+    given:
+    engine = new PartialEngine(target: target)
+    setup()
+    on[Phase.FROZEN] = { (engine as PartialEngine).on = true }
+
+    when:
+    def outcome = migrator().bootstrap(Document).outcomes()[0]
+
+    then:
+    outcome.status() == status
+    message == null || outcome.error().message.contains(message)
+
+    where:
+    where                | target | status                            | message
+    'from the old index' | 'old'  | MigrationResult.Status.FAILED     | 'failed on 1 shards; the migration does not act on partial results'
+    'from the snapshot'  | 'pit'  | MigrationResult.Status.INCOMPLETE | null
   }
 
   def "a lost snapshot after a range-marked swap is degraded, not ranged"() {
@@ -901,8 +1028,8 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     migrator().bootstrap(Document)
 
     then:
-    marker == [action: 'reindex', from: V1, phase: 'copying', checkpoint: 2, seq_no_range: true]
-    !engine.log().contains("seqNoCheckpoint ${V1}".toString())
+    marker == [action: 'reindex', from: V1, phase: 'copying', checkpoint: 2]
+    engine.log().indexOf("globalCheckpoint ${V1}".toString()) < engine.log().indexOf("seqNoCheckpoint ${V1}".toString())
   }
 
   // ------------------------------------------------------------------ blocking parity
@@ -1016,13 +1143,97 @@ class IndexMigratorZeroDowntimeSpec extends Specification {
     }
   }
 
-  /** Reports every total as a lower bound. */
+  /** Reports every total as a lower bound once {@code inexact} is set. */
   static class InexactCountEngine extends InMemorySearchEngine {
+    boolean inexact
+
     @Override
-    com.phatjam98.elasticprotos.engine.SearchResult search(List<String> targets, Map<String, Object> body) {
+    SearchResult search(List<String> targets, Map<String, Object> body) {
       def result = super.search(targets, body)
-      new com.phatjam98.elasticprotos.engine.SearchResult(result.total(), false, result.hits(), result.pitId(),
-          result.aggregations(), result.tookMs())
+      inexact ? new SearchResult(result.total(), false, result.hits(), result.pitId(), result.aggregations(), result.tookMs()) : result
+    }
+  }
+
+  /** Counts the old index (without a query) one too many once {@code inflate} is set. */
+  static class InflatedCountEngine extends InMemorySearchEngine {
+    boolean inflate
+
+    @Override
+    SearchResult search(List<String> targets, Map<String, Object> body) {
+      def result = super.search(targets, body)
+      inflate && targets == [V1] && body.size == 0 && !body.containsKey('query')
+          ? new SearchResult(result.total() + 1, true, result.hits(), result.pitId(), result.aggregations(), result.tookMs())
+          : result
+    }
+  }
+
+  /** Counts one more document at or below the checkpoint once {@code late} is set. */
+  static class LateColdEngine extends InMemorySearchEngine {
+    boolean late
+
+    @Override
+    SearchResult search(List<String> targets, Map<String, Object> body) {
+      def result = super.search(targets, body)
+      late && body.query?.range?._seq_no?.lte != null
+          ? new SearchResult(result.total() + 1, true, result.hits(), result.pitId(), result.aggregations(), result.tookMs())
+          : result
+    }
+  }
+
+  /** Reports the first copy into the new index with a conflict, a no-op or a short total. */
+  static class FirstPassEngine extends InMemorySearchEngine {
+    long conflicts
+    long noops
+    boolean shortTotal
+    boolean done
+
+    @Override
+    com.phatjam98.elasticprotos.engine.ReindexResult reindex(com.phatjam98.elasticprotos.engine.ReindexRequest request) {
+      def result = super.reindex(request)
+      if (done || request.dest() != V2) {
+        return result
+      }
+      done = true
+      long total = shortTotal ? result.total() - 1 : result.total() + conflicts + noops
+      long created = shortTotal ? result.created() - 1 : result.created()
+      new com.phatjam98.elasticprotos.engine.ReindexResult(total, created, result.updated(), [], 0, false,
+          noops, 0, conflicts)
+    }
+  }
+
+  /** Reports a deleted document from the second (catch-up) copy into the new index. */
+  static class CatchUpDeleteEngine extends InMemorySearchEngine {
+    int passes
+
+    @Override
+    com.phatjam98.elasticprotos.engine.ReindexResult reindex(com.phatjam98.elasticprotos.engine.ReindexRequest request) {
+      def result = super.reindex(request)
+      if (request.dest() != V2 || ++passes != 2) {
+        return result
+      }
+      new com.phatjam98.elasticprotos.engine.ReindexResult(result.total(), result.created(), result.updated(), [], 0, false,
+          result.noops(), 1, result.versionConflicts() - 1)
+    }
+  }
+
+  /** Creates the new index with index.replication.type SEGMENT, like an OpenSearch cluster default. */
+  static class SegmentDefaultEngine extends InMemorySearchEngine {
+    @Override
+    void createIndex(String name, Map<String, Object> settings, Map<String, Object> mappings, Set<String> aliases) {
+      super.createIndex(name, name == V2 ? settings + ['index.replication.type': 'SEGMENT'] : settings, mappings, aliases)
+    }
+  }
+
+  /** Answers searches of the old index, or of a point in time, with one failed shard once {@code on} is set. */
+  static class PartialEngine extends InMemorySearchEngine {
+    boolean on
+    String target
+
+    @Override
+    SearchResult search(List<String> targets, Map<String, Object> body) {
+      def result = super.search(targets, body)
+      boolean hit = target == 'old' ? targets == [V1] : (body.containsKey('pit') && body.size == 0)
+      on && hit ? new SearchResult(result.total(), true, result.hits(), result.pitId(), result.aggregations(), result.tookMs(), 1) : result
     }
   }
 

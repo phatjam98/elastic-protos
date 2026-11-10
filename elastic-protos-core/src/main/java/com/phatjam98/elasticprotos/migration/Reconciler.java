@@ -75,6 +75,10 @@ final class Reconciler {
     SnapshotLost(Throwable cause) {
       super("the point in time over the new index is gone: " + cause.getMessage(), cause);
     }
+
+    SnapshotLost(String message) {
+      super(message);
+    }
   }
 
   /**
@@ -242,7 +246,7 @@ final class Reconciler {
     body.put("size", 0);
     body.put("track_total_hits", true);
     SearchResult snapshot = searchPit(body);
-    SearchResult old = engine.search(List.of(from), Map.of("size", 0, "track_total_hits", true));
+    SearchResult old = search(List.of(from), Map.of("size", 0, "track_total_hits", true));
     if (!snapshot.totalExact() || !old.totalExact()) {
       return OptionalLong.empty();
     }
@@ -348,7 +352,7 @@ final class Reconciler {
     body.put("_source", false);
     body.put("size", PAGE);
     body.put("track_total_hits", false);
-    List<String> ids = ids(engine.search(List.of(from), body).hits());
+    List<String> ids = ids(search(List.of(from), body).hits());
     if (ids.isEmpty()) {
       return;
     }
@@ -410,7 +414,7 @@ final class Reconciler {
     body.put("size", ids.size());
     body.put("track_total_hits", false);
     Map<String, Map<String, Object>> found = new LinkedHashMap<>();
-    for (Hit hit : engine.search(List.of(index), body).hits()) {
+    for (Hit hit : search(List.of(index), body).hits()) {
       found.put(hit.id(), hit.source());
     }
     return found;
@@ -478,7 +482,7 @@ final class Reconciler {
     body.put("size", ids.size());
     body.put("track_total_hits", false);
     Map<String, Hit> found = new LinkedHashMap<>();
-    for (Hit hit : engine.search(List.of(index), body).hits()) {
+    for (Hit hit : search(List.of(index), body).hits()) {
       found.put(hit.id(), hit);
     }
     return found;
@@ -515,7 +519,7 @@ final class Reconciler {
       if (after != null) {
         request.put("search_after", after);
       }
-      SearchResult result = snapshot ? searchPit(request) : engine.search(List.of(), request);
+      SearchResult result = snapshot ? searchPit(request) : search(List.of(), request);
       if (result.hits().isEmpty()) {
         return;
       }
@@ -530,13 +534,54 @@ final class Reconciler {
   /** Searches the snapshot, turning a missing point in time into {@link SnapshotLost}. */
   private SearchResult searchPit(Map<String, Object> body) {
     try {
-      return engine.search(List.of(), body);
+      SearchResult result = engine.search(List.of(), body);
+      if (result.partial()) {
+        // a shard of the snapshot lost its reader (its node restarted, say): the snapshot is no
+        // longer whole, so it is treated as lost, never as a partial answer
+        throw new SnapshotLost("the point in time over the new index answered from only part of"
+            + " its shards (" + result.shardsFailed() + " failed)");
+      }
+      return result;
     } catch (EngineException e) {
       if (e.getKind() == EngineException.Kind.NOT_FOUND) {
         throw new SnapshotLost(e);
       }
       throw e;
     }
+  }
+
+  /**
+   * Searches and fails when a shard did not answer: the engines return 200 with the other shards'
+   * hits and an exact-looking total, which the reconcile must never take for the whole index.
+   */
+  SearchResult search(List<String> indices, Map<String, Object> body) {
+    return strict(engine, indices, body);
+  }
+
+  /** Searches with {@code engine} and fails on a partial answer; see {@link #search}. */
+  static SearchResult strict(SearchEngine engine, List<String> indices, Map<String, Object> body) {
+    SearchResult result = engine.search(indices, body);
+    if (result.partial()) {
+      throw new MigrationException("a search of " + (indices.isEmpty() ? "a point in time"
+          : String.join(",", indices)) + " failed on " + result.shardsFailed() + " shards;"
+          + " the migration does not act on partial results");
+    }
+    return result;
+  }
+
+  /** Counts the documents of an index exactly, failing on a partial answer. */
+  static long count(SearchEngine engine, String index, Map<String, Object> query) {
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("size", 0);
+    body.put("track_total_hits", true);
+    if (query != null) {
+      body.put("query", query);
+    }
+    SearchResult result = strict(engine, List.of(index), body);
+    if (!result.totalExact()) {
+      throw new MigrationException("the engine counted " + index + " only as a lower bound");
+    }
+    return result.total();
   }
 
   private Map<String, Object> pit(String id) {

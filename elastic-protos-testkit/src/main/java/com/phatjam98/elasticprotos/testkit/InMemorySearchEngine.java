@@ -100,8 +100,8 @@ import java.util.regex.Pattern;
  * ctx._id = params.<name>};
  * {@link #search} supports only the queries {@code match_all}, {@code term} and {@code terms} on
  * one field (dotted paths walk into objects and arrays), {@code ids}, a top-level {@code range}
- * on {@code _seq_no} with {@code gt}, and {@code bool} with
- * {@code filter}, {@code must}, {@code must_not} and {@code should} (with {@code
+ * on {@code _seq_no} with {@code gt}, {@code gte}, {@code lt} and {@code lte}, and {@code bool}
+ * with {@code filter}, {@code must}, {@code must_not} and {@code should} (with {@code
  * minimum_should_match}, default 1 when there is no filter or must clause, else 0) over those, plus
  * {@code from}, {@code size}, {@code track_total_hits}, {@code pit} and {@code search_after}. Hits
  * always come in insertion order; when the body has a {@code sort}, whatever it says, each hit's
@@ -791,11 +791,11 @@ public class InMemorySearchEngine implements SearchEngine {
       if (state == null) {
         continue;
       }
-      Long seqNoAbove = seqNoAbove(query);
+      java.util.function.LongPredicate seqNoRange = seqNoRange(query);
       for (Map.Entry<String, Map<String, Object>> doc : state.docs.entrySet()) {
-        boolean hit = seqNoAbove == null
+        boolean hit = seqNoRange == null
             ? matches(query, doc.getKey(), doc.getValue())
-            : state.seqNos.getOrDefault(doc.getKey(), -1L) > seqNoAbove;
+            : seqNoRange.test(state.seqNos.getOrDefault(doc.getKey(), -1L));
         if (hit) {
           String id = doc.getKey();
           matches.add(new Hit(name, id, 1.0, Json.sortedCopy(doc.getValue()), List.of(),
@@ -1216,9 +1216,33 @@ public class InMemorySearchEngine implements SearchEngine {
   }
 
   /** Returns {@code gt} of a top-level {@code {"range": {"_seq_no": {"gt": n}}}} query, or null. */
-  private static Long seqNoAbove(Map<String, Object> query) {
-    Object gt = map(map(query.get("range")).get("_seq_no")).get("gt");
-    return gt instanceof Number ? ((Number) gt).longValue() : null;
+  private static java.util.function.LongPredicate seqNoRange(Map<String, Object> query) {
+    Map<String, Object> range = map(map(query.get("range")).get("_seq_no"));
+    if (range.isEmpty()) {
+      return null;
+    }
+    java.util.function.LongPredicate test = seqNo -> true;
+    for (Map.Entry<String, Object> bound : range.entrySet()) {
+      long value = ((Number) bound.getValue()).longValue();
+      switch (bound.getKey()) {
+        case "gt":
+          test = test.and(seqNo -> seqNo > value);
+          break;
+        case "gte":
+          test = test.and(seqNo -> seqNo >= value);
+          break;
+        case "lt":
+          test = test.and(seqNo -> seqNo < value);
+          break;
+        case "lte":
+          test = test.and(seqNo -> seqNo <= value);
+          break;
+        default:
+          throw new EngineException(Kind.BAD_REQUEST, 400,
+              "unsupported _seq_no range bound " + bound.getKey());
+      }
+    }
+    return test;
   }
 
   /** Collects the values at a dotted path, walking into arrays. */
