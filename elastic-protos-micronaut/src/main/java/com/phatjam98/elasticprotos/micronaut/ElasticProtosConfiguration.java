@@ -698,6 +698,7 @@ public class ElasticProtosConfiguration {
    *   <li>{@code allow-regex}: accept {@code TEXT_REGEX}; default false
    *   <li>{@code max-page-size}: the largest page size, with or without a point in time; default
    *       10000
+   *   <li>{@code max-terms-size}: the largest {@code size} of a terms aggregation; default 1000
    * </ul>
    */
   @ConfigurationProperties("query")
@@ -715,6 +716,7 @@ public class ElasticProtosConfiguration {
     private boolean allowScriptSort = STANDARD.allowScriptSort();
     private boolean allowRegex = STANDARD.allowRegex();
     private int maxPageSize = STANDARD.maxPageSize();
+    private int maxTermsSize = STANDARD.maxTermsSize();
 
     /** Values of {@code shard-doc-tiebreaker}. */
     public enum ShardDocTiebreaker {
@@ -832,6 +834,16 @@ public class ElasticProtosConfiguration {
     /** Sets {@code max-page-size}. */
     public void setMaxPageSize(int maxPageSize) {
       this.maxPageSize = maxPageSize;
+    }
+
+    /** Returns {@code max-terms-size}. */
+    public int getMaxTermsSize() {
+      return maxTermsSize;
+    }
+
+    /** Sets {@code max-terms-size}. */
+    public void setMaxTermsSize(int maxTermsSize) {
+      this.maxTermsSize = maxTermsSize;
     }
   }
 

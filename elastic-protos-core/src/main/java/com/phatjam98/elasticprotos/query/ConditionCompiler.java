@@ -128,49 +128,46 @@ final class ConditionCompiler {
    * @throws QueryCompileException for an operation keys do not support
    */
   private FieldInfo flattenedKey(String name, SearchOperationType operation) {
-    for (int dot = name.lastIndexOf('.'); dot > 0; dot = name.lastIndexOf('.', dot - 1)) {
-      FieldInfo root = index.fields().get(name.substring(0, dot));
-      if (root == null || root.kind() != FieldKind.FLATTENED) {
-        continue;
-      }
-      if (dot == name.length() - 1) {
-        return null;
-      }
-      switch (operation) {
-        case EQUALS:
-        case ANY_IN:
-        case EXISTS:
-        case TEXT_PREFIX:
-          String key = name.substring(dot + 1);
-          return new FieldInfo(name, root.protoPath() + "." + key, FieldKind.FLATTENED,
-              root.repeated(), false, root.boost(), root.field());
-        default:
-          throw new QueryCompileException(
-              operation + " cannot be used on '" + name + "', a key of flattened field '"
-                  + root.path() + "'; keys take EQUALS, ANY_IN, EXISTS and TEXT_PREFIX",
-              name);
-      }
+    FieldInfo root = FlattenedKeys.root(index, name);
+    if (root == null) {
+      return null;
     }
-    return null;
+    switch (operation) {
+      case EQUALS:
+      case ANY_IN:
+      case EXISTS:
+      case TEXT_PREFIX:
+        return FlattenedKeys.key(root, name);
+      default:
+        throw new QueryCompileException(
+            operation + " cannot be used on '" + name + "', a key of flattened field '"
+                + root.path() + "'; keys take EQUALS, ANY_IN, EXISTS and TEXT_PREFIX",
+            name);
+    }
   }
 
   private void unknown(String name, String what) {
     if (!config.lenient()) {
-      FieldInfo values = index.typedMapValues(name).orElse(null);
-      if (values != null) {
-        String map = values.path().substring(0, values.path().length() - 2);
-        throw new QueryCompileException(
-            "Unknown field '" + name + "' in " + what + "; the values of map '" + map
-                + "' in index " + index.alias() + " are " + valueType(values)
-                + ", which does not map it",
-            name);
-      }
-      throw new QueryCompileException(
-          "Unknown field '" + name + "' in " + what + "; index " + index.alias()
-              + " does not map it",
-          name);
+      throw unknownField(index, name, what);
     }
     warnings.add("Skipped " + what + " on unknown field '" + name + "'");
+  }
+
+  /** Builds the strict-mode error for a field the index does not map. */
+  static QueryCompileException unknownField(IndexDefinition index, String name, String what) {
+    FieldInfo values = index.typedMapValues(name).orElse(null);
+    if (values != null) {
+      String map = values.path().substring(0, values.path().length() - 2);
+      return new QueryCompileException(
+          "Unknown field '" + name + "' in " + what + "; the values of map '" + map
+              + "' in index " + index.alias() + " are " + valueType(values)
+              + ", which does not map it",
+          name);
+    }
+    return new QueryCompileException(
+        "Unknown field '" + name + "' in " + what + "; index " + index.alias()
+            + " does not map it",
+        name);
   }
 
   /** Names the value type of a typed map: its message, or its mapped kind for other values. */

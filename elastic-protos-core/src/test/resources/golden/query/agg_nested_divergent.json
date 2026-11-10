@@ -1,0 +1,91 @@
+{
+  "aggs" : {
+    "books__nested" : {
+      "aggs" : {
+        "books__nested2" : {
+          "aggs" : {
+            "books" : {
+              "aggs" : {
+                "position__reverse" : {
+                  "aggs" : {
+                    "position" : {
+                      "max" : {
+                        "field" : "shelves.position"
+                      }
+                    }
+                  },
+                  "reverse_nested" : {
+                    "path" : "shelves"
+                  }
+                },
+                "ranks" : {
+                  "sum" : {
+                    "field" : "shelves.books.rank"
+                  }
+                },
+                "staff_rank__reverse" : {
+                  "aggs" : {
+                    "staff_rank__nested" : {
+                      "aggs" : {
+                        "staff_rank" : {
+                          "max" : {
+                            "field" : "staff.rank"
+                          }
+                        }
+                      },
+                      "nested" : {
+                        "path" : "staff"
+                      }
+                    }
+                  },
+                  "reverse_nested" : { }
+                }
+              },
+              "terms" : {
+                "field" : "shelves.books.name"
+              }
+            }
+          },
+          "nested" : {
+            "path" : "shelves.books"
+          }
+        }
+      },
+      "nested" : {
+        "path" : "shelves"
+      }
+    },
+    "cities" : {
+      "aggs" : {
+        "book_count__nested" : {
+          "aggs" : {
+            "book_count__nested2" : {
+              "aggs" : {
+                "book_count" : {
+                  "value_count" : {
+                    "field" : "shelves.books.name"
+                  }
+                }
+              },
+              "nested" : {
+                "path" : "shelves.books"
+              }
+            }
+          },
+          "nested" : {
+            "path" : "shelves"
+          }
+        }
+      },
+      "terms" : {
+        "field" : "city"
+      }
+    }
+  },
+  "from" : 0,
+  "query" : {
+    "match_all" : { }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

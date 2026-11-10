@@ -1,0 +1,21 @@
+{
+  "aggs" : {
+    "tags" : {
+      "terms" : {
+        "field" : "tags",
+        "min_doc_count" : 2,
+        "missing" : "none",
+        "order" : {
+          "_key" : "desc"
+        },
+        "size" : 5
+      }
+    }
+  },
+  "from" : 0,
+  "query" : {
+    "match_all" : { }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

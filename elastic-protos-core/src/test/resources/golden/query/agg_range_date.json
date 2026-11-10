@@ -1,0 +1,21 @@
+{
+  "aggs" : {
+    "q1" : {
+      "date_range" : {
+        "field" : "filed_at",
+        "format" : "epoch_millis",
+        "ranges" : [ {
+          "from" : 1704067200000,
+          "key" : "q1_2024",
+          "to" : 1711929600000
+        } ]
+      }
+    }
+  },
+  "from" : 0,
+  "query" : {
+    "match_all" : { }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

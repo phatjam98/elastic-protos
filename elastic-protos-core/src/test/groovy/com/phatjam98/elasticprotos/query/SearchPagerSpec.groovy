@@ -72,6 +72,29 @@ class SearchPagerSpec extends Specification {
     pager.pagination().cursor == 'pit-e'
   }
 
+  def "aggregations go with the first page only, highlighting with every page"() {
+    given:
+    SearchEngine engine = Mock()
+    List<Map> bodies = []
+    SearchCriteria withAggs = Criteria.where('type').equalTo('FILING').end()
+        .aggregate(Aggs.terms('tags', 'tags')).highlight('title').build()
+
+    when:
+    SearchPager.forEachPage(engine, compiler, ['documents'], withAggs, document, 2) {}
+
+    then:
+    engine.info() >> ES
+    1 * engine.openPit(_, _) >> new Pit('pit-a', Duration.ofMinutes(1))
+    3 * engine.search(['documents'], _) >> { args ->
+      bodies << args[1]
+      [page('pit-b', 2, 0), page('pit-c', 2, 2), page('pit-d', 1, 4)][bodies.size() - 1]
+    }
+    1 * engine.closePit(_)
+    bodies*.containsKey('aggs') == [true, false, false]
+    bodies.every { it.highlight.fields == [title: [:]] }
+    bodies[0].aggs == [tags: [terms: [field: 'tags']]]
+  }
+
   def "forEachPage stops after a short page and closes the pit"() {
     given:
     SearchEngine engine = Mock()

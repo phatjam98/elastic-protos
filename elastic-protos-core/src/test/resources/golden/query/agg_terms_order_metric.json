@@ -1,0 +1,30 @@
+{
+  "aggs" : {
+    "by_type" : {
+      "aggs" : {
+        "average" : {
+          "avg" : {
+            "field" : "size_bytes"
+          }
+        },
+        "total" : {
+          "sum" : {
+            "field" : "size_bytes"
+          }
+        }
+      },
+      "terms" : {
+        "field" : "type",
+        "order" : {
+          "total" : "desc"
+        }
+      }
+    }
+  },
+  "from" : 0,
+  "query" : {
+    "match_all" : { }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

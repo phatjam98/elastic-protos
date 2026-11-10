@@ -1,0 +1,21 @@
+{
+  "aggs" : {
+    "tags" : {
+      "terms" : {
+        "field" : "tags"
+      }
+    }
+  },
+  "from" : 0,
+  "query" : {
+    "bool" : {
+      "filter" : [ {
+        "term" : {
+          "type" : "FILING"
+        }
+      } ]
+    }
+  },
+  "size" : 0,
+  "track_total_hits" : true
+}

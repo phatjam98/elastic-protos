@@ -1,0 +1,40 @@
+{
+  "from" : 0,
+  "highlight" : {
+    "fields" : {
+      "body" : { },
+      "title" : { }
+    },
+    "post_tags" : [ "</em>" ],
+    "pre_tags" : [ "<em>" ]
+  },
+  "query" : {
+    "bool" : {
+      "must" : [ {
+        "bool" : {
+          "minimum_should_match" : 1,
+          "should" : [ {
+            "multi_match" : {
+              "fields" : [ "body", "title^3" ],
+              "query" : "merger agreement",
+              "type" : "best_fields"
+            }
+          }, {
+            "nested" : {
+              "path" : "parties",
+              "query" : {
+                "multi_match" : {
+                  "fields" : [ "parties.name" ],
+                  "query" : "merger agreement",
+                  "type" : "best_fields"
+                }
+              }
+            }
+          } ]
+        }
+      } ]
+    }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

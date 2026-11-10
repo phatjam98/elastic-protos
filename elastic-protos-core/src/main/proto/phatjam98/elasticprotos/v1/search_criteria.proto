@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package phatjam98.elasticprotos.v1;
 
+import "phatjam98/elasticprotos/v1/aggregations.proto";
 import "phatjam98/elasticprotos/v1/flat_struct.proto";
 import "phatjam98/elasticprotos/v1/pagination.proto";
 import "phatjam98/elasticprotos/v1/sorting_criteria.proto";
@@ -10,11 +11,17 @@ option java_package = "com.phatjam98.elasticprotos.proto";
 option java_multiple_files = true;
 option java_outer_classname = "SearchCriteriaProtos";
 
-// A search: (SearchCondition1 OR SearchCondition2 OR ...), sorted and paged.
+// A search: (SearchCondition1 OR SearchCondition2 OR ...), sorted and paged, with optional
+// aggregations and highlighting.
 message SearchCriteria {
   repeated SearchCondition search_condition = 1;
   repeated SortingCriteria sorting_criteria = 2;
+  // Paging; a negative size returns no hits, for searches that only aggregate.
   Pagination pagination = 3;
+  // Aggregations over every matching document, compiled into the body's "aggs".
+  repeated Aggregation aggregation = 4;
+  // Highlighting of the matched full-text fields; unset means none.
+  Highlight highlight = 5;
 }
 
 // A conjunction: (FieldCondition1 AND FieldCondition2 AND ...).

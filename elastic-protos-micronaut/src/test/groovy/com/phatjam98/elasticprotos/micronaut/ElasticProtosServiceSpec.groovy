@@ -8,7 +8,12 @@ import com.phatjam98.elasticprotos.migration.Action
 import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
 import com.phatjam98.elasticprotos.proto.example.FirmStatus
+import com.phatjam98.elasticprotos.query.AggregationResults
+import com.phatjam98.elasticprotos.query.Aggs
 import com.phatjam98.elasticprotos.query.Criteria
+import com.phatjam98.elasticprotos.query.QueryCompiler
+import com.phatjam98.elasticprotos.query.QueryCompilerConfig
+import com.phatjam98.elasticprotos.query.TrackTotalHits
 import com.phatjam98.elasticprotos.query.QueryCompileException
 import com.phatjam98.elasticprotos.testkit.InMemorySearchEngine
 import com.phatjam98.elasticprotos.testkit.SampleData
@@ -138,6 +143,69 @@ class ElasticProtosServiceSpec extends Specification {
     all.items().size() == 2
     all.total() == 3
     all.next().from == 2
+  }
+
+  def "search returns the aggregation results with the page, empty when there are none"() {
+    given:
+    service.bulkIndex(SampleData.firms())
+
+    when:
+    def page = service.search(Criteria.builder().pageSize(1).aggregate(Aggs.terms('status', 'status')).build(), Firm)
+
+    then:
+    page.items().size() == 1
+    page.total() == 3
+    page.aggregations().buckets('status').collectEntries { [(it.key()): it.docCount()] } ==
+        [ACTIVE: 2L, SUSPENDED: 1L]
+
+    and:
+    service.search(Criteria.builder().build(), Firm).aggregations() == AggregationResults.empty()
+  }
+
+  def "aggregate runs only the aggregations, without hits or highlights"() {
+    given:
+    service.bulkIndex(SampleData.documents())
+    engine.clearLog()
+
+    when:
+    def page = service.aggregate(Criteria.where('type').equalTo('FILING').end().pageSize(50).highlight()
+        .aggregate(Aggs.terms('tags', 'tags'), Aggs.sum('total', 'size_bytes')).build(), Document)
+    def aggs = page.results()
+
+    then:
+    page.total() == 3
+    page.warnings().isEmpty()
+    aggs.buckets('tags').collectEntries { [(it.key()): it.docCount()] } ==
+        [corporate: 2L, discovery: 1L, 'm-and-a': 1L]
+    aggs.metric('total').asLong() == 2_870_000L
+    engine.log().count { it.startsWith('search ') } == 1
+  }
+
+  def "aggregate reports compiler warnings, and no total when totals are not tracked"() {
+    given:
+    def lenient = new ElasticProtosService(engine, service.codec(),
+        QueryCompiler.of(QueryCompilerConfig.standard().withLenient(true).withTrackTotalHits(TrackTotalHits.none())),
+        null, null)
+    service.bulkIndex(SampleData.documents())
+
+    when:
+    def page = lenient.aggregate(Criteria.builder().aggregate(Aggs.terms('x', 'nope'), Aggs.terms('t', 'type')).build(), Document)
+
+    then:
+    page.total() == -1
+    page.warnings() == ["Skipped aggregation 'x' on unknown field 'nope'"]
+    page.results().names() == ['t'] as Set
+    new AggregationPage(null, 0, []).results().isEmpty()
+
+    and: 'search logs and returns them too'
+    lenient.search(Criteria.where('nope').equalTo('x').build(), Document).warnings() ==
+        ["Skipped EQUALS on unknown field 'nope'"]
+  }
+
+  def "the six-component SearchPage constructor supplies empty aggregations"() {
+    expect:
+    new SearchPage([], [], 0, true, null, []).aggregations() == AggregationResults.empty()
+    new SearchPage([], [], 0, true, null, [], null).aggregations().isEmpty()
   }
 
   def "search rejects criteria that do not fit the index"() {

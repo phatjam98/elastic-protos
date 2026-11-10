@@ -123,6 +123,7 @@ class ConfigurationDefaultsSpec extends Specification {
     !config.query.allowScriptSort
     !config.query.allowRegex
     config.query.maxPageSize == 10000
+    config.query.maxTermsSize == 1000
     config.query.trackTotalHits == TrackTotalHits.exact()
     config.bulk.actions == 500
     config.bulk.flushInterval == Duration.ofSeconds(1)
