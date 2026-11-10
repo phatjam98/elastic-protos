@@ -229,8 +229,8 @@ public final class LogComparison {
    * The reconcile created a document again that was deleted through the alias after the swap:
    * the old index last created it after the catch-up began (so the snapshot never held it), the
    * new index's writes of it end with that delete, and the alias holds the old index's final
-   * version. The new index's writes either are the delete alone, which found nothing, or start with
-   * a full write that created the document there.
+   * version. The first write of the new index found nothing there (a delete of a missing document,
+   * or a full write that created it).
    */
   private static boolean resurrected(List<Entry> entries, Map<String, Object> actual,
       Timeline timeline) {
@@ -255,10 +255,9 @@ public final class LogComparison {
     if (!same(OpLog.replay(onOld), actual)) {
       return false;
     }
+    // the new index did not hold the document at the swap: its first write there found nothing
     Entry firstNew = entries.get(first);
-    boolean createdOnNew = (firstNew.type() == OpType.CREATE || firstNew.type() == OpType.INDEX)
-        && !firstNew.found();
-    if (first == n - 1 ? last.found() : !createdOnNew) {
+    if (firstNew.type() == OpType.UPDATE || firstNew.found()) {
       return false;
     }
     Map<String, Object> state = null;

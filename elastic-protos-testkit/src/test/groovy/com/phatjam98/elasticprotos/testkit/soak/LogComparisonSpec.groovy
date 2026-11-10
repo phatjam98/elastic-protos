@@ -161,6 +161,18 @@ class LogComparisonSpec extends Specification {
     compare([x: entries], [x: created]).anomalies()[Anomaly.RESURRECTED_AFTER_DELETE] == 1
   }
 
+  def 'the same when the first delete through the alias found nothing and later writes followed'() {
+    given:
+    def created = [id: 'x', t: 'late']
+    def entries = [onOld(OpType.CREATE, created, 2500),
+                   onNew(OpType.DELETE, null, 3100, false),
+                   onNew(OpType.CREATE, [id: 'x', t: 'new'], 3200, false),
+                   onNew(OpType.DELETE, null, 3300, true)]
+
+    expect:
+    compare([x: entries], [x: created]).anomalies()[Anomaly.RESURRECTED_AFTER_DELETE] == 1
+  }
+
   def 'a resurrection is a violation when #why'() {
     expect:
     compare([x: entries], [x: [id: 'x', t: 'late']]).violations()[Violation.EXTRA] == 1
