@@ -183,3 +183,19 @@ message Shelf {
   int32 position = 2;
   repeated Child books = 3;     // nested inside shelves
 }
+
+// Text two nested levels deep, for highlighting through inner hits.
+message Archive {
+  string id = 1;
+  string title = 2 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
+  repeated Box boxes = 3;       // nested
+}
+
+message Box {
+  string label = 1 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
+  repeated Note notes = 2;      // nested inside boxes
+}
+
+message Note {
+  string text = 1 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
+}

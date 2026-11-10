@@ -1,0 +1,66 @@
+{
+  "from" : 0,
+  "query" : {
+    "bool" : {
+      "must" : [ {
+        "nested" : {
+          "inner_hits" : {
+            "_source" : false,
+            "highlight" : {
+              "fields" : {
+                "boxes.label" : { }
+              },
+              "post_tags" : [ "</em>" ],
+              "pre_tags" : [ "<em>" ]
+            },
+            "name" : "boxes__highlight"
+          },
+          "path" : "boxes",
+          "query" : {
+            "nested" : {
+              "inner_hits" : {
+                "_source" : false,
+                "highlight" : {
+                  "fields" : {
+                    "boxes.notes.text" : { }
+                  },
+                  "post_tags" : [ "</em>" ],
+                  "pre_tags" : [ "<em>" ]
+                },
+                "name" : "boxes.notes__highlight"
+              },
+              "path" : "boxes.notes",
+              "query" : {
+                "match" : {
+                  "boxes.notes.text" : "red"
+                }
+              }
+            }
+          }
+        }
+      }, {
+        "nested" : {
+          "inner_hits" : {
+            "_source" : false,
+            "highlight" : {
+              "fields" : {
+                "boxes.label" : { }
+              },
+              "post_tags" : [ "</em>" ],
+              "pre_tags" : [ "<em>" ]
+            },
+            "name" : "boxes__highlight2"
+          },
+          "path" : "boxes",
+          "query" : {
+            "match" : {
+              "boxes.label" : "red"
+            }
+          }
+        }
+      } ]
+    }
+  },
+  "size" : 10,
+  "track_total_hits" : true
+}

@@ -5,6 +5,7 @@ import com.phatjam98.elasticprotos.engine.BulkOp
 import com.phatjam98.elasticprotos.engine.EngineException
 import com.phatjam98.elasticprotos.engine.EngineProduct
 import com.phatjam98.elasticprotos.engine.IndexOptions
+import com.phatjam98.elasticprotos.engine.NestedHighlight
 import com.phatjam98.elasticprotos.engine.Pit
 import com.phatjam98.elasticprotos.engine.ReindexRequest
 import com.phatjam98.elasticprotos.engine.SearchResult
@@ -874,6 +875,82 @@ class JsonRestEngineSpec extends Specification {
     second.seqNo() == null
     second.primaryTerm() == null
     second.highlight() == [:]
+  }
+
+  /**
+   * Responses recorded from Elasticsearch 9.5.5 to the golden-equivalent bodies of the nested
+   * highlight scenarios (testkit sample documents, and an index of the test proto Archive). The
+   * hits of Elasticsearch 8.19.23 and OpenSearch 2.19.7 and 3.9.0 were identical apart from scores.
+   */
+  static String recorded(String name) {
+    new File("src/test/resources/responses/search-nested-highlight-${name}.json").text
+  }
+
+  def "nested highlights come from the inner hits of two clauses on one path, one entry per object"() {
+    given:
+    http.enqueue(200, recorded('two-clauses'))
+
+    when:
+    def hits = engine.search(['documents'], [:]).hits()
+
+    then:
+    hits*.id() == ['doc-1', 'doc-2', 'doc-3']
+    hits*.highlight() == [[:], [:], [:]]
+    hits[0].nestedHighlights() == [
+        new NestedHighlight('parties', [0], ['parties.name': ['<em>Acme</em> Corp']]),
+        new NestedHighlight('parties', [1], ['parties.name': ['<em>Globex</em> Corp']])]
+    hits[1].nestedHighlights() == [new NestedHighlight('parties', [1], ['parties.name': ['<em>Acme</em> Corp']])]
+    hits[2].nestedHighlights()*.offsets() == [[1]]
+    hits[0].fragments('parties.name') == ['<em>Acme</em> Corp', '<em>Globex</em> Corp']
+    hits[0].fragments('title') == []
+  }
+
+  def "nested highlights two levels deep are found inside the inner hits of the outer clause"() {
+    given:
+    http.enqueue(200, recorded('two-levels'))
+
+    when:
+    def hit = engine.search(['archive'], [:]).hits()[0]
+
+    then: 'the outer carrier hits have no fragments of their own and are left out'
+    hit.id() == 'a1'
+    hit.nestedHighlights() == [
+        new NestedHighlight('boxes', [0], ['boxes.label': ['<em>red</em> box']]),
+        new NestedHighlight('boxes.notes', [0, 0], ['boxes.notes.text': ['<em>red</em> note']]),
+        new NestedHighlight('boxes.notes', [1, 0], ['boxes.notes.text': ['<em>red</em> ink']])]
+    hit.fragments('boxes.notes.text') == ['<em>red</em> note', '<em>red</em> ink']
+  }
+
+  def "root and nested highlights side by side, from the default fields with include_nested"() {
+    given:
+    http.enqueue(200, recorded('defaults'))
+
+    when:
+    def hit = engine.search(['documents'], [:]).hits()[0]
+
+    then:
+    hit.highlight().keySet() == ['body', 'title'] as Set
+    hit.fragments('title') == ['Merger agreement between <em>Acme</em> and Globex']
+    hit.nestedHighlights()*.highlight() == [['parties.name': ['<em>Acme</em> <em>Corp</em>']],
+                                            ['parties.name': ['Globex <em>Corp</em>']]]
+  }
+
+  def "the same nested object from several inner hits is merged, fragments deduplicated, offsets sorted numerically"() {
+    given:
+    def inner = { name, offset, fragments -> [hits: [hits: [[_nested: [field: 'p', offset: offset], highlight: [(name): fragments]]]]] }
+    http.enqueue(200, [hits: [total: [value: 1, relation: 'eq'], hits: [[_index: 'i', _id: '1', _source: [:], inner_hits: [
+        a: inner('p.x', 10, ['one', 'two']),
+        b: inner('p.x', 10, ['two', 'three']),
+        c: inner('p.y', 9, ['y']),
+        d: [hits: [hits: [[_nested: [field: 'p', offset: 2]], [highlight: [z: ['no nested']]]]]],
+        e: 'odd']]]]])
+
+    when:
+    def hit = engine.search(['i'], [:]).hits()[0]
+
+    then:
+    hit.nestedHighlights() == [new NestedHighlight('p', [9], ['p.y': ['y']]),
+                               new NestedHighlight('p', [10], ['p.x': ['one', 'two', 'three']])]
   }
 
   def "a highlight entry that is not a list has no fragments"() {

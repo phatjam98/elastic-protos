@@ -11,6 +11,7 @@ import com.phatjam98.elasticprotos.engine.EngineProduct;
 import com.phatjam98.elasticprotos.engine.Hit;
 import com.phatjam98.elasticprotos.engine.IndexOptions;
 import com.phatjam98.elasticprotos.engine.IndexResult;
+import com.phatjam98.elasticprotos.engine.NestedHighlight;
 import com.phatjam98.elasticprotos.engine.Pit;
 import com.phatjam98.elasticprotos.engine.ReindexRequest;
 import com.phatjam98.elasticprotos.engine.ReindexResult;
@@ -24,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -548,7 +550,8 @@ public final class JsonRestEngine implements SearchEngine {
           optionalNumber(hit.get("_version")),
           optionalNumber(hit.get("_seq_no")),
           optionalNumber(hit.get("_primary_term")),
-          highlight(hit.get("highlight"))));
+          highlight(hit.get("highlight")),
+          nestedHighlights(hit.get("inner_hits"))));
     }
     return new SearchResult(
         total,
@@ -736,6 +739,55 @@ public final class JsonRestEngine implements SearchEngine {
       out.put(field, strings);
     });
     return out;
+  }
+
+  /**
+   * Reads the highlighted fragments of a hit's inner hits, at every level of {@code inner_hits}
+   * inside inner hits: one entry per nested object, identified by its {@code _nested} path and
+   * offsets, with the fragments of every inner hit of that object merged (several nested clauses
+   * on one path return the same object once each). Objects without fragments are left out.
+   */
+  private static List<NestedHighlight> nestedHighlights(Object innerHits) {
+    Map<String, NestedFragments> merged = new TreeMap<>();
+    collectNested(innerHits, merged);
+    List<NestedHighlight> out = new ArrayList<>();
+    for (NestedFragments fragments : merged.values()) {
+      Map<String, List<String>> highlight = new TreeMap<>();
+      fragments.fields().forEach((field, values) -> highlight.put(field, new ArrayList<>(values)));
+      out.add(new NestedHighlight(fragments.path(), fragments.offsets(), highlight));
+    }
+    return out;
+  }
+
+  /** The merged fragments of one nested object. */
+  private record NestedFragments(String path, List<Integer> offsets,
+      Map<String, LinkedHashSet<String>> fields) {}
+
+  private static void collectNested(Object innerHits,
+      Map<String, NestedFragments> merged) {
+    for (Object entry : map(innerHits).values()) {
+      for (Map<String, Object> hit : list(map(map(entry).get("hits")).get("hits"))) {
+        List<String> segments = new ArrayList<>();
+        List<Integer> offsets = new ArrayList<>();
+        for (Map<String, Object> nested = map(hit.get("_nested")); !nested.isEmpty();
+            nested = map(nested.get("_nested"))) {
+          segments.add(string(nested.get("field")));
+          offsets.add(nested.get("offset") instanceof Number n ? n.intValue() : 0);
+        }
+        Map<String, List<String>> highlight = highlight(hit.get("highlight"));
+        if (!segments.isEmpty() && !highlight.isEmpty()) {
+          String path = String.join(".", segments);
+          // sorts by path, then by offsets, each zero-padded so that 10 follows 9
+          StringBuilder key = new StringBuilder(path);
+          offsets.forEach(offset -> key.append('\u0000').append(String.format("%010d", offset)));
+          NestedFragments fragments = merged.computeIfAbsent(key.toString(),
+              k -> new NestedFragments(path, List.copyOf(offsets), new TreeMap<>()));
+          highlight.forEach((field, values) -> fragments.fields()
+              .computeIfAbsent(field, k -> new LinkedHashSet<>()).addAll(values));
+        }
+        collectNested(hit.get("inner_hits"), merged);
+      }
+    }
   }
 
   private RawHttp.Response getRequest(String path, Map<String, String> params) {

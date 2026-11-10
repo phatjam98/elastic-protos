@@ -1,0 +1,170 @@
+{
+  "took": 8,
+  "timed_out": false,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  },
+  "hits": {
+    "total": {
+      "value": 1,
+      "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+      {
+        "_index": "archive",
+        "_id": "a1",
+        "_score": null,
+        "_source": {
+          "id": "a1",
+          "title": "red archive",
+          "boxes": [
+            {
+              "label": "red box",
+              "notes": [
+                {
+                  "text": "red note"
+                },
+                {
+                  "text": "blue note"
+                }
+              ]
+            },
+            {
+              "label": "blue box",
+              "notes": [
+                {
+                  "text": "red ink"
+                }
+              ]
+            }
+          ]
+        },
+        "sort": [
+          "a1"
+        ],
+        "inner_hits": {
+          "boxes__highlight2": {
+            "hits": {
+              "total": {
+                "value": 1,
+                "relation": "eq"
+              },
+              "max_score": 0.6931471,
+              "hits": [
+                {
+                  "_index": "archive",
+                  "_id": "a1",
+                  "_nested": {
+                    "field": "boxes",
+                    "offset": 0
+                  },
+                  "_score": 0.6931471,
+                  "highlight": {
+                    "boxes.label": [
+                      "<em>red</em> box"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          "boxes__highlight": {
+            "hits": {
+              "total": {
+                "value": 2,
+                "relation": "eq"
+              },
+              "max_score": 0.83740485,
+              "hits": [
+                {
+                  "_index": "archive",
+                  "_id": "a1",
+                  "_nested": {
+                    "field": "boxes",
+                    "offset": 0
+                  },
+                  "_score": 0.83740485,
+                  "inner_hits": {
+                    "boxes.notes__highlight": {
+                      "hits": {
+                        "total": {
+                          "value": 1,
+                          "relation": "eq"
+                        },
+                        "max_score": 0.83740485,
+                        "hits": [
+                          {
+                            "_index": "archive",
+                            "_id": "a1",
+                            "_nested": {
+                              "field": "boxes",
+                              "offset": 0,
+                              "_nested": {
+                                "field": "notes",
+                                "offset": 0
+                              }
+                            },
+                            "_score": 0.83740485,
+                            "highlight": {
+                              "boxes.notes.text": [
+                                "<em>red</em> note"
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "_index": "archive",
+                  "_id": "a1",
+                  "_nested": {
+                    "field": "boxes",
+                    "offset": 1
+                  },
+                  "_score": 0.83740485,
+                  "inner_hits": {
+                    "boxes.notes__highlight": {
+                      "hits": {
+                        "total": {
+                          "value": 1,
+                          "relation": "eq"
+                        },
+                        "max_score": 0.83740485,
+                        "hits": [
+                          {
+                            "_index": "archive",
+                            "_id": "a1",
+                            "_nested": {
+                              "field": "boxes",
+                              "offset": 1,
+                              "_nested": {
+                                "field": "notes",
+                                "offset": 0
+                              }
+                            },
+                            "_score": 0.83740485,
+                            "highlight": {
+                              "boxes.notes.text": [
+                                "<em>red</em> ink"
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  }
+}

@@ -20,6 +20,7 @@ import com.phatjam98.elasticprotos.engine.EngineException
 import com.phatjam98.elasticprotos.engine.EngineProduct
 import com.phatjam98.elasticprotos.engine.Hit
 import com.phatjam98.elasticprotos.engine.IndexOptions
+import com.phatjam98.elasticprotos.engine.NestedHighlight
 import com.phatjam98.elasticprotos.engine.ReindexRequest
 import com.phatjam98.elasticprotos.engine.SearchEngine
 import com.phatjam98.elasticprotos.engine.SearchResult
@@ -698,6 +699,37 @@ abstract class EngineIntegrationSpec extends Specification {
     then:
     firmHits*.id() == ['firm-1']
     firmHits[0].highlight()['name'] == ['[Dewey] Cheatem &amp; Howe LLP']
+  }
+
+  def "nested text fields are highlighted through inner hits, one entry per nested object"() {
+    when: 'two clauses on parties, verified on Elasticsearch 8.19 and 9.5 and OpenSearch 2.19 and 3.9'
+    def compiled = compiler.compile(Criteria.where('parties.name').matches('acme')
+        .or().where('parties.name').matches('globex').end()
+        .highlight('parties.name', 'title').sortBy('id', SortingOrder.ASC).build(), documents)
+    def hits = engine.search([documents.alias()], compiled.body()).hits()
+
+    then:
+    compiled.warnings().isEmpty()
+    hits*.id() == ['doc-1', 'doc-2', 'doc-3']
+    hits*.highlight() == [[:], [:], [:]]
+    hits[0].nestedHighlights() == [
+        new NestedHighlight('parties', [0], ['parties.name': ['<em>Acme</em> Corp']]),
+        new NestedHighlight('parties', [1], ['parties.name': ['<em>Globex</em> Corp']])]
+    hits[1].nestedHighlights() == [new NestedHighlight('parties', [1], ['parties.name': ['<em>Acme</em> Corp']])]
+    hits[2].fragments('parties.name') == ['<em>Globex</em> Corp']
+
+    when: 'the default fields with include_nested: root and nested fragments side by side'
+    def defaults = compiler.compile(Criteria.builder().fullText('acme corp').highlight { it.setIncludeNested(true) }
+        .sortBy('id', SortingOrder.ASC).build(), documents)
+    def all = engine.search([documents.alias()], defaults.body()).hits()
+
+    then:
+    all*.id() == ['doc-1', 'doc-2', 'doc-3']
+    all[0].fragments('title') == ['Merger agreement between <em>Acme</em> and Globex']
+    all[0].fragments('parties.name') == ['<em>Acme</em> <em>Corp</em>', 'Globex <em>Corp</em>']
+    all[1].highlight().isEmpty()
+    all[1].fragments('parties.name') == ['<em>Acme</em> <em>Corp</em>']
+    all[2].nestedHighlights()*.offsets() == [[1]]
   }
 
   // ------------------------------------------------------------------ typed maps

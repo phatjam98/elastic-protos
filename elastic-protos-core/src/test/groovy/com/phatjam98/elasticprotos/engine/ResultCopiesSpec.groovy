@@ -64,7 +64,48 @@ class ResultCopiesSpec extends Specification {
     hit.seqNo() == null
     hit.primaryTerm() == null
     hit.highlight() == [:]
+    hit.nestedHighlights() == []
     hit == new Hit('i', 'id', 1.0d, [a: 1], [], null, null, null, [:])
+    hit == new Hit('i', 'id', 1.0d, [a: 1], [], null, null, null, [:], [])
+    new Hit('i', 'id', 1.0d, [a: 1], [], null, null, null, [:], null).nestedHighlights() == []
+  }
+
+  def "a hit copies its nested highlights, each copying its offsets and fragments"() {
+    given:
+    def offsets = [0, 2]
+    def fragments = ['<em>x</em>']
+    def nested = new NestedHighlight('a.b', offsets, ['a.b.c': fragments, 'a.b.d': null])
+    def list = [nested]
+    def hit = new Hit('i', 'id', null, [:], [], null, null, null, [t: ['root']], list)
+
+    when:
+    offsets << 9
+    fragments << 'y'
+    list << nested
+
+    then:
+    hit.nestedHighlights() == [new NestedHighlight('a.b', [0, 2], ['a.b.c': ['<em>x</em>'], 'a.b.d': []])]
+    hit.fragments('t') == ['root']
+    hit.fragments('a.b.c') == ['<em>x</em>']
+    hit.fragments('nope') == []
+
+    when:
+    hit.nestedHighlights().add(nested)
+
+    then:
+    thrown(UnsupportedOperationException)
+
+    when:
+    hit.nestedHighlights()[0].offsets().add(1)
+
+    then:
+    thrown(UnsupportedOperationException)
+
+    when:
+    new NestedHighlight(null, [], [:])
+
+    then:
+    thrown(NullPointerException)
   }
 
   def "a hit copies its highlights and each fragment list, and a null highlight is empty"() {

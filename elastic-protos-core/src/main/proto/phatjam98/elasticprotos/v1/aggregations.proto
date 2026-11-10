@@ -303,12 +303,16 @@ enum MetricType {
   CARDINALITY = 6;
 }
 
-// Highlighting of the full-text fields a search matched. The fragments come back on each hit
-// (com.phatjam98.elasticprotos.engine.Hit#highlight). Only text fields outside nested objects can
-// be highlighted.
+// Highlighting of the full-text fields a search matched. Fragments of fields outside nested objects
+// come back on each hit (com.phatjam98.elasticprotos.engine.Hit#highlight). Fields inside nested
+// objects are highlighted through inner_hits on the query's nested clauses on their nested path,
+// so the query must have such a clause (outside must_not); their fragments come back per nested
+// object (com.phatjam98.elasticprotos.engine.Hit#nestedHighlights).
 message Highlight {
   // The fields to highlight; empty means every default full-text field of the index that is text
-  // and not inside a nested object.
+  // and, unless include_nested is set, not inside a nested object. A field inside a nested object
+  // whose nested path no clause of the query targets is refused (skipped with a warning when the
+  // compiler is lenient).
   repeated HighlightField fields = 1;
   // The size of a fragment in characters; 0 means the engine default (100).
   int32 fragment_size = 2;
@@ -325,6 +329,14 @@ message Highlight {
   optional bool require_field_match = 6;
   // Whether the field text is HTML-escaped before the tags are inserted (encoder "html").
   bool html_encode = 7;
+  // Whether the default field set (fields empty) also takes the full-text text fields inside
+  // nested objects, for the nested paths the query has a clause on; off by default, since each
+  // such clause then fetches inner hits.
+  bool include_nested = 8;
+  // The most nested objects per hit and nested clause whose fragments are returned (the inner_hits
+  // size); 0 means the engine default (3). The engines refuse more than the index setting
+  // index.max_inner_result_window (100 by default).
+  int32 nested_objects = 9;
 }
 
 // One highlighted field, with optional per-field settings.

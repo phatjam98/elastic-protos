@@ -235,8 +235,9 @@ public final class Criteria {
   /**
    * Highlights matches in text fields with the default {@code <em>} tags.
    *
-   * @param fields the text fields; none means every default full-text field of the index that is
-   *     text and outside nested objects
+   * @param fields the text fields, possibly inside nested objects (the query then needs a
+   *     condition on their nested path; see {@code Highlight.fields}); none means every default
+   *     full-text field of the index that is text and outside nested objects
    * @return this builder
    */
   public Criteria highlight(String... fields) {
