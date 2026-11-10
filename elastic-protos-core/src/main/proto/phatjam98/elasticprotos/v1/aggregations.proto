@@ -306,12 +306,15 @@ enum MetricType {
 // Highlighting of the full-text fields a search matched. Fragments of fields outside nested objects
 // come back on each hit (com.phatjam98.elasticprotos.engine.Hit#highlight). Fields inside nested
 // objects are highlighted through inner_hits on the query's nested clauses on their nested path,
-// so the query must have such a clause (outside must_not); their fragments come back per nested
-// object (com.phatjam98.elasticprotos.engine.Hit#nestedHighlights).
+// with a highlight query that ORs those clauses, so a full-text condition there must be able to
+// mark them up; their fragments come back per nested object, with how many objects matched
+// (com.phatjam98.elasticprotos.engine.Hit#nestedHighlights). A search without hits (page size
+// below zero) compiles no highlighting.
 message Highlight {
   // The fields to highlight; empty means every default full-text field of the index that is text
   // and, unless include_nested is set, not inside a nested object. A field inside a nested object
-  // whose nested path no clause of the query targets is refused (skipped with a warning when the
+  // that no full-text condition of the query on its nested path can mark up (on that field, or on
+  // any field when require_field_match is false) is refused (skipped with a warning when the
   // compiler is lenient).
   repeated HighlightField fields = 1;
   // The size of a fragment in characters; 0 means the engine default (100).
@@ -330,12 +333,13 @@ message Highlight {
   // Whether the field text is HTML-escaped before the tags are inserted (encoder "html").
   bool html_encode = 7;
   // Whether the default field set (fields empty) also takes the full-text text fields inside
-  // nested objects, for the nested paths the query has a clause on; off by default, since each
-  // such clause then fetches inner hits.
+  // nested objects that a condition of the query on their nested path can mark up; off by
+  // default, since each such clause then fetches inner hits.
   bool include_nested = 8;
-  // The most nested objects per hit and nested clause whose fragments are returned (the inner_hits
-  // size); 0 means the engine default (3). The engines refuse more than the index setting
-  // index.max_inner_result_window (100 by default).
+  // The most nested objects per clause and parent object whose fragments are returned, at every
+  // nested level (the inner_hits size); 0 means the engine default (3). At most
+  // QueryCompilerConfig.maxInnerResultWindow (100, the default index.max_inner_result_window).
+  // Hit#nestedHighlights reports how many objects matched, to tell when some were left out.
   int32 nested_objects = 9;
 }
 

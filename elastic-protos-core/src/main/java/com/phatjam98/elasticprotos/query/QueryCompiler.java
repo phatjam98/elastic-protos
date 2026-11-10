@@ -111,7 +111,8 @@ public final class QueryCompiler {
         body.put("aggs", aggs);
       }
     }
-    if (criteria.hasHighlight()) {
+    // a search without hits has nothing to highlight
+    if (criteria.hasHighlight() && !Integer.valueOf(0).equals(body.get("size"))) {
       @SuppressWarnings("unchecked")
       Map<String, Object> query = (Map<String, Object>) body.get("query");
       HighlightCompiler.Compiled highlight = new HighlightCompiler(config, index, warnings)

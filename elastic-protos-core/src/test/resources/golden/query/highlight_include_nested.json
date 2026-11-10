@@ -25,7 +25,15 @@
                 "_source" : false,
                 "highlight" : {
                   "fields" : {
-                    "parties.name" : { }
+                    "parties.name" : {
+                      "highlight_query" : {
+                        "multi_match" : {
+                          "fields" : [ "parties.name" ],
+                          "query" : "acme",
+                          "type" : "best_fields"
+                        }
+                      }
+                    }
                   },
                   "post_tags" : [ "</em>" ],
                   "pre_tags" : [ "<em>" ]

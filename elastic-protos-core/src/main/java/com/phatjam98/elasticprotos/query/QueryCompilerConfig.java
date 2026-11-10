@@ -59,6 +59,9 @@ import java.util.Objects;
  *       the number of range buckets and of filters); date histograms and histograms count as one
  *       bucket, since their count depends on the data. Default 0: no limit, the engine's {@code
  *       search.max_buckets} applies
+ *   <li>{@code maxInnerResultWindow}: the largest {@code Highlight.nested_objects}, the size of
+ *       the inner hits that carry nested highlights; default {@value
+ *       #DEFAULT_MAX_INNER_RESULT_WINDOW}, the default {@code index.max_inner_result_window}
  * </ul>
  */
 public final class QueryCompilerConfig {
@@ -71,6 +74,9 @@ public final class QueryCompilerConfig {
 
   /** The default {@link #maxAggregationDepth()}. */
   public static final int DEFAULT_MAX_AGGREGATION_DEPTH = 3;
+
+  /** The default {@link #maxInnerResultWindow()}. */
+  public static final int DEFAULT_MAX_INNER_RESULT_WINDOW = 100;
 
   private final boolean allowLeadingWildcards;
   private final boolean lenient;
@@ -86,6 +92,7 @@ public final class QueryCompilerConfig {
   private final int maxTermsSize;
   private final int maxAggregationDepth;
   private final long maxAggregationBuckets;
+  private final int maxInnerResultWindow;
 
   private QueryCompilerConfig(Builder builder) {
     if (builder.maxResultWindow <= 0) {
@@ -111,6 +118,10 @@ public final class QueryCompilerConfig {
       throw new IllegalArgumentException(
           "maxAggregationBuckets must not be negative: " + builder.maxAggregationBuckets);
     }
+    if (builder.maxInnerResultWindow <= 0) {
+      throw new IllegalArgumentException(
+          "maxInnerResultWindow must be positive: " + builder.maxInnerResultWindow);
+    }
     if (builder.defaultSize > builder.maxPageSize) {
       throw new IllegalArgumentException("defaultSize " + builder.defaultSize
           + " must not exceed maxPageSize " + builder.maxPageSize);
@@ -135,6 +146,7 @@ public final class QueryCompilerConfig {
     this.maxTermsSize = builder.maxTermsSize;
     this.maxAggregationDepth = builder.maxAggregationDepth;
     this.maxAggregationBuckets = builder.maxAggregationBuckets;
+    this.maxInnerResultWindow = builder.maxInnerResultWindow;
   }
 
   /**
@@ -230,6 +242,11 @@ public final class QueryCompilerConfig {
     return maxAggregationBuckets;
   }
 
+  /** Returns the largest {@code Highlight.nested_objects}. */
+  public int maxInnerResultWindow() {
+    return maxInnerResultWindow;
+  }
+
   /** Returns a copy with {@code allowLeadingWildcards} replaced. */
   public QueryCompilerConfig withAllowLeadingWildcards(boolean value) {
     return toBuilder().allowLeadingWildcards(value).build();
@@ -305,6 +322,11 @@ public final class QueryCompilerConfig {
     return toBuilder().maxAggregationBuckets(value).build();
   }
 
+  /** Returns a copy with {@code maxInnerResultWindow} replaced. */
+  public QueryCompilerConfig withMaxInnerResultWindow(int value) {
+    return toBuilder().maxInnerResultWindow(value).build();
+  }
+
   @Override
   public boolean equals(Object other) {
     return other instanceof QueryCompilerConfig that
@@ -321,14 +343,16 @@ public final class QueryCompilerConfig {
         && maxPageSize == that.maxPageSize
         && maxTermsSize == that.maxTermsSize
         && maxAggregationDepth == that.maxAggregationDepth
-        && maxAggregationBuckets == that.maxAggregationBuckets;
+        && maxAggregationBuckets == that.maxAggregationBuckets
+        && maxInnerResultWindow == that.maxInnerResultWindow;
   }
 
   @Override
   public int hashCode() {
     return Objects.hash(allowLeadingWildcards, lenient, trackTotalHits, maxResultWindow,
         defaultSize, defaultKeepAlive, groupNested, shardDocTiebreaker, allowScriptSort,
-        allowRegex, maxPageSize, maxTermsSize, maxAggregationDepth, maxAggregationBuckets);
+        allowRegex, maxPageSize, maxTermsSize, maxAggregationDepth, maxAggregationBuckets,
+        maxInnerResultWindow);
   }
 
   @Override
@@ -346,7 +370,8 @@ public final class QueryCompilerConfig {
         + ", maxPageSize=" + maxPageSize
         + ", maxTermsSize=" + maxTermsSize
         + ", maxAggregationDepth=" + maxAggregationDepth
-        + ", maxAggregationBuckets=" + maxAggregationBuckets + "]";
+        + ", maxAggregationBuckets=" + maxAggregationBuckets
+        + ", maxInnerResultWindow=" + maxInnerResultWindow + "]";
   }
 
   /** Builds a {@link QueryCompilerConfig}; starts from the {@link #standard()} settings. */
@@ -366,6 +391,7 @@ public final class QueryCompilerConfig {
     private int maxTermsSize = DEFAULT_MAX_TERMS_SIZE;
     private int maxAggregationDepth = DEFAULT_MAX_AGGREGATION_DEPTH;
     private long maxAggregationBuckets = 0;
+    private int maxInnerResultWindow = DEFAULT_MAX_INNER_RESULT_WINDOW;
 
     private Builder() {}
 
@@ -384,6 +410,7 @@ public final class QueryCompilerConfig {
       this.maxTermsSize = config.maxTermsSize;
       this.maxAggregationDepth = config.maxAggregationDepth;
       this.maxAggregationBuckets = config.maxAggregationBuckets;
+      this.maxInnerResultWindow = config.maxInnerResultWindow;
     }
 
     /** Sets whether wildcard queries may start with {@code *}; default false. */
@@ -481,6 +508,16 @@ public final class QueryCompilerConfig {
      */
     public Builder maxAggregationBuckets(long value) {
       this.maxAggregationBuckets = value;
+      return this;
+    }
+
+    /**
+     * Sets the largest {@code Highlight.nested_objects}; default {@value
+     * QueryCompilerConfig#DEFAULT_MAX_INNER_RESULT_WINDOW}. Match it to the index setting {@code
+     * index.max_inner_result_window}.
+     */
+    public Builder maxInnerResultWindow(int value) {
+      this.maxInnerResultWindow = value;
       return this;
     }
 

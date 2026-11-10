@@ -21,6 +21,8 @@ import com.phatjam98.elasticprotos.engine.EngineProduct
 import com.phatjam98.elasticprotos.engine.Hit
 import com.phatjam98.elasticprotos.engine.IndexOptions
 import com.phatjam98.elasticprotos.engine.NestedHighlight
+import com.phatjam98.elasticprotos.engine.NestedLevel
+import com.phatjam98.elasticprotos.engine.NestedTotal
 import com.phatjam98.elasticprotos.engine.ReindexRequest
 import com.phatjam98.elasticprotos.engine.SearchEngine
 import com.phatjam98.elasticprotos.engine.SearchResult
@@ -66,6 +68,7 @@ import com.phatjam98.elasticprotos.proto.SearchCriteria
 import com.phatjam98.elasticprotos.proto.SearchOperationType
 import com.phatjam98.elasticprotos.proto.SortingCriteria
 import com.phatjam98.elasticprotos.proto.SortingOrder
+import com.phatjam98.elasticprotos.proto.example.Binder
 import com.phatjam98.elasticprotos.proto.example.Document
 import com.phatjam98.elasticprotos.proto.example.Firm
 import com.phatjam98.elasticprotos.proto.example.InboxItem
@@ -712,11 +715,15 @@ abstract class EngineIntegrationSpec extends Specification {
     compiled.warnings().isEmpty()
     hits*.id() == ['doc-1', 'doc-2', 'doc-3']
     hits*.highlight() == [[:], [:], [:]]
-    hits[0].nestedHighlights() == [
-        new NestedHighlight('parties', [0], ['parties.name': ['<em>Acme</em> Corp']]),
-        new NestedHighlight('parties', [1], ['parties.name': ['<em>Globex</em> Corp']])]
-    hits[1].nestedHighlights() == [new NestedHighlight('parties', [1], ['parties.name': ['<em>Acme</em> Corp']])]
+    hits[0].nestedHighlights().objects() == [
+        new NestedHighlight([new NestedLevel('parties', 0)], ['parties.name': ['<em>Acme</em> Corp']]),
+        new NestedHighlight([new NestedLevel('parties', 1)], ['parties.name': ['<em>Globex</em> Corp']])]
+    hits[1].nestedHighlights().objects() ==
+        [new NestedHighlight([new NestedLevel('parties', 1)], ['parties.name': ['<em>Acme</em> Corp']])]
     hits[2].fragments('parties.name') == ['<em>Globex</em> Corp']
+    hits*.nestedHighlights()*.totals() == [[new NestedTotal([], 'parties', 1, 2, false)],
+                                           [new NestedTotal([], 'parties', 1, 1, false)],
+                                           [new NestedTotal([], 'parties', 1, 1, false)]]
 
     when: 'the default fields with include_nested: root and nested fragments side by side'
     def defaults = compiler.compile(Criteria.builder().fullText('acme corp').highlight { it.setIncludeNested(true) }
@@ -729,7 +736,64 @@ abstract class EngineIntegrationSpec extends Specification {
     all[0].fragments('parties.name') == ['<em>Acme</em> <em>Corp</em>', 'Globex <em>Corp</em>']
     all[1].highlight().isEmpty()
     all[1].fragments('parties.name') == ['<em>Acme</em> <em>Corp</em>']
-    all[2].nestedHighlights()*.offsets() == [[1]]
+    all[2].nestedHighlights().objects()*.offsets() == [[1]]
+  }
+
+  def "nested highlighting two levels deep, under a plain object, across OR branches, with truncation totals"() {
+    given: 'the binders, indexed into their own alias'
+    IndexDefinition binders = mapper.map(Binder)
+    migrator.apply(migrator.plan(Binder))
+    engine.bulk(SampleData.binders().collect { BulkOp.index(binders.alias(), it.id, codec.toDocument(it)) })
+    engine.refresh(binders.alias())
+
+    when: 'notes matching "red" in three sections of binder-1, at most 2 objects per clause'
+    def compiled = compiler.compile(Criteria.where('sections.notes.text').matches('red').end()
+        .highlight { it.addFields(com.phatjam98.elasticprotos.proto.HighlightField.newBuilder().setField('sections.notes.text'))
+            .setNestedObjects(2) }.sortBy('id', SortingOrder.ASC).build(), binders)
+    def hits = engine.search([binders.alias()], compiled.body()).hits()
+    def nested = hits[0].nestedHighlights()
+
+    then: 'verified on Elasticsearch 8.19 and 9.5 and OpenSearch 2.19 and 3.9'
+    compiled.warnings().isEmpty()
+    hits*.id() == ['binder-1']
+    nested.objects()*.levels() == [[new NestedLevel('sections', 0), new NestedLevel('notes', 0)],
+                                   [new NestedLevel('sections', 0), new NestedLevel('notes', 2)],
+                                   [new NestedLevel('sections', 1), new NestedLevel('notes', 0)]]
+    nested.fragments('sections.notes.text') == ['<em>red</em> apple', '<em>red</em> fox', '<em>red</em> sun']
+
+    and: 'three sections matched but two came back, so the third section\'s note is missing'
+    nested.isTruncated()
+    nested.totals() == [new NestedTotal([], 'sections', 3, 2, true),
+                        new NestedTotal([new NestedLevel('sections', 0)], 'sections.notes', 2, 2, false),
+                        new NestedTotal([new NestedLevel('sections', 1)], 'sections.notes', 1, 1, false)]
+
+    and: 'the levels lead back to the message'
+    def binder = codec.fromHit(hits[0], Binder)
+    nested.objects().collect { object ->
+      binder.getSections(object.levels()[0].offset()).getNotes(object.levels()[1].offset()).text
+    } == ['red apple', 'red fox', 'red sun']
+
+    when: 'a nested array under a plain object of a nested object keeps its level boundary'
+    def annotations = engine.search([binders.alias()], compiler.compile(Criteria.where('sections.meta.annotations.text')
+        .matches('ink').end().highlight('sections.meta.annotations.text').build(), binders).body()).hits()
+    def annotation = annotations[0].nestedHighlights().objects()[0]
+
+    then:
+    annotation.levels() == [new NestedLevel('sections', 0), new NestedLevel('meta.annotations', 1)]
+    annotation.path() == 'sections.meta.annotations'
+    annotation.highlight() == ['sections.meta.annotations.text': ['red <em>ink</em>']]
+    !annotations[0].nestedHighlights().isTruncated()
+
+    when: 'two OR branches on one path mark up the same terms whichever returned the object'
+    def headings = engine.search([binders.alias()], compiler.compile(Criteria.where('sections.heading').matches('red')
+        .or().where('sections.heading').matches('section').end().highlight('sections.heading')
+        .sortBy('id', SortingOrder.ASC).build(), binders).body()).hits()
+
+    then:
+    headings*.id() == ['binder-1', 'binder-2']
+    headings[0].fragments('sections.heading') ==
+        ['<em>red</em> <em>section</em>', 'blue <em>section</em>', 'green <em>section</em>']
+    headings[1].fragments('sections.heading') == ['<em>red</em> heading']
   }
 
   // ------------------------------------------------------------------ typed maps

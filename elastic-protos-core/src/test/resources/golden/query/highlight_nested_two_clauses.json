@@ -11,7 +11,21 @@
                 "_source" : false,
                 "highlight" : {
                   "fields" : {
-                    "parties.name" : { }
+                    "parties.name" : {
+                      "highlight_query" : {
+                        "bool" : {
+                          "should" : [ {
+                            "match" : {
+                              "parties.name" : "acme"
+                            }
+                          }, {
+                            "match" : {
+                              "parties.name" : "globex"
+                            }
+                          } ]
+                        }
+                      }
+                    }
                   },
                   "post_tags" : [ "</em>" ],
                   "pre_tags" : [ "<em>" ]
@@ -36,7 +50,21 @@
                 "_source" : false,
                 "highlight" : {
                   "fields" : {
-                    "parties.name" : { }
+                    "parties.name" : {
+                      "highlight_query" : {
+                        "bool" : {
+                          "should" : [ {
+                            "match" : {
+                              "parties.name" : "acme"
+                            }
+                          }, {
+                            "match" : {
+                              "parties.name" : "globex"
+                            }
+                          } ]
+                        }
+                      }
+                    }
                   },
                   "post_tags" : [ "</em>" ],
                   "pre_tags" : [ "<em>" ]

@@ -184,18 +184,15 @@ message Shelf {
   repeated Child books = 3;     // nested inside shelves
 }
 
-// Text two nested levels deep, for highlighting through inner hits.
-message Archive {
-  string id = 1;
-  string title = 2 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
-  repeated Box boxes = 3;       // nested
+// A typed map whose values hold nested objects with text, for highlighting inside them.
+message Folders {
+  map<string, Folder> folders = 1 [(phatjam98.elasticprotos.v1.elastic_field).type = OBJECT];
 }
 
-message Box {
-  string label = 1 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
-  repeated Note notes = 2;      // nested inside boxes
+message Folder {
+  repeated Page pages = 1;      // nested inside each value of the typed map
 }
 
-message Note {
+message Page {
   string text = 1 [(phatjam98.elasticprotos.v1.elastic_field).type = TEXT];
 }

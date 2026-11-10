@@ -12,6 +12,9 @@ import com.phatjam98.elasticprotos.engine.Hit;
 import com.phatjam98.elasticprotos.engine.IndexOptions;
 import com.phatjam98.elasticprotos.engine.IndexResult;
 import com.phatjam98.elasticprotos.engine.NestedHighlight;
+import com.phatjam98.elasticprotos.engine.NestedHighlights;
+import com.phatjam98.elasticprotos.engine.NestedLevel;
+import com.phatjam98.elasticprotos.engine.NestedTotal;
 import com.phatjam98.elasticprotos.engine.Pit;
 import com.phatjam98.elasticprotos.engine.ReindexRequest;
 import com.phatjam98.elasticprotos.engine.ReindexResult;
@@ -25,7 +28,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -742,52 +744,112 @@ public final class JsonRestEngine implements SearchEngine {
   }
 
   /**
-   * Reads the highlighted fragments of a hit's inner hits, at every level of {@code inner_hits}
-   * inside inner hits: one entry per nested object, identified by its {@code _nested} path and
-   * offsets, with the fragments of every inner hit of that object merged (several nested clauses
-   * on one path return the same object once each). Objects without fragments are left out.
+   * Reads the inner hits of a hit, at every level of {@code inner_hits} inside inner hits, into
+   * one {@link NestedHighlight} per nested object that has fragments and one {@link NestedTotal}
+   * per nested path and parent object.
+   *
+   * <p>An object returned by several inner hits (several clauses on one path) is identified by its
+   * levels; the fragments of each field are taken from the first inner hit that has them, as
+   * returned, since the compiler gives every clause on a path the same highlight query. An inner
+   * hit whose {@code _nested} lacks a field or a numeric offset cannot be placed and is skipped,
+   * together with the objects below it, rather than mistaken for the first object.
    */
-  private static List<NestedHighlight> nestedHighlights(Object innerHits) {
-    Map<String, NestedFragments> merged = new TreeMap<>();
-    collectNested(innerHits, merged);
-    List<NestedHighlight> out = new ArrayList<>();
-    for (NestedFragments fragments : merged.values()) {
-      Map<String, List<String>> highlight = new TreeMap<>();
-      fragments.fields().forEach((field, values) -> highlight.put(field, new ArrayList<>(values)));
-      out.add(new NestedHighlight(fragments.path(), fragments.offsets(), highlight));
-    }
-    return out;
-  }
-
-  /** The merged fragments of one nested object. */
-  private record NestedFragments(String path, List<Integer> offsets,
-      Map<String, LinkedHashSet<String>> fields) {}
-
-  private static void collectNested(Object innerHits,
-      Map<String, NestedFragments> merged) {
-    for (Object entry : map(innerHits).values()) {
-      for (Map<String, Object> hit : list(map(map(entry).get("hits")).get("hits"))) {
-        List<String> segments = new ArrayList<>();
-        List<Integer> offsets = new ArrayList<>();
-        for (Map<String, Object> nested = map(hit.get("_nested")); !nested.isEmpty();
-            nested = map(nested.get("_nested"))) {
-          segments.add(string(nested.get("field")));
-          offsets.add(nested.get("offset") instanceof Number n ? n.intValue() : 0);
-        }
-        Map<String, List<String>> highlight = highlight(hit.get("highlight"));
-        if (!segments.isEmpty() && !highlight.isEmpty()) {
-          String path = String.join(".", segments);
-          // sorts by path, then by offsets, each zero-padded so that 10 follows 9
-          StringBuilder key = new StringBuilder(path);
-          offsets.forEach(offset -> key.append('\u0000').append(String.format("%010d", offset)));
-          NestedFragments fragments = merged.computeIfAbsent(key.toString(),
-              k -> new NestedFragments(path, List.copyOf(offsets), new TreeMap<>()));
-          highlight.forEach((field, values) -> fragments.fields()
-              .computeIfAbsent(field, k -> new LinkedHashSet<>()).addAll(values));
-        }
-        collectNested(hit.get("inner_hits"), merged);
+  private static NestedHighlights nestedHighlights(Object innerHits) {
+    Map<String, NestedObject> objects = new TreeMap<>();
+    Map<String, TotalBuilder> totals = new TreeMap<>();
+    collectNested(innerHits, List.of(), objects, totals);
+    List<NestedHighlight> highlights = new ArrayList<>();
+    for (NestedObject object : objects.values()) {
+      if (!object.fields().isEmpty()) {
+        highlights.add(new NestedHighlight(object.levels(), object.fields()));
       }
     }
+    List<NestedTotal> counts = new ArrayList<>();
+    for (TotalBuilder total : totals.values()) {
+      counts.add(new NestedTotal(total.parent, total.path, total.matched, total.returned.size(),
+          total.truncated));
+    }
+    return NestedHighlights.of(highlights, counts);
+  }
+
+  /** The fragments of one nested object, by field. */
+  private record NestedObject(List<NestedLevel> levels, Map<String, List<String>> fields) {}
+
+  /** The counts of one nested path under one parent, while they are collected. */
+  private static final class TotalBuilder {
+    private final List<NestedLevel> parent;
+    private final String path;
+    private long matched;
+    private boolean truncated;
+    private final Set<String> returned = new TreeSet<>();
+
+    TotalBuilder(List<NestedLevel> parent, String path) {
+      this.parent = parent;
+      this.path = path;
+    }
+  }
+
+  private static void collectNested(Object innerHits, List<NestedLevel> parent,
+      Map<String, NestedObject> objects, Map<String, TotalBuilder> totals) {
+    for (Object entry : map(innerHits).values()) {
+      Map<String, Object> hits = map(map(entry).get("hits"));
+      List<Map<String, Object>> list = list(hits.get("hits"));
+      Object total = map(hits.get("total")).get("value");
+      if (!(total instanceof Number)) {
+        total = hits.get("total");
+      }
+      long matched = total instanceof Number number ? number.longValue() : list.size();
+      TotalBuilder counts = null;
+      for (Map<String, Object> hit : list) {
+        List<NestedLevel> levels = levels(hit.get("_nested"));
+        if (levels == null || levels.size() <= parent.size()) {
+          continue;
+        }
+        String key = key(levels);
+        if (counts == null) {
+          String path = String.join(".", levels.subList(parent.size(), levels.size()).stream()
+              .map(NestedLevel::field).toList());
+          String parentPath = String.join(".",
+              parent.stream().map(NestedLevel::field).toList());
+          String fullPath = parentPath.isEmpty() ? path : parentPath + "." + path;
+          counts = totals.computeIfAbsent(key(parent) + '\u0001' + fullPath,
+              k -> new TotalBuilder(parent, fullPath));
+          counts.matched = Math.max(counts.matched, matched);
+          counts.truncated |= matched > list.size();
+        }
+        counts.returned.add(key);
+        NestedObject object = objects.computeIfAbsent(key,
+            k -> new NestedObject(levels, new TreeMap<>()));
+        highlight(hit.get("highlight"))
+            .forEach((field, fragments) -> object.fields().putIfAbsent(field, fragments));
+        collectNested(hit.get("inner_hits"), levels, objects, totals);
+      }
+    }
+  }
+
+  /** Reads a {@code _nested} chain; returns null when a level has no field or offset. */
+  private static List<NestedLevel> levels(Object nested) {
+    List<NestedLevel> levels = new ArrayList<>();
+    for (Map<String, Object> level = map(nested); !level.isEmpty();
+        level = map(level.get("_nested"))) {
+      Object field = level.get("field");
+      Object offset = level.get("offset");
+      if (field == null || !(offset instanceof Number number)) {
+        return null;
+      }
+      levels.add(new NestedLevel(String.valueOf(field), number.intValue()));
+    }
+    return levels.isEmpty() ? null : List.copyOf(levels);
+  }
+
+  /** A sort key: each level's field, then its offset zero-padded so that 10 follows 9. */
+  private static String key(List<NestedLevel> levels) {
+    StringBuilder key = new StringBuilder();
+    for (NestedLevel level : levels) {
+      key.append(level.field()).append('\u0000').append(String.format("%010d", level.offset()))
+          .append('\u0000');
+    }
+    return key.toString();
   }
 
   private RawHttp.Response getRequest(String path, Map<String, String> params) {

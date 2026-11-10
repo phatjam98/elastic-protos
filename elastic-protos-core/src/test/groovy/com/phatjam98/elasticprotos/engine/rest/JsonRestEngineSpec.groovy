@@ -6,6 +6,9 @@ import com.phatjam98.elasticprotos.engine.EngineException
 import com.phatjam98.elasticprotos.engine.EngineProduct
 import com.phatjam98.elasticprotos.engine.IndexOptions
 import com.phatjam98.elasticprotos.engine.NestedHighlight
+import com.phatjam98.elasticprotos.engine.NestedHighlights
+import com.phatjam98.elasticprotos.engine.NestedLevel
+import com.phatjam98.elasticprotos.engine.NestedTotal
 import com.phatjam98.elasticprotos.engine.Pit
 import com.phatjam98.elasticprotos.engine.ReindexRequest
 import com.phatjam98.elasticprotos.engine.SearchResult
@@ -878,47 +881,73 @@ class JsonRestEngineSpec extends Specification {
   }
 
   /**
-   * Responses recorded from Elasticsearch 9.5.5 to the golden-equivalent bodies of the nested
-   * highlight scenarios (testkit sample documents, and an index of the test proto Archive). The
-   * hits of Elasticsearch 8.19.23 and OpenSearch 2.19.7 and 3.9.0 were identical apart from scores.
+   * Responses recorded from Elasticsearch 9.5.5 to compiled nested highlight searches over the
+   * testkit sample binders and documents. The hits of Elasticsearch 8.19.23 and OpenSearch 2.19.7
+   * and 3.9.0 were identical apart from scores.
    */
   static String recorded(String name) {
     new File("src/test/resources/responses/search-nested-highlight-${name}.json").text
   }
 
-  def "nested highlights come from the inner hits of two clauses on one path, one entry per object"() {
-    given:
+  static NestedLevel at(String field, int offset) {
+    new NestedLevel(field, offset)
+  }
+
+  def "an object returned by two clauses on one path is one entry with one set of fragments"() {
+    given: 'heading matches "red" OR "section"; both clauses share a highlight query'
     http.enqueue(200, recorded('two-clauses'))
 
     when:
-    def hits = engine.search(['documents'], [:]).hits()
+    def hits = engine.search(['binders'], [:]).hits()
 
     then:
-    hits*.id() == ['doc-1', 'doc-2', 'doc-3']
-    hits*.highlight() == [[:], [:], [:]]
-    hits[0].nestedHighlights() == [
-        new NestedHighlight('parties', [0], ['parties.name': ['<em>Acme</em> Corp']]),
-        new NestedHighlight('parties', [1], ['parties.name': ['<em>Globex</em> Corp']])]
-    hits[1].nestedHighlights() == [new NestedHighlight('parties', [1], ['parties.name': ['<em>Acme</em> Corp']])]
-    hits[2].nestedHighlights()*.offsets() == [[1]]
-    hits[0].fragments('parties.name') == ['<em>Acme</em> Corp', '<em>Globex</em> Corp']
-    hits[0].fragments('title') == []
+    hits*.id() == ['binder-1', 'binder-2']
+    hits*.highlight() == [[:], [:]]
+    hits[0].nestedHighlights().objects() == [
+        new NestedHighlight([at('sections', 0)], ['sections.heading': ['<em>red</em> <em>section</em>']]),
+        new NestedHighlight([at('sections', 1)], ['sections.heading': ['blue <em>section</em>']]),
+        new NestedHighlight([at('sections', 2)], ['sections.heading': ['green <em>section</em>']])]
+    hits[0].nestedHighlights().totals() == [new NestedTotal([], 'sections', 3, 3, false)]
+    !hits[0].nestedHighlights().isTruncated()
+    hits[1].fragments('sections.heading') == ['<em>red</em> heading']
+    hits[1].nestedHighlights().totals() == [new NestedTotal([], 'sections', 1, 1, false)]
   }
 
-  def "nested highlights two levels deep are found inside the inner hits of the outer clause"() {
-    given:
+  def "two levels, truncated at the outer level: the totals say where objects were left out"() {
+    given: 'notes matching "red" in three sections, nested_objects 2'
     http.enqueue(200, recorded('two-levels'))
 
     when:
-    def hit = engine.search(['archive'], [:]).hits()[0]
+    def nested = engine.search(['binders'], [:]).hits()[0].nestedHighlights()
 
-    then: 'the outer carrier hits have no fragments of their own and are left out'
-    hit.id() == 'a1'
-    hit.nestedHighlights() == [
-        new NestedHighlight('boxes', [0], ['boxes.label': ['<em>red</em> box']]),
-        new NestedHighlight('boxes.notes', [0, 0], ['boxes.notes.text': ['<em>red</em> note']]),
-        new NestedHighlight('boxes.notes', [1, 0], ['boxes.notes.text': ['<em>red</em> ink']])]
-    hit.fragments('boxes.notes.text') == ['<em>red</em> note', '<em>red</em> ink']
+    then: 'the carrier level has no fragments of its own'
+    nested.objects() == [
+        new NestedHighlight([at('sections', 0), at('notes', 0)], ['sections.notes.text': ['<em>red</em> apple']]),
+        new NestedHighlight([at('sections', 0), at('notes', 2)], ['sections.notes.text': ['<em>red</em> fox']]),
+        new NestedHighlight([at('sections', 1), at('notes', 0)], ['sections.notes.text': ['<em>red</em> sun']])]
+    nested.objects()*.path() == ['sections.notes'] * 3
+    nested.objects()*.offsets() == [[0, 0], [0, 2], [1, 0]]
+
+    and: 'three sections matched, two came back; the notes of those two are complete'
+    nested.totals() == [
+        new NestedTotal([], 'sections', 3, 2, true),
+        new NestedTotal([at('sections', 0)], 'sections.notes', 2, 2, false),
+        new NestedTotal([at('sections', 1)], 'sections.notes', 1, 1, false)]
+    nested.isTruncated()
+    nested.fragments('sections.notes.text') == ['<em>red</em> apple', '<em>red</em> fox', '<em>red</em> sun']
+  }
+
+  def "a nested array under a plain object keeps its level boundary"() {
+    given:
+    http.enqueue(200, recorded('object-between'))
+
+    when:
+    def object = engine.search(['binders'], [:]).hits()[0].nestedHighlights().objects()[0]
+
+    then:
+    object.levels() == [at('sections', 0), at('meta.annotations', 1)]
+    object.path() == 'sections.meta.annotations'
+    object.highlight() == ['sections.meta.annotations.text': ['red <em>ink</em>']]
   }
 
   def "root and nested highlights side by side, from the default fields with include_nested"() {
@@ -931,26 +960,37 @@ class JsonRestEngineSpec extends Specification {
     then:
     hit.highlight().keySet() == ['body', 'title'] as Set
     hit.fragments('title') == ['Merger agreement between <em>Acme</em> and Globex']
-    hit.nestedHighlights()*.highlight() == [['parties.name': ['<em>Acme</em> <em>Corp</em>']],
-                                            ['parties.name': ['Globex <em>Corp</em>']]]
+    hit.nestedHighlights().objects()*.highlight() == [['parties.name': ['<em>Acme</em> <em>Corp</em>']],
+                                                      ['parties.name': ['Globex <em>Corp</em>']]]
   }
 
-  def "the same nested object from several inner hits is merged, fragments deduplicated, offsets sorted numerically"() {
+  def "fragments of one object come from the first inner hit that has them, repeats kept; unplaceable hits are skipped"() {
     given:
-    def inner = { name, offset, fragments -> [hits: [hits: [[_nested: [field: 'p', offset: offset], highlight: [(name): fragments]]]]] }
+    def inner = { field, offset, fragments, total = 1 ->
+      [hits: [total: [value: total, relation: 'eq'], hits: [[_nested: [field: 'p', offset: offset], highlight: [(field): fragments]]]]]
+    }
     http.enqueue(200, [hits: [total: [value: 1, relation: 'eq'], hits: [[_index: 'i', _id: '1', _source: [:], inner_hits: [
-        a: inner('p.x', 10, ['one', 'two']),
-        b: inner('p.x', 10, ['two', 'three']),
+        a: inner('p.x', 10, ['same', 'same'], 4),
+        b: inner('p.x', 10, ['other']),
         c: inner('p.y', 9, ['y']),
-        d: [hits: [hits: [[_nested: [field: 'p', offset: 2]], [highlight: [z: ['no nested']]]]]],
+        d: [hits: [total: 2, hits: [[_nested: [field: 'p']], [_nested: [offset: 1]], [highlight: [z: ['no nested']]]]]],
         e: 'odd']]]]])
 
     when:
-    def hit = engine.search(['i'], [:]).hits()[0]
+    def nested = engine.search(['i'], [:]).hits()[0].nestedHighlights()
 
     then:
-    hit.nestedHighlights() == [new NestedHighlight('p', [9], ['p.y': ['y']]),
-                               new NestedHighlight('p', [10], ['p.x': ['one', 'two', 'three']])]
+    nested.objects() == [new NestedHighlight([at('p', 9)], ['p.y': ['y']]),
+                         new NestedHighlight([at('p', 10)], ['p.x': ['same', 'same']])]
+    nested.totals() == [new NestedTotal([], 'p', 4, 2, true)]
+  }
+
+  def "a hit without inner hits has empty nested highlights"() {
+    given:
+    http.enqueue(200, [hits: [total: [value: 1, relation: 'eq'], hits: [[_index: 'i', _id: '1', _source: [:]]]]])
+
+    expect:
+    engine.search(['i'], [:]).hits()[0].nestedHighlights().is(NestedHighlights.empty())
   }
 
   def "a highlight entry that is not a list has no fragments"() {

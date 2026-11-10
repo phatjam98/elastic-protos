@@ -240,8 +240,10 @@ class QueryCompilerGoldenSpec extends Specification {
 
   def "highlight on two nested levels compiles to its golden body"() {
     when:
-    CompiledSearch compiled = strict.compile(Criteria.where('boxes.notes.text').matches('red').and('boxes.label').matches('red')
-        .end().highlight('boxes.label', 'boxes.notes.text').build(), mapper.map(com.phatjam98.elasticprotos.proto.test.Archive))
+    CompiledSearch compiled = strict.compile(Criteria.where('sections.notes.text').matches('red').and('sections.heading').matches('red')
+        .end().highlight { it.addFields(com.phatjam98.elasticprotos.proto.HighlightField.newBuilder().setField('sections.heading'))
+            .addFields(com.phatjam98.elasticprotos.proto.HighlightField.newBuilder().setField('sections.notes.text')).setNestedObjects(2) }
+        .build(), mapper.map(com.phatjam98.elasticprotos.proto.example.Binder))
 
     then:
     compiled.warnings().isEmpty()

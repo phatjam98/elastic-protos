@@ -7,6 +7,8 @@ import com.google.protobuf.Value;
 import com.google.protobuf.util.Timestamps;
 import com.phatjam98.elasticprotos.proto.LatLon;
 import com.phatjam98.elasticprotos.proto.example.Address;
+import com.phatjam98.elasticprotos.proto.example.Binder;
+import com.phatjam98.elasticprotos.proto.example.BinderNote;
 import com.phatjam98.elasticprotos.proto.example.Document;
 import com.phatjam98.elasticprotos.proto.example.DocumentType;
 import com.phatjam98.elasticprotos.proto.example.Firm;
@@ -16,6 +18,8 @@ import com.phatjam98.elasticprotos.proto.example.InboxStatus;
 import com.phatjam98.elasticprotos.proto.example.Office;
 import com.phatjam98.elasticprotos.proto.example.Party;
 import com.phatjam98.elasticprotos.proto.example.PartyRole;
+import com.phatjam98.elasticprotos.proto.example.Section;
+import com.phatjam98.elasticprotos.proto.example.SectionMeta;
 import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.List;
@@ -175,6 +179,36 @@ public final class SampleData {
           .build());
     }
     return items;
+  }
+
+  /**
+   * Returns two binders for nested highlighting. {@code binder-1} has three sections, each with
+   * notes about "red" (two in the first), and an annotation "red ink" under the first section's
+   * meta; {@code binder-2} mentions "red" only in a heading.
+   */
+  public static List<Binder> binders() {
+    return List.of(
+        Binder.newBuilder()
+            .setId("binder-1")
+            .setTitle("Field notes")
+            .addSections(Section.newBuilder().setHeading("red section")
+                .addNotes(note("red apple")).addNotes(note("blue sky")).addNotes(note("red fox"))
+                .setMeta(SectionMeta.newBuilder().addAnnotations(note("blue pen"))
+                    .addAnnotations(note("red ink"))))
+            .addSections(Section.newBuilder().setHeading("blue section")
+                .addNotes(note("red sun")))
+            .addSections(Section.newBuilder().setHeading("green section")
+                .addNotes(note("red rose")))
+            .build(),
+        Binder.newBuilder()
+            .setId("binder-2")
+            .setTitle("Plain binder")
+            .addSections(Section.newBuilder().setHeading("red heading").addNotes(note("plain")))
+            .build());
+  }
+
+  private static BinderNote note(String text) {
+    return BinderNote.newBuilder().setText(text).build();
   }
 
   /** Returns a lat/lon point. */

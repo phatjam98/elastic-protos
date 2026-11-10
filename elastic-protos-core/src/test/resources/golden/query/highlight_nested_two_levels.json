@@ -8,31 +8,58 @@
             "_source" : false,
             "highlight" : {
               "fields" : {
-                "boxes.label" : { }
+                "sections.heading" : {
+                  "highlight_query" : {
+                    "bool" : {
+                      "should" : [ {
+                        "nested" : {
+                          "path" : "sections.notes",
+                          "query" : {
+                            "match" : {
+                              "sections.notes.text" : "red"
+                            }
+                          }
+                        }
+                      }, {
+                        "match" : {
+                          "sections.heading" : "red"
+                        }
+                      } ]
+                    }
+                  }
+                }
               },
               "post_tags" : [ "</em>" ],
               "pre_tags" : [ "<em>" ]
             },
-            "name" : "boxes__highlight"
+            "name" : "sections__highlight",
+            "size" : 2
           },
-          "path" : "boxes",
+          "path" : "sections",
           "query" : {
             "nested" : {
               "inner_hits" : {
                 "_source" : false,
                 "highlight" : {
                   "fields" : {
-                    "boxes.notes.text" : { }
+                    "sections.notes.text" : {
+                      "highlight_query" : {
+                        "match" : {
+                          "sections.notes.text" : "red"
+                        }
+                      }
+                    }
                   },
                   "post_tags" : [ "</em>" ],
                   "pre_tags" : [ "<em>" ]
                 },
-                "name" : "boxes.notes__highlight"
+                "name" : "sections.notes__highlight",
+                "size" : 2
               },
-              "path" : "boxes.notes",
+              "path" : "sections.notes",
               "query" : {
                 "match" : {
-                  "boxes.notes.text" : "red"
+                  "sections.notes.text" : "red"
                 }
               }
             }
@@ -44,17 +71,37 @@
             "_source" : false,
             "highlight" : {
               "fields" : {
-                "boxes.label" : { }
+                "sections.heading" : {
+                  "highlight_query" : {
+                    "bool" : {
+                      "should" : [ {
+                        "nested" : {
+                          "path" : "sections.notes",
+                          "query" : {
+                            "match" : {
+                              "sections.notes.text" : "red"
+                            }
+                          }
+                        }
+                      }, {
+                        "match" : {
+                          "sections.heading" : "red"
+                        }
+                      } ]
+                    }
+                  }
+                }
               },
               "post_tags" : [ "</em>" ],
               "pre_tags" : [ "<em>" ]
             },
-            "name" : "boxes__highlight2"
+            "name" : "sections__highlight2",
+            "size" : 2
           },
-          "path" : "boxes",
+          "path" : "sections",
           "query" : {
             "match" : {
-              "boxes.label" : "red"
+              "sections.heading" : "red"
             }
           }
         }

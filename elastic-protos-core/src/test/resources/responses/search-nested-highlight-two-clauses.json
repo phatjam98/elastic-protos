@@ -1,5 +1,5 @@
 {
-  "took": 119,
+  "took": 79,
   "timed_out": false,
   "_shards": {
     "total": 1,
@@ -9,89 +9,137 @@
   },
   "hits": {
     "total": {
-      "value": 3,
+      "value": 2,
       "relation": "eq"
     },
     "max_score": null,
     "hits": [
       {
-        "_index": "documents-vd458ad60",
-        "_id": "doc-1",
+        "_index": "binders",
+        "_id": "binder-1",
         "_score": null,
         "_source": {
-          "body": "This merger agreement sets out the terms under which Acme Corp acquires Globex Corp, including the exchange ratio and closing conditions.",
-          "checksum": "c2hhMjU2Om1lcmdlcg==",
-          "filed_at": "2024-01-15T10:30:00.250Z",
-          "firm_id": "firm-1",
-          "id": "doc-1",
-          "parties": [
+          "id": "binder-1",
+          "sections": [
             {
-              "email": "legal@acme.example",
-              "name": "Acme Corp",
-              "role": "PLAINTIFF"
+              "heading": "red section",
+              "meta": {
+                "annotations": [
+                  {
+                    "text": "blue pen"
+                  },
+                  {
+                    "text": "red ink"
+                  }
+                ]
+              },
+              "notes": [
+                {
+                  "text": "red apple"
+                },
+                {
+                  "text": "blue sky"
+                },
+                {
+                  "text": "red fox"
+                }
+              ]
             },
             {
-              "email": "",
-              "name": "Globex Corp",
-              "role": "DEFENDANT"
+              "heading": "blue section",
+              "notes": [
+                {
+                  "text": "red sun"
+                }
+              ]
+            },
+            {
+              "heading": "green section",
+              "notes": [
+                {
+                  "text": "red rose"
+                }
+              ]
             }
           ],
-          "size_bytes": 120000,
-          "tags": [
-            "corporate",
-            "m-and-a"
-          ],
-          "title": "Merger agreement between Acme and Globex",
-          "type": "FILING"
+          "title": "Field notes"
         },
         "sort": [
-          "doc-1"
+          "binder-1"
         ],
         "inner_hits": {
-          "parties__highlight": {
+          "sections__highlight2": {
             "hits": {
               "total": {
-                "value": 1,
+                "value": 3,
                 "relation": "eq"
               },
-              "max_score": 1.2809337,
+              "max_score": 0.35667494,
               "hits": [
                 {
-                  "_index": "documents-vd458ad60",
-                  "_id": "doc-1",
+                  "_index": "binders",
+                  "_id": "binder-1",
                   "_nested": {
-                    "field": "parties",
+                    "field": "sections",
                     "offset": 0
                   },
-                  "_score": 1.2809337,
+                  "_score": 0.35667494,
                   "highlight": {
-                    "parties.name": [
-                      "<em>Acme</em> Corp"
+                    "sections.heading": [
+                      "<em>red</em> <em>section</em>"
+                    ]
+                  }
+                },
+                {
+                  "_index": "binders",
+                  "_id": "binder-1",
+                  "_nested": {
+                    "field": "sections",
+                    "offset": 1
+                  },
+                  "_score": 0.35667494,
+                  "highlight": {
+                    "sections.heading": [
+                      "blue <em>section</em>"
+                    ]
+                  }
+                },
+                {
+                  "_index": "binders",
+                  "_id": "binder-1",
+                  "_nested": {
+                    "field": "sections",
+                    "offset": 2
+                  },
+                  "_score": 0.35667494,
+                  "highlight": {
+                    "sections.heading": [
+                      "green <em>section</em>"
                     ]
                   }
                 }
               ]
             }
           },
-          "parties__highlight2": {
+          "sections__highlight": {
             "hits": {
               "total": {
                 "value": 1,
                 "relation": "eq"
               },
-              "max_score": 1.2809337,
+              "max_score": 0.6931471,
               "hits": [
                 {
-                  "_index": "documents-vd458ad60",
-                  "_id": "doc-1",
+                  "_index": "binders",
+                  "_id": "binder-1",
                   "_nested": {
-                    "field": "parties",
-                    "offset": 1
+                    "field": "sections",
+                    "offset": 0
                   },
-                  "_score": 1.2809337,
+                  "_score": 0.6931471,
                   "highlight": {
-                    "parties.name": [
-                      "<em>Globex</em> Corp"
+                    "sections.heading": [
+                      "<em>red</em> <em>section</em>"
                     ]
                   }
                 }
@@ -101,108 +149,28 @@
         }
       },
       {
-        "_index": "documents-vd458ad60",
-        "_id": "doc-2",
+        "_index": "binders",
+        "_id": "binder-2",
         "_score": null,
         "_source": {
-          "body": "The defendant moves to dismiss the complaint for failure to state a claim upon which relief can be granted.",
-          "filed_at": "2024-02-20T14:00:00Z",
-          "firm_id": "firm-2",
-          "id": "doc-2",
-          "parties": [
+          "id": "binder-2",
+          "sections": [
             {
-              "email": "jane@doe.example",
-              "name": "Jane Doe",
-              "role": "PLAINTIFF"
-            },
-            {
-              "email": "legal@acme.example",
-              "name": "Acme Corp",
-              "role": "DEFENDANT"
-            }
-          ],
-          "size_bytes": 45000,
-          "tags": [
-            "civil",
-            "urgent"
-          ],
-          "title": "Motion to dismiss",
-          "type": "MOTION"
-        },
-        "sort": [
-          "doc-2"
-        ],
-        "inner_hits": {
-          "parties__highlight": {
-            "hits": {
-              "total": {
-                "value": 1,
-                "relation": "eq"
-              },
-              "max_score": 1.2809337,
-              "hits": [
+              "heading": "red heading",
+              "notes": [
                 {
-                  "_index": "documents-vd458ad60",
-                  "_id": "doc-2",
-                  "_nested": {
-                    "field": "parties",
-                    "offset": 1
-                  },
-                  "_score": 1.2809337,
-                  "highlight": {
-                    "parties.name": [
-                      "<em>Acme</em> Corp"
-                    ]
-                  }
+                  "text": "plain"
                 }
               ]
             }
-          },
-          "parties__highlight2": {
-            "hits": {
-              "total": {
-                "value": 0,
-                "relation": "eq"
-              },
-              "max_score": null,
-              "hits": []
-            }
-          }
-        }
-      },
-      {
-        "_index": "documents-vd458ad60",
-        "_id": "doc-3",
-        "_score": null,
-        "_source": {
-          "body": "The court grants summary judgment in favor of the plaintiff on all counts.",
-          "filed_at": "2024-03-10T09:15:00Z",
-          "firm_id": "firm-2",
-          "id": "doc-3",
-          "parties": [
-            {
-              "email": "",
-              "name": "Initech LLC",
-              "role": "PLAINTIFF"
-            },
-            {
-              "email": "",
-              "name": "Globex Corp",
-              "role": "DEFENDANT"
-            }
           ],
-          "size_bytes": 30000,
-          "tags": [
-            "civil"
-          ],
-          "title": "Order granting summary judgment",
-          "type": "ORDER"
+          "title": "Plain binder"
         },
         "sort": [
-          "doc-3"
+          "binder-2"
         ],
         "inner_hits": {
-          "parties__highlight": {
+          "sections__highlight2": {
             "hits": {
               "total": {
                 "value": 0,
@@ -212,25 +180,25 @@
               "hits": []
             }
           },
-          "parties__highlight2": {
+          "sections__highlight": {
             "hits": {
               "total": {
                 "value": 1,
                 "relation": "eq"
               },
-              "max_score": 1.2809337,
+              "max_score": 0.6931471,
               "hits": [
                 {
-                  "_index": "documents-vd458ad60",
-                  "_id": "doc-3",
+                  "_index": "binders",
+                  "_id": "binder-2",
                   "_nested": {
-                    "field": "parties",
-                    "offset": 1
+                    "field": "sections",
+                    "offset": 0
                   },
-                  "_score": 1.2809337,
+                  "_score": 0.6931471,
                   "highlight": {
-                    "parties.name": [
-                      "<em>Globex</em> Corp"
+                    "sections.heading": [
+                      "<em>red</em> heading"
                     ]
                   }
                 }

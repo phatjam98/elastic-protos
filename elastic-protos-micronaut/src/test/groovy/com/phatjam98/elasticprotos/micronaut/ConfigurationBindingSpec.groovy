@@ -69,6 +69,7 @@ import spock.lang.Specification
 @Property(name = 'elastic-protos.query.max-terms-size', value = '50')
 @Property(name = 'elastic-protos.query.max-aggregation-depth', value = '4')
 @Property(name = 'elastic-protos.query.max-aggregation-buckets', value = '65536')
+@Property(name = 'elastic-protos.query.max-inner-result-window', value = '200')
 @Property(name = 'elastic-protos.bulk.actions', value = '1000')
 @Property(name = 'elastic-protos.bulk.flush-interval', value = '250ms')
 @Property(name = 'elastic-protos.bulk.max-bytes', value = '10MB')
@@ -163,6 +164,7 @@ class ConfigurationBindingSpec extends Specification {
       maxTermsSize == 50
       maxAggregationDepth == 4
       maxAggregationBuckets == 65536L
+      maxInnerResultWindow == 200
     }
     config.bulk.actions == 1000
     config.bulk.flushInterval == Duration.ofMillis(250)
@@ -183,6 +185,7 @@ class ConfigurationBindingSpec extends Specification {
         .withMaxResultWindow(50000).withDefaultSize(25).withDefaultKeepAlive(Duration.ofMinutes(5))
         .withTrackTotalHits(TrackTotalHits.none()).withAllowScriptSort(true).withAllowRegex(true).withMaxPageSize(500)
         .withMaxTermsSize(50).withMaxAggregationDepth(4).withMaxAggregationBuckets(65536)
+        .withMaxInnerResultWindow(200)
     compiler.config() == queryConfig
     migrationOptions == MigrationOptions.builder().failure(FailurePolicy.CONTINUE).allowReindex(false)
         .deleteOldAfter(true).removedFields(RemovedFieldPolicy.REINDEX).defaultShards(3)
